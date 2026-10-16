@@ -1,0 +1,60 @@
+name: Windows verification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: desktop
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Install Electron runtime
+        run: npm run runtime:install
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Offline contracts and loopback HTTP tests
+        run: npm test
+      - name: Build unsigned x64 installer
+        run: npm run dist:win -- --publish never
+      - name: Hash installer
+        shell: pwsh
+        run: |
+          Get-ChildItem release -Filter *.exe | ForEach-Object {
+            $hash = Get-FileHash -Algorithm SHA256 $_.FullName
+            "$($hash.Hash)  $($_.Name)" | Add-Content release/SHA256SUMS.txt
+          }
+      - name: Upload unsigned build for Windows QA
+        uses: actions/upload-artifact@v7
+        with:
+          name: luma-windows-x64-unsigned
+          path: |
+            desktop/release/*.exe
+            desktop/release/*.exe.blockmap
+            desktop/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

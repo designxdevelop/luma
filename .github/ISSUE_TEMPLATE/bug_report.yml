@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a reproducible problem with Luma.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Luma, an open-source project by Design X Develop LLC.
+        Never include API keys, webhook tokens, passwords, or private account information.
+  - type: input
+    id: version
+    attributes:
+      label: Luma version, platform, and OS version
+      placeholder: "Desktop 0.2.0, Windows 11 x64; or native Mac 0.3.0, macOS version"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Govee model number
+      placeholder: "H6056"
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection
+      options:
+        - LAN
+        - Cloud
+        - Both
+        - Screen Sync
+        - Demo mode
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Describe the steps, expected behavior, and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Additional context
+      description: Optional screenshots or redacted Activity messages. Remove secrets and personal details first.

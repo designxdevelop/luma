@@ -1,0 +1,80 @@
+name: Linux verification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: desktop
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: linux-${{ matrix.arch }} (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each architecture is built AND smoke-tested natively on a runner of that architecture.
+          - { arch: x64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Install Electron runtime
+        run: npm run runtime:install
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Offline contracts and loopback HTTP tests
+        run: npm test
+      - name: Build unsigned ${{ matrix.arch }} tar.gz
+        run: |
+          npm run build
+          npx electron-builder --config electron-builder.linux.cjs --linux tar.gz --${{ matrix.arch }} --publish never
+      - name: Hash tarball
+        run: |
+          cd release-linux
+          sha256sum luma-*-linux-${{ matrix.arch }}.tar.gz | tee SHA256SUMS-${{ matrix.arch }}.txt
+      - name: Install smoke-test prerequisites (virtual display and Chromium libraries)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libgbm1 libnss3 libgtk-3-0t64 libasound2t64 libxss1 libxtst6 libatspi2.0-0t64
+      - name: Extract tarball and install the sandbox helper
+        run: |
+          mkdir -p "$RUNNER_TEMP/luma"
+          tar -xzf release-linux/luma-*-linux-${{ matrix.arch }}.tar.gz -C "$RUNNER_TEMP/luma" --strip-components=1
+          # The sandbox stays ON. Ubuntu 24.04 blocks unprivileged user namespaces, so install the
+          # setuid helper exactly as docs/LINUX.md describes (root-owned, mode 4755).
+          sudo chown root:root "$RUNNER_TEMP/luma/chrome-sandbox"
+          sudo chmod 4755 "$RUNNER_TEMP/luma/chrome-sandbox"
+      - name: Synthetic Electron smoke (demo only; never real capture)
+        run: xvfb-run -a node scripts/linux-smoke.mjs --app "$RUNNER_TEMP/luma/luma"
+      - name: Upload unsigned build
+        uses: actions/upload-artifact@v7
+        with:
+          name: luma-linux-${{ matrix.arch }}-unsigned
+          path: |
+            desktop/release-linux/luma-*-linux-${{ matrix.arch }}.tar.gz
+            desktop/release-linux/SHA256SUMS-${{ matrix.arch }}.txt
+          if-no-files-found: error
+          retention-days: 14

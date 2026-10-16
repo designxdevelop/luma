@@ -1,0 +1,28 @@
+name: macOS verification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Swift toolchain
+        run: swift --version
+      - name: Synthetic contracts and localhost webhook integration
+        run: ./scripts/verify.sh
+      - name: Build and verify ad-hoc signed app
+        run: ./scripts/build-app.sh

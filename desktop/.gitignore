@@ -1,0 +1,8 @@
+node_modules/
+dist/
+release/
+.npm-cache/
+.demo-data/
+.electron-cache/
+.builder-cache/
+release-linux/
