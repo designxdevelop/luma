@@ -8,7 +8,7 @@
 // pending target and resolve once the in-flight send settles (a UDP datagram already
 // handed to the OS cannot be recalled).
 
-import type { LightTarget } from '../shared/sync-math';
+import { DEFAULT_SYNC_SETTINGS, SYNC_LIMITS, type LightTarget } from '../shared/sync-math';
 
 export type StreamField = 'colorRgb' | 'brightness';
 export type StreamWrite = (deviceID: string, field: StreamField, value: number) => Promise<void>;
@@ -40,7 +40,7 @@ const defaultSchedule = (fn: () => void, ms: number) => { const t = setTimeout(f
 export class StreamSender {
   readonly stats = { sent: 0, errors: 0, superseded: 0 };
   private readonly lanes = new Map<string, Lane>();
-  private intervalMs = 500;
+  private intervalMs = 1000 / DEFAULT_SYNC_SETTINGS.updateHz;
   private stopped = false;
   private readonly now: () => number;
   private readonly schedule: NonNullable<StreamOptions['schedule']>;
@@ -50,10 +50,10 @@ export class StreamSender {
     this.schedule = options.schedule ?? defaultSchedule;
   }
 
-  /** Per-light packet rate cap, clamped to 0.5…5 per second. */
+  /** Per-light packet rate cap, clamped to SYNC_LIMITS.updateHz. */
   setRate(hz: number): void {
     if (!Number.isFinite(hz)) return;
-    this.intervalMs = 1000 / Math.max(0.5, Math.min(5, hz));
+    this.intervalMs = 1000 / Math.max(SYNC_LIMITS.updateHz[0], Math.min(SYNC_LIMITS.updateHz[1], hz));
   }
 
   /** Replaces the light's pending target (latest only). */

@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import type { CapabilityCommand, LightDevice, SyncRegion } from '../shared/types';
+import type { CapabilityCommand, LightDevice, SyncGrid } from '../shared/types';
 import { GoveeLan, type UdpSocketLike } from '../core/lan';
 import { brightness, power, rgb } from '../core/model';
 import { Home } from '../main/home';
@@ -20,8 +20,7 @@ async function until(cond: () => boolean, what: string, ms = 3000): Promise<void
   const end = Date.now() + ms;
   while (!cond()) { if (Date.now() > end) assert.fail(`Timed out waiting for ${what}`); await wait(5); }
 }
-const color = (r: number, g: number, b: number): Record<SyncRegion, [number, number, number]> =>
-  ({ full: [r, g, b], left: [r, g, b], right: [r, g, b], top: [r, g, b], bottom: [r, g, b] });
+const color = (r: number, g: number, b: number): SyncGrid => ({ columns: 1, rows: 1, cells: [1, r, g, b, 1, r, g, b] });
 
 // ---------- controller with a fake host ----------
 
@@ -81,13 +80,13 @@ test('nothing is sent before the first valid frame; stale, malformed, replayed a
   assert.equal(c.writes.length, 0);
   assert.equal(c.sync.frame('wrong', generation, 1, color(1, 0, 0)), false);
   assert.equal(c.sync.frame(token, generation + 1, 1, color(1, 0, 0)), false);
-  assert.equal(c.sync.frame(token, generation, 1, { ...color(1, 0, 0), full: [2, 0, 0] }), false);
-  assert.equal(c.sync.frame(token, generation, 1, { full: [1, 0, 0] }), false);
+  assert.equal(c.sync.frame(token, generation, 1, { ...color(1, 0, 0), cells: [1, 2, 0, 0, 1, 2, 0, 0] }), false);
+  assert.equal(c.sync.frame(token, generation, 1, { cells: [1, 1, 0, 0, 1, 1, 0, 0] }), false);
   assert.equal(c.writes.length, 0);
   assert.equal(c.sync.frame(token, generation, 1, color(1, 0, 0)), true);
   assert.equal(c.sync.phase, 'running');
   assert.equal(c.writes.length, 1);
-  assert.equal(c.sync.frame(token, generation, 2, color(0, 1, 0)), false, 'faster than 30 fps');
+  assert.equal(c.sync.frame(token, generation, 2, color(0, 1, 0)), false, 'faster than 60 fps');
   c.tick();
   assert.equal(c.sync.frame(token, generation, 1, color(0, 1, 0)), false, 'replayed seq');
   const stopped = c.sync.stop('Stopped.', true);
@@ -437,7 +436,7 @@ test('demo journey: synthetic frames stream to sample lights without changing co
   assert.ok(ids.length > 0);
   const { token, generation } = home.sync.start(ids.map((id, i) => ({ id, region: (['left', 'right', 'full'] as const)[i % 3] })), 'Synthetic film (demo)');
   for (let seq = 1; seq <= 4; seq++) {
-    assert.equal(home.sync.frame(token, generation, seq, { ...color(0.1 * seq, 0.05, 0.02), left: [0.8, 0.1, 0], right: [0, 0.2, 0.9] }), true);
+    assert.equal(home.sync.frame(token, generation, seq, { columns: 3, rows: 1, cells: [[0.8, 0.1, 0], [0.1 * seq, 0.05, 0.02], [0, 0.2, 0.9]].flatMap((c) => [1, ...c, 1, ...c]) }), true);
     await wait(40);
   }
   await until(() => home.snapshot().sync.stats.sent > 0, 'demo sends');

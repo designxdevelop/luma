@@ -9,7 +9,7 @@
 
 import { randomBytes } from 'node:crypto';
 import type { CapabilityCommand, LightDevice, SyncRegion, SyncSettings, SyncSource, SyncView } from '../shared/types';
-import { DEFAULT_SYNC_SETTINGS, REGIONS, exceedsThreshold, smooth, toTarget, validateSamples, validateSettings, type LightTarget, type LinearRGB } from '../shared/sync-math';
+import { DEFAULT_SYNC_SETTINGS, REGIONS, exceedsThreshold, gridColor, smooth, toTarget, validateGrid, validateSettings, type LightTarget, type LinearRGB } from '../shared/sync-math';
 import { StreamSender, type StreamField } from '../core/stream';
 import { LumaError, brightness, kelvin, message, rgb, supports } from '../core/model';
 
@@ -54,7 +54,8 @@ interface Member {
 }
 
 const MAX_LIGHTS = 32;
-const MIN_FRAME_MS = 1000 / 30;
+/** Renderer samples at ~30 fps; the gate leaves room for worker/IPC jitter. */
+const MIN_FRAME_MS = 1000 / 60;
 const defaultSchedule = (fn: () => void, ms: number) => { const t = setTimeout(fn, ms); t.unref?.(); return () => clearTimeout(t); };
 
 export class SyncController {
@@ -155,13 +156,14 @@ export class SyncController {
   awaitingCapture(generation: number): boolean { return this.phase === 'starting' && generation === this.generation; }
 
   /** One sampled frame. Returns false when stale, malformed, too fast or not running. */
-  frame(token: unknown, generation: unknown, seq: unknown, samples: unknown): boolean {
+  frame(token: unknown, generation: unknown, seq: unknown, input: unknown): boolean {
     if (!this.token || token !== this.token || generation !== this.generation) return false;
     if (this.phase !== 'running' && this.phase !== 'starting') return false;
     const now = this.now();
     if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq <= this.lastSeq || now - this.lastFrameAt < MIN_FRAME_MS) { this.stats.dropped++; return false; }
-    let regions;
-    try { regions = validateSamples(samples); } catch { this.stats.dropped++; return false; }
+    let grid;
+    try { grid = validateGrid(input); } catch { this.stats.dropped++; return false; }
+    const dtS = this.lastFrameAt ? (now - this.lastFrameAt) / 1000 : undefined;
     this.lastSeq = seq;
     this.lastFrameAt = now;
     this.stats.frames++;
@@ -169,7 +171,9 @@ export class SyncController {
     this.arm(this.options.stallMs ?? 10_000, 'No frames arrived; capture stalled.');
     for (const m of this.members.values()) {
       if (m.excluded) continue;
-      m.smoothed = smooth(m.smoothed, regions[m.region], this.settings.smoothing);
+      // Region colors use the current settings, so depth and vivid apply from the next frame.
+      const sample = gridColor(grid, m.region, this.settings.edgeDepth, this.settings.vivid);
+      m.smoothed = smooth(m.smoothed, sample, this.settings.smoothing, dtS);
       const target = toTarget(m.smoothed, this.settings.brightnessCap);
       if (!exceedsThreshold(m.target, target, this.settings.threshold)) continue;
       m.target = target;

@@ -430,12 +430,22 @@ function aboutView(s: AppSnapshot): string {
 
 // ---------------- Screen Sync ----------------
 
-const REGION_LABELS: Array<[SyncRegion, string]> = [['full', 'Whole picture'], ['left', 'Left side'], ['right', 'Right side'], ['top', 'Top'], ['bottom', 'Bottom']];
+const REGION_GROUPS: Array<[string, Array<[SyncRegion, string]>]> = [
+  ['Whole picture and thirds', [['full', 'Whole picture'], ['left', 'Left third'], ['right', 'Right third'], ['top', 'Top third'], ['bottom', 'Bottom third']]],
+  ['Edges', [['edgeLeft', 'Left edge'], ['edgeRight', 'Right edge'], ['edgeTop', 'Top edge'], ['edgeBottom', 'Bottom edge']]],
+  ['Corners', [['cornerTopLeft', 'Top-left corner'], ['cornerTopRight', 'Top-right corner'], ['cornerBottomLeft', 'Bottom-left corner'], ['cornerBottomRight', 'Bottom-right corner']]],
+  ['Half edges', [
+    ['edgeLeftUpper', 'Left edge, upper half'], ['edgeLeftLower', 'Left edge, lower half'], ['edgeRightUpper', 'Right edge, upper half'], ['edgeRightLower', 'Right edge, lower half'],
+    ['edgeTopLeft', 'Top edge, left half'], ['edgeTopRight', 'Top edge, right half'], ['edgeBottomLeft', 'Bottom edge, left half'], ['edgeBottomRight', 'Bottom edge, right half'],
+  ]],
+];
+const REGION_LABELS = REGION_GROUPS.flatMap(([, regions]) => regions);
 const SYNC_SLIDERS: Array<{ key: keyof SyncSettings; label: string; unit: string; range: [number, number]; scale: number; decimals?: boolean }> = [
   { key: 'smoothing', label: 'Smoothing', unit: '%', range: [0, 95], scale: 100 },
   { key: 'threshold', label: 'Change threshold', unit: '%', range: [0.5, 20], scale: 100, decimals: true },
   { key: 'brightnessCap', label: 'Brightness cap', unit: '%', range: [1, 100], scale: 1 },
-  { key: 'updateHz', label: 'Update speed', unit: ' per second', range: [0.5, 5], scale: 1, decimals: true },
+  { key: 'updateHz', label: 'Update speed', unit: ' per second', range: [0.5, 10], scale: 1, decimals: true },
+  { key: 'edgeDepth', label: 'Edge depth', unit: '%', range: [5, 33], scale: 100 },
 ];
 
 /** Persistent capture indicator, shown on every view while a session exists. */
@@ -491,7 +501,7 @@ function syncView(s: AppSnapshot): string {
       <h2 id="sync-lights-title">Lights</h2>
       ${idle ? `${eligible.length ? `<ul class="sync-lights">${eligible.map((e) => `<li>
           <label class="choice"><input type="checkbox" data-action="sync-light" data-id="${esc(e.id)}" ${state.syncLights.has(e.id) ? 'checked' : ''}><span>${esc(e.name)}</span></label>
-          <select data-action="sync-region" data-id="${esc(e.id)}" aria-label="${esc(e.name)} screen area">${REGION_LABELS.map(([r, label]) => `<option value="${r}" ${(state.syncLights.get(e.id) ?? 'full') === r ? 'selected' : ''}>${label}</option>`).join('')}</select>
+          <select data-action="sync-region" data-id="${esc(e.id)}" aria-label="${esc(e.name)} screen area">${REGION_GROUPS.map(([group, regions]) => `<optgroup label="${group}">${regions.map(([r, label]) => `<option value="${r}" ${(state.syncLights.get(e.id) ?? 'full') === r ? 'selected' : ''}>${label}</option>`).join('')}</optgroup>`).join('')}</select>
         </li>`).join('')}</ul>` : '<p class="hint">No light can stream right now.</p>'}
         ${blocked.length ? `<details class="advanced"><summary>Unavailable lights (${blocked.length})</summary><ul class="sync-blocked">${blocked.map((e) => `<li><span>${esc(e.name)}</span><span class="sub">${esc(e.reason ?? '')}</span></li>`).join('')}</ul></details>` : ''}
         <p class="hint">Only lights that are on and reachable with Govee LAN Control can stream; Screen Sync never uses the cloud. It does not turn lights on.</p>`
@@ -504,7 +514,14 @@ function syncView(s: AppSnapshot): string {
     <section class="card-block" aria-labelledby="sync-tune-title">
       <h2 id="sync-tune-title">Response</h2>
       ${SYNC_SLIDERS.map((d) => syncSlider(s, d)).join('')}
-      <p class="hint">Each light gets at most ${y.settings.updateHz.toFixed(1)} updates per second over LAN.</p>
+      <p class="hint">Each light gets at most ${y.settings.updateHz.toFixed(1)} updates per second over LAN. Edge depth sets how far edges, corners and half edges reach into the picture.</p>
+      <div class="row"><span>Colors</span>
+        <div class="segmented" role="radiogroup" aria-label="Colors">
+          <button role="radio" aria-checked="${!y.settings.vivid}" data-action="sync-vivid" data-value="0">Average</button>
+          <button role="radio" aria-checked="${y.settings.vivid}" data-action="sync-vivid" data-value="1">Vivid</button>
+        </div>
+      </div>
+      <p class="hint">Vivid favors colorful parts of the picture over gray, white and text, so lights stay colorful.</p>
       <div class="row"><span>When I stop</span>
         <div class="segmented" role="radiogroup" aria-label="When I stop">
           <button role="radio" aria-checked="${!y.settings.restore}" data-action="sync-restore" data-value="0">Leave lights as they are</button>
@@ -562,6 +579,7 @@ document.addEventListener('click', (event) => {
     }
     case 'sync-stop': pump.stop(); void act(() => luma.syncStop()); break;
     case 'sync-restore': void act(() => luma.syncSettings({ restore: target.dataset.value === '1' })); break;
+    case 'sync-vivid': void act(() => luma.syncSettings({ vivid: target.dataset.value === '1' })); break;
   }
 });
 

@@ -4,9 +4,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_SYNC_SETTINGS, REGIONS, exceedsThreshold, letterbox, linearToSrgb, regionAverages, smooth, srgbToLinear,
-  toTarget, validateSamples, validateSettings, type LinearRGB,
+  DEFAULT_SYNC_SETTINGS, REGIONS, exceedsThreshold, gridColor, gridColors, letterbox, linearToSrgb, sampleGrid, smooth, srgbToLinear,
+  toTarget, validateGrid, validateSettings, type LinearRGB,
 } from '../shared/sync-math';
+
+const regionAverages = (px: ArrayLike<number>, w: number, h: number) => gridColors(sampleGrid(px, w, h));
 
 type Rgb = readonly [number, number, number];
 
@@ -90,17 +92,31 @@ test('regionAverages picks the right thirds of the cropped picture', () => {
   const expected: Record<string, LinearRGB> = {
     full: [third, third, 0], left: [1, third, 0], right: [0, third, 0], top: [third, 1, 0], bottom: [third, 0, 0],
   };
-  for (const region of REGIONS) {
+  for (const region of ['full', 'left', 'right', 'top', 'bottom'] as const) {
     expected[region]!.forEach((v, i) => near(r[region][i]!, v, 1e-9));
   }
 });
 
-test('smooth: 0 follows instantly, 0.5 halves the step, no previous copies next', () => {
-  const next: LinearRGB = [1, 0.5, 0];
+test('smooth: 0 follows instantly, noise keeps the smoothing, no previous copies next', () => {
+  const next: LinearRGB = [0.501, 0.5, 0.5];
+  const moved = (c: LinearRGB) => (c[0] - 0.5) / 0.001;
   assert.deepEqual(smooth(undefined, next, 0.9), next);
   assert.notEqual(smooth(undefined, next, 0.9), next);
-  assert.deepEqual(smooth([0, 0, 0], next, 0), next);
-  assert.deepEqual(smooth([0, 0, 0], next, 0.5), [0.5, 0.25, 0]);
+  assert.deepEqual(smooth([0.5, 0.5, 0.5], next, 0), next);
+  assert.ok(Math.abs(moved(smooth([0.5, 0.5, 0.5], next, 0.5)) - 0.5) < 0.01);
+});
+
+test('smooth: normalized to elapsed time, so feel does not depend on frame rate', () => {
+  const moved = (dt: number) => (smooth([0.5, 0.5, 0.5], [0.501, 0.5, 0.5], 0.5, dt)[0] - 0.5) / 0.001;
+  assert.ok(Math.abs(moved(0.2) - 0.75) < 0.01);
+  assert.ok(Math.abs(moved(0.05) - (1 - Math.sqrt(0.5))) < 0.01);
+  assert.equal(moved(NaN), moved(0.1));
+});
+
+test('smooth: large jumps bypass smoothing; mid-sized jumps ease off partway', () => {
+  assert.deepEqual(smooth([0.01, 0.01, 0.01], [0.8, 0.2, 0.1], 0.95), [0.8, 0.2, 0.1]);
+  const moved = (smooth([0.2, 0.2, 0.2], [0.25, 0.2, 0.2], 0.5)[0] - 0.2) / 0.05;
+  assert.ok(moved > 0.55 && moved < 1, String(moved));
 });
 
 test('toTarget: full-saturation hue, brightness scaled by cap, floor of 1, black neutral', () => {
@@ -125,7 +141,7 @@ test('exceedsThreshold: dead band on color and brightness; no previous sends', (
 
 test('validateSettings merges partial updates and accepts inclusive bounds', () => {
   assert.deepEqual(validateSettings({}, DEFAULT_SYNC_SETTINGS), DEFAULT_SYNC_SETTINGS);
-  assert.deepEqual(validateSettings({ updateHz: 3, restore: true }, DEFAULT_SYNC_SETTINGS), { ...DEFAULT_SYNC_SETTINGS, updateHz: 3, restore: true });
+  assert.deepEqual(validateSettings({ updateHz: 3, restore: true, vivid: true, edgeDepth: 0.2 }, DEFAULT_SYNC_SETTINGS), { ...DEFAULT_SYNC_SETTINGS, updateHz: 3, restore: true, vivid: true, edgeDepth: 0.2 });
   assert.doesNotThrow(() => validateSettings({ smoothing: 0, threshold: 0.2, brightnessCap: 1, updateHz: 0.5 }, DEFAULT_SYNC_SETTINGS));
   assert.deepEqual(DEFAULT_SYNC_SETTINGS.restore, false); // base is never mutated
 });
@@ -133,27 +149,70 @@ test('validateSettings merges partial updates and accepts inclusive bounds', () 
 test('validateSettings rejects bad values, unknown keys and bad roots', () => {
   const bad: unknown[] = [
     { smoothing: NaN }, { smoothing: Infinity }, { smoothing: 0.96 }, { smoothing: -0.1 }, { smoothing: '0.5' },
-    { threshold: 0.001 }, { threshold: 0.3 }, { brightnessCap: 0 }, { brightnessCap: 101 }, { updateHz: 6 }, { updateHz: 0.1 },
+    { threshold: 0.001 }, { threshold: 0.3 }, { brightnessCap: 0 }, { brightnessCap: 101 }, { updateHz: 11 }, { updateHz: 0.1 }, { edgeDepth: 0.04 }, { edgeDepth: 0.34 }, { vivid: 1 },
     { bogus: 1 }, { restore: 'yes' }, { restore: 1 }, null, [], 'x', 5,
   ];
   for (const input of bad) assert.throws(() => validateSettings(input, DEFAULT_SYNC_SETTINGS), /Invalid Screen Sync/, JSON.stringify(input));
 });
 
-test('validateSamples accepts exactly five regions of three values in [0,1]', () => {
-  const good = () => ({ full: [0, 0.5, 1], left: [0, 0, 0], right: [1, 1, 1], top: [0.1, 0.2, 0.3], bottom: [0.4, 0.5, 0.6] });
-  assert.deepEqual(validateSamples(good()), good());
-  const mutate = (fn: (o: Record<string, unknown>) => void) => { const o = good() as Record<string, unknown>; fn(o); return o; };
+test('validateGrid accepts consistent bounded grids and rejects everything else', () => {
+  const good = () => ({ columns: 2, rows: 1, cells: [4, 1, 2, 3, 0.4, 0.1, 0.2, 0.3, 1, 0, 0, 0, 1.05, 0, 0, 0] });
+  assert.deepEqual(validateGrid(good()), good());
+  const g = sampleGrid(image(96, 54, (x) => (x < 48 ? [255, 0, 0] : [0, 0, 255])), 96, 54);
+  assert.deepEqual(validateGrid(g), g);
+  const mutate = (fn: (o: { columns: unknown; rows: unknown; cells: any; [k: string]: unknown }) => void) => { const o = good() as never; fn(o); return o; };
   const bad: unknown[] = [
-    mutate((o) => { delete o.top; }),
-    mutate((o) => { o.extra = [0, 0, 0]; }),
-    mutate((o) => { o.left = [0, 0]; }),
-    mutate((o) => { o.left = [0, 0, 0, 0]; }),
-    mutate((o) => { o.left = [0, NaN, 0]; }),
-    mutate((o) => { o.left = [0, 1.1, 0]; }),
-    mutate((o) => { o.left = [0, -0.1, 0]; }),
-    mutate((o) => { o.left = ['0', 0, 0]; }),
-    mutate((o) => { o.left = 'abc'; }),
-    [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]], null, 'x',
+    mutate((o) => { o.extra = 1; }),
+    mutate((o) => { o.columns = 31; }),
+    mutate((o) => { o.rows = 0; }),
+    mutate((o) => { o.columns = 1.5; }),
+    mutate((o) => { o.cells.pop(); }),
+    mutate((o) => { o.cells[0] = 0; }),            // empty cell
+    mutate((o) => { o.cells[0] = 2.5; }),          // fractional count
+    mutate((o) => { o.cells[1] = 5; }),            // sum above pixel count
+    mutate((o) => { o.cells[2] = NaN; }),
+    mutate((o) => { o.cells[3] = -0.1; }),
+    mutate((o) => { o.cells[4] = 5; }),            // weight above 1.05 per pixel
+    mutate((o) => { o.cells[5] = 0.5; }),          // weighted sum above weight
+    mutate((o) => { o.cells[6] = '0'; }),
+    mutate((o) => { o.cells = 'abc'; }),
+    null, [], 'x',
   ];
-  for (const input of bad) assert.throws(() => validateSamples(input), /Invalid frame samples/);
+  for (const input of bad) assert.throws(() => validateGrid(input), /Invalid frame grid/, JSON.stringify(input));
+});
+
+test('edge bands follow the depth setting; thirds do not', () => {
+  const g = sampleGrid(image(160, 90, (x) => (x < 32 ? [255, 0, 0] : x >= 128 ? [0, 0, 255] : [128, 128, 128])), 160, 90);
+  assert.deepEqual(gridColor(g, 'edgeLeft', 0.15, false), [1, 0, 0]);
+  assert.deepEqual(gridColor(g, 'edgeRight', 0.15, false), [0, 0, 1]);
+  const deep = gridColor(g, 'edgeLeft', 0.33, false);
+  assert.ok(deep[0] < 1 && deep[1] > 0);
+  assert.deepEqual(gridColor(g, 'left', 0.05, false), gridColor(g, 'left', 0.33, false));
+});
+
+test('corners and half edges pick their quadrant', () => {
+  const quad = (x: number, y: number): Rgb => (y < 45 ? (x < 80 ? [255, 0, 0] : [0, 255, 0]) : (x < 80 ? [0, 0, 255] : [255, 255, 0]));
+  const c = gridColors(sampleGrid(image(160, 90, quad), 160, 90), 0.2);
+  const expect: Array<[keyof typeof c, LinearRGB]> = [
+    ['cornerTopLeft', [1, 0, 0]], ['cornerTopRight', [0, 1, 0]], ['cornerBottomLeft', [0, 0, 1]], ['cornerBottomRight', [1, 1, 0]],
+    ['edgeTopLeft', [1, 0, 0]], ['edgeTopRight', [0, 1, 0]], ['edgeBottomLeft', [0, 0, 1]], ['edgeBottomRight', [1, 1, 0]],
+    ['edgeLeftUpper', [1, 0, 0]], ['edgeLeftLower', [0, 0, 1]], ['edgeRightUpper', [0, 1, 0]], ['edgeRightLower', [1, 1, 0]],
+    ['edgeTop', [0.5, 0.5, 0]],
+  ];
+  for (const [region, rgb] of expect) rgb.forEach((v, i) => near(c[region][i]!, v, 1e-9));
+});
+
+test('vivid favors color over white; gray-only pictures keep their color', () => {
+  const g = sampleGrid(image(160, 90, (x) => (x < 16 ? [255, 0, 0] : [255, 255, 255])), 160, 90);
+  const plain = gridColor(g, 'full', 0.15, false), vivid = gridColor(g, 'full', 0.15, true);
+  assert.ok(plain[1] > 0.85);
+  assert.ok(vivid[1] < plain[1] / 2 && vivid[0] > 0.99);
+  const gray = sampleGrid(image(32, 18, () => [128, 128, 128]), 32, 18);
+  gridColor(gray, 'full', 0.15, true).forEach((v) => near(v, srgbToLinear(128)));
+});
+
+test('tiny pictures still cover every region', () => {
+  const g = sampleGrid(image(4, 2, () => [255, 0, 0]), 4, 2);
+  assert.equal(g.columns, 4);
+  for (const region of REGIONS) assert.deepEqual(gridColor(g, region, 0.05, false), [1, 0, 0], region);
 });

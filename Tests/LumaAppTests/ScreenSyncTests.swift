@@ -12,8 +12,8 @@ import LumaCore
     var failure: ScreenCaptureEnd?
     var gated = false
     private var gate: CheckedContinuation<Void, Never>?
-    func start(onFrame: @escaping @MainActor (RegionColors) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) async throws {
-        starts += 1; self.onFrame = onFrame; self.onEnd = onEnd
+    func start(onFrame: @escaping @MainActor (ScreenGrid, ContinuousClock.Instant) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) async throws {
+        starts += 1; self.onFrame = { onFrame(ScreenGrid(uniform: $0[.full]), .now) }; self.onEnd = onEnd
         if gated { await withCheckedContinuation { gate = $0 } }
         if let failure { throw failure }
     }
@@ -441,15 +441,36 @@ private final class ScreenSyncCloudProtocol: URLProtocol, @unchecked Sendable {
         #expect(second.settings.updateHz == 4 && second.regions == ["lamp": .left])
         #expect(second.phase == .idle && second.source == nil)
         defaults.set(Data(#"{"smoothing":5,"threshold":-1,"brightnessCap":1000,"updateHz":99}"#.utf8), forKey: "screenSync.settings")
-        #expect(ScreenSync(defaults: defaults).settings == ScreenSyncSettings().clamped().with { $0.smoothing = 0.95; $0.threshold = 0.005; $0.brightnessCap = 100; $0.updateHz = 5 })
+        #expect(ScreenSync(defaults: defaults).settings == ScreenSyncSettings().clamped().with { $0.smoothing = 0.95; $0.threshold = 0.005; $0.brightnessCap = 100; $0.updateHz = 10 })
+    }
+
+    @Test func framesTickOnArrivalWithoutWaitingForTheTicker() async {
+        let f = Fixture(); defer { f.finish() }
+        f.sync.settings.smoothing = 0
+        await f.start()
+        f.session.onFrame?(red)
+        f.session.onFrame?(blue)                       // coalesced: one tick, latest frame
+        #expect(f.sent.isEmpty, "The frame tick is scheduled, not run inline")
+        for _ in 0..<20 where f.sent.isEmpty { await Task.yield() }
+        #expect(f.sent.map(\.target.rgb) == [0x0000FF])
+    }
+
+    @Test func latencyLogSummarizesWindowsWithoutSamples() {
+        var log = LatencyLog(every: 4)
+        #expect(log.record(.milliseconds(40)) == nil)
+        #expect(log.record(.milliseconds(10)) == nil)
+        #expect(log.record(.milliseconds(30)) == nil)
+        #expect(log.record(.milliseconds(20)) == "Screen Sync capture→send ms: n=4 p50=30 p95=40 max=40")
+        #expect(log.record(.milliseconds(5)) == nil)   // a new window starts
     }
 
     @Test func demoSampleFramesRunThroughTheAnalyzer() throws {
-        let colors = try #require(SampleScreenCapture.frame(phase: 0))
+        let colors = try #require(SampleScreenCapture.frame(phase: 0)).colors()
         // Hue 0 is red on the left; bars are cropped so the picture isn't dimmed.
-        #expect(colors.left.r > colors.left.g && colors.left.r > colors.left.b)
-        #expect(colors.left != colors.right)
-        #expect(max(colors.top.r, colors.top.g, colors.top.b) > 0.3)
+        let left = colors[.left], top = colors[.top]
+        #expect(left.r > left.g && left.r > left.b)
+        #expect(left != colors[.right])
+        #expect(max(top.r, top.g, top.b) > 0.3)
     }
 }
 

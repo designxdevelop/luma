@@ -5,11 +5,60 @@ import Foundation
 // cropped symmetrically, and lights get a full-saturation hue plus a capped
 // brightness. Nothing here touches capture, networking, or the UI.
 
+/// What part of the picture a light follows. Raw values are persisted and match
+/// the Windows/Linux port; never rename them.
 public enum ScreenRegion: String, Codable, CaseIterable, Sendable, Identifiable {
     case full, left, right, top, bottom
+    case edgeLeft, edgeRight, edgeTop, edgeBottom
+    case cornerTopLeft, cornerTopRight, cornerBottomLeft, cornerBottomRight
+    case edgeLeftUpper, edgeLeftLower, edgeRightUpper, edgeRightLower
+    case edgeTopLeft, edgeTopRight, edgeBottomLeft, edgeBottomRight
+
+    public enum Group: String, CaseIterable, Sendable, Identifiable {
+        case thirds = "Whole picture and thirds", edges = "Edges", corners = "Corners", halves = "Half edges"
+        public var id: Self { self }
+        public var regions: [ScreenRegion] { ScreenRegion.allCases.filter { $0.group == self } }
+    }
+
     public var id: Self { self }
+    public var group: Group {
+        switch self {
+        case .full, .left, .right, .top, .bottom: .thirds
+        case .edgeLeft, .edgeRight, .edgeTop, .edgeBottom: .edges
+        case .cornerTopLeft, .cornerTopRight, .cornerBottomLeft, .cornerBottomRight: .corners
+        default: .halves
+        }
+    }
     public var title: String {
-        switch self { case .full: "Whole picture"; case .left: "Left"; case .right: "Right"; case .top: "Top"; case .bottom: "Bottom" }
+        switch self {
+        case .full: "Whole picture"; case .left: "Left third"; case .right: "Right third"; case .top: "Top third"; case .bottom: "Bottom third"
+        case .edgeLeft: "Left edge"; case .edgeRight: "Right edge"; case .edgeTop: "Top edge"; case .edgeBottom: "Bottom edge"
+        case .cornerTopLeft: "Top-left corner"; case .cornerTopRight: "Top-right corner"
+        case .cornerBottomLeft: "Bottom-left corner"; case .cornerBottomRight: "Bottom-right corner"
+        case .edgeLeftUpper: "Left edge, upper half"; case .edgeLeftLower: "Left edge, lower half"
+        case .edgeRightUpper: "Right edge, upper half"; case .edgeRightLower: "Right edge, lower half"
+        case .edgeTopLeft: "Top edge, left half"; case .edgeTopRight: "Top edge, right half"
+        case .edgeBottomLeft: "Bottom edge, left half"; case .edgeBottomRight: "Bottom edge, right half"
+        }
+    }
+
+    /// Area as fractions of the cropped picture: x from `x0` to `x1`, y from `y0` (top) to `y1`.
+    /// Edges, corners and half edges are `depth` deep.
+    public func rect(depth d: Double) -> (x0: Double, x1: Double, y0: Double, y1: Double) {
+        let t = 1.0 / 3, n = 1 - d
+        switch self {
+        case .full: return (0, 1, 0, 1)
+        case .left: return (0, t, 0, 1); case .right: return (1 - t, 1, 0, 1)
+        case .top: return (0, 1, 0, t); case .bottom: return (0, 1, 1 - t, 1)
+        case .edgeLeft: return (0, d, 0, 1); case .edgeRight: return (n, 1, 0, 1)
+        case .edgeTop: return (0, 1, 0, d); case .edgeBottom: return (0, 1, n, 1)
+        case .cornerTopLeft: return (0, d, 0, d); case .cornerTopRight: return (n, 1, 0, d)
+        case .cornerBottomLeft: return (0, d, n, 1); case .cornerBottomRight: return (n, 1, n, 1)
+        case .edgeLeftUpper: return (0, d, 0, 0.5); case .edgeLeftLower: return (0, d, 0.5, 1)
+        case .edgeRightUpper: return (n, 1, 0, 0.5); case .edgeRightLower: return (n, 1, 0.5, 1)
+        case .edgeTopLeft: return (0, 0.5, 0, d); case .edgeTopRight: return (0.5, 1, 0, d)
+        case .edgeBottomLeft: return (0, 0.5, n, 1); case .edgeBottomRight: return (0.5, 1, n, 1)
+        }
     }
 }
 
@@ -20,32 +69,92 @@ public struct LinearColor: Equatable, Sendable {
     public static let black = LinearColor(0, 0, 0)
 }
 
+/// One color per region. Missing regions read as black.
 public struct RegionColors: Equatable, Sendable {
-    public var full: LinearColor, left: LinearColor, right: LinearColor, top: LinearColor, bottom: LinearColor
-    public init(full: LinearColor, left: LinearColor, right: LinearColor, top: LinearColor, bottom: LinearColor) {
-        self.full = full; self.left = left; self.right = right; self.top = top; self.bottom = bottom
-    }
-    public init(all color: LinearColor) { self.init(full: color, left: color, right: color, top: color, bottom: color) }
+    private var colors: [ScreenRegion: LinearColor]
+    public init(all color: LinearColor) { colors = Dictionary(uniqueKeysWithValues: ScreenRegion.allCases.map { ($0, color) }) }
     public subscript(region: ScreenRegion) -> LinearColor {
-        get { switch region { case .full: full; case .left: left; case .right: right; case .top: top; case .bottom: bottom } }
-        set { switch region { case .full: full = newValue; case .left: left = newValue; case .right: right = newValue; case .top: top = newValue; case .bottom: bottom = newValue } }
+        get { colors[region] ?? .black }
+        set { colors[region] = newValue }
+    }
+}
+
+/// A frame reduced to a coarse grid over the picture (bars cropped). Each cell
+/// holds its pixel count and sums: linear r, g, b, then the vivid weight and
+/// weight × linear r, g, b. Region colors are computed from it with the
+/// current edge depth and vivid setting. Only these sums leave capture.
+public struct ScreenGrid: Equatable, Sendable {
+    public static let maxColumns = 30, maxRows = 18, valuesPerCell = 8
+    public let columns: Int, rows: Int
+    public let cells: [Double]
+    public init?(columns: Int, rows: Int, cells: [Double]) {
+        guard (1...Self.maxColumns).contains(columns), (1...Self.maxRows).contains(rows),
+              cells.count == columns * rows * Self.valuesPerCell else { return nil }
+        self.columns = columns; self.rows = rows; self.cells = cells
+    }
+    /// A single-color grid, for synthetic sources and tests.
+    public init(uniform c: LinearColor, weight: Double = 1) {
+        columns = 1; rows = 1; cells = [1, c.r, c.g, c.b, weight, weight * c.r, weight * c.g, weight * c.b]
+    }
+
+    /// Cell index range covering the fraction `a..<b` of `n` cells; never empty.
+    static func span(_ a: Double, _ b: Double, _ n: Int) -> Range<Int> {
+        let lo = min(Int((a * Double(n)).rounded()), n - 1)
+        return lo..<max(lo + 1, min(Int((b * Double(n)).rounded()), n))
+    }
+
+    public func color(_ region: ScreenRegion, depth: Double, vivid: Bool) -> LinearColor {
+        let r = region.rect(depth: depth)
+        var s = [Double](repeating: 0, count: Self.valuesPerCell)
+        for y in Self.span(r.y0, r.y1, rows) {
+            for x in Self.span(r.x0, r.x1, columns) {
+                let o = (y * columns + x) * Self.valuesPerCell
+                for i in 0..<Self.valuesPerCell { s[i] += cells[o + i] }
+            }
+        }
+        let (n, base) = vivid ? (s[4], 5) : (s[0], 1)
+        return n > 0 ? LinearColor(s[base] / n, s[base + 1] / n, s[base + 2] / n) : .black
+    }
+
+    public func colors(depth: Double = ScreenSyncSettings().edgeDepth, vivid: Bool = false) -> RegionColors {
+        var out = RegionColors(all: .black)
+        for region in ScreenRegion.allCases { out[region] = color(region, depth: depth, vivid: vivid) }
+        return out
     }
 }
 
 public struct ScreenSyncSettings: Codable, Equatable, Sendable {
-    /// 0 follows instantly; 0.95 is very slow.
-    public var smoothing: Double = 0.6
+    /// Share of the old color kept per 100 ms (`ScreenColorMath.smoothingStep`).
+    /// 0 follows instantly; 0.95 is very slow. Large jumps ease off automatically.
+    public var smoothing: Double = 0.4
     /// Dead band as a fraction of the channel/brightness range.
-    public var threshold: Double = 0.03
+    public var threshold: Double = 0.02
     /// Highest brightness Screen Sync sends, 1–100%.
     public var brightnessCap: Double = 80
-    /// Per-light LAN update cap. Govee LAN is unacknowledged UDP, so stay conservative.
-    public var updateHz: Double = 2
+    /// Per-light LAN update cap. Govee LAN is unacknowledged UDP: sends are
+    /// latest-only with no retries, so a dropped datagram is replaced by the next
+    /// one rather than queued. 10 Hz bounds a light at ≤20 small datagrams/s.
+    public var updateHz: Double = 5
+    /// How deep edges, corners and half edges reach into the picture, as a share of its width or height.
+    public var edgeDepth: Double = 0.15
+    /// Weights colorful pixels over gray and white ones, so color isn't washed out by UI or text.
+    public var vivid = false
     public static let smoothingRange = 0.0...0.95
     public static let thresholdRange = 0.005...0.2
     public static let brightnessCapRange = 1.0...100
-    public static let updateHzRange = 0.5...5.0
+    public static let updateHzRange = 0.5...10.0
+    public static let edgeDepthRange = 0.05...0.33
     public init() {}
+    /// Settings saved before a field existed keep their other values.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self), d = Self()
+        smoothing = try c.decodeIfPresent(Double.self, forKey: .smoothing) ?? d.smoothing
+        threshold = try c.decodeIfPresent(Double.self, forKey: .threshold) ?? d.threshold
+        brightnessCap = try c.decodeIfPresent(Double.self, forKey: .brightnessCap) ?? d.brightnessCap
+        updateHz = try c.decodeIfPresent(Double.self, forKey: .updateHz) ?? d.updateHz
+        edgeDepth = try c.decodeIfPresent(Double.self, forKey: .edgeDepth) ?? d.edgeDepth
+        vivid = try c.decodeIfPresent(Bool.self, forKey: .vivid) ?? d.vivid
+    }
     /// Clamps every field; non-finite values fall back to defaults.
     public func clamped() -> Self {
         let d = Self()
@@ -55,6 +164,7 @@ public struct ScreenSyncSettings: Codable, Equatable, Sendable {
         s.threshold = fit(threshold, Self.thresholdRange, d.threshold)
         s.brightnessCap = fit(brightnessCap, Self.brightnessCapRange, d.brightnessCap)
         s.updateHz = fit(updateHz, Self.updateHzRange, d.updateHz)
+        s.edgeDepth = fit(edgeDepth, Self.edgeDepthRange, d.edgeDepth)
         return s
     }
 }
@@ -100,36 +210,39 @@ public enum ScreenColorMath {
 
     public struct Bands: Equatable, Sendable { public var top = 0, bottom = 0, left = 0, right = 0 }
 
-    /// Average colors of a 32BGRA frame (bytes B, G, R, A). Returns nil for an
-    /// empty, oversized, or truncated buffer. Rows may be padded (`bytesPerRow`).
-    public static func analyze(_ bytes: UnsafeRawBufferPointer, width: Int, height: Int, bytesPerRow: Int) -> RegionColors? {
+    /// Every pixel counts at least this much in vivid mode, so gray scenes still have a color.
+    static let vividFloor = 0.05
+
+    /// Reduces a 32BGRA frame (bytes B, G, R, A) to a grid of linear-light sums,
+    /// with letterbox bars cropped. Returns nil for an empty, oversized, or
+    /// truncated buffer. Rows may be padded (`bytesPerRow`).
+    public static func analyze(_ bytes: UnsafeRawBufferPointer, width: Int, height: Int, bytesPerRow: Int) -> ScreenGrid? {
         guard width > 0, height > 0, width <= maxPixels / height, bytesPerRow >= width * 4,
               bytes.count >= (height - 1) * bytesPerRow + width * 4 else { return nil }
         let px = bytes.bindMemory(to: UInt8.self)
         let bands = letterbox(px, width: width, height: height, bytesPerRow: bytesPerRow)
-        let x0 = bands.left, x1 = width - bands.right, y0 = bands.top, y1 = height - bands.bottom
-        let iw = Double(x1 - x0), ih = Double(y1 - y0)
-        let lx = Double(x0) + iw / 3, rx = Double(x0) + 2 * iw / 3, ty = Double(y0) + ih / 3, by = Double(y0) + 2 * ih / 3
-        var sums = [ScreenRegion: (Double, Double, Double, Int)]()
-        for region in ScreenRegion.allCases { sums[region] = (0, 0, 0, 0) }
-        func add(_ region: ScreenRegion, _ r: Double, _ g: Double, _ b: Double) {
-            let s = sums[region]!; sums[region] = (s.0 + r, s.1 + g, s.2 + b, s.3 + 1)
-        }
-        for y in y0..<y1 {
-            let row = y * bytesPerRow
-            for x in x0..<x1 {
-                let o = row + x * 4
-                let r = linearTable[Int(px[o + 2])], g = linearTable[Int(px[o + 1])], b = linearTable[Int(px[o])]
-                add(.full, r, g, b)
-                if Double(x) < lx { add(.left, r, g, b) }
-                if Double(x) >= rx { add(.right, r, g, b) }
-                if Double(y) < ty { add(.top, r, g, b) }
-                if Double(y) >= by { add(.bottom, r, g, b) }
+        let x0 = bands.left, iw = width - bands.right - x0, y0 = bands.top, ih = height - bands.bottom - y0
+        let columns = min(ScreenGrid.maxColumns, iw), rows = min(ScreenGrid.maxRows, ih), k = ScreenGrid.valuesPerCell
+        // Pixel p falls in cell floor(p * cells / size), so cell i starts at ceil(i * size / cells):
+        // with 30 × 18 cells the thirds land exactly on the old pixel boundaries.
+        let cellX = (0..<iw).map { $0 * columns / iw * k }
+        var cells = [Double](repeating: 0, count: columns * rows * k)
+        linearTable.withUnsafeBufferPointer { lin in
+            cells.withUnsafeMutableBufferPointer { c in
+                for y in 0..<ih {
+                    let row = (y0 + y) * bytesPerRow + x0 * 4, cellRow = y * rows / ih * columns * k
+                    for x in 0..<iw {
+                        let o = row + x * 4, b8 = px[o], g8 = px[o + 1], r8 = px[o + 2]
+                        let r = lin[Int(r8)], g = lin[Int(g8)], b = lin[Int(b8)]
+                        let chroma = Double(max(r8, g8, b8) - min(r8, g8, b8)) / 255, w = vividFloor + chroma * chroma
+                        let i = cellRow + cellX[x]
+                        c[i] += 1; c[i + 1] += r; c[i + 2] += g; c[i + 3] += b
+                        c[i + 4] += w; c[i + 5] += w * r; c[i + 6] += w * g; c[i + 7] += w * b
+                    }
+                }
             }
         }
-        var result = RegionColors(all: .black)
-        for (region, s) in sums where s.3 > 0 { result[region] = LinearColor(s.0 / Double(s.3), s.1 / Double(s.3), s.2 / Double(s.3)) }
-        return result
+        return ScreenGrid(columns: columns, rows: rows, cells: cells)
     }
 
     /// Contiguous black bars at the edges. Bars must be symmetric (the smaller
@@ -159,10 +272,19 @@ public enum ScreenColorMath {
         return Bands(top: v, bottom: v, left: h, right: h)
     }
 
-    /// Exponential smoothing in linear light.
-    public static func smooth(_ previous: LinearColor?, _ next: LinearColor, smoothing: Double) -> LinearColor {
+    /// `smoothing` is the share kept per this many seconds, so feel doesn't depend on frame rate.
+    public static let smoothingStep = 0.1
+    /// A jump of this share of the sRGB range (any channel) bypasses smoothing entirely.
+    public static let jumpRelease = 0.25
+
+    /// Exponential smoothing in linear light, normalized to elapsed time `dt`.
+    /// Smoothing eases off in proportion to the jump (measured in sRGB, so dark
+    /// scenes count), so scene cuts land at once while small noise stays filtered.
+    public static func smooth(_ previous: LinearColor?, _ next: LinearColor, smoothing: Double, dt: Double = smoothingStep) -> LinearColor {
         guard let p = previous else { return next }
-        let a = 1 - smoothing
+        let jump = max(abs(srgb(next.r) - srgb(p.r)), abs(srgb(next.g) - srgb(p.g)), abs(srgb(next.b) - srgb(p.b))) / 255
+        let s = min(max(smoothing, 0), 1) * max(0, 1 - jump / jumpRelease)
+        let a = 1 - pow(s, min(max(dt.isFinite ? dt : smoothingStep, 0.001), 1) / smoothingStep)
         return LinearColor(p.r + a * (next.r - p.r), p.g + a * (next.g - p.g), p.b + a * (next.b - p.b))
     }
 
@@ -194,6 +316,7 @@ public struct ScreenSyncMixer: Sendable {
     public private(set) var smoothed: RegionColors?
     private var target: RegionColors?
     private var lanes: [String: (sent: LightTarget, nextAt: Double)] = [:]
+    private var lastTick: Double?
 
     public init(settings: ScreenSyncSettings = .init()) { self.settings = settings.clamped() }
 
@@ -202,8 +325,10 @@ public struct ScreenSyncMixer: Sendable {
     /// `now` is seconds on any monotonic clock. `lights` maps eligible light IDs to regions.
     public mutating func tick(now: Double, lights: [String: ScreenRegion]) -> [StreamUpdate] {
         guard let target else { return [] }
+        let dt = lastTick.map { now - $0 } ?? ScreenColorMath.smoothingStep
+        lastTick = now
         var next = target
-        for region in ScreenRegion.allCases { next[region] = ScreenColorMath.smooth(smoothed?[region], target[region], smoothing: settings.smoothing) }
+        for region in ScreenRegion.allCases { next[region] = ScreenColorMath.smooth(smoothed?[region], target[region], smoothing: settings.smoothing, dt: dt) }
         smoothed = next
         var updates: [StreamUpdate] = []
         for (id, region) in lights.sorted(by: { $0.key < $1.key }) {
@@ -222,7 +347,7 @@ public struct ScreenSyncMixer: Sendable {
 
     /// Drop a light's lane so nothing further is computed for it until it returns.
     public mutating func forget(_ id: String) { lanes.removeValue(forKey: id) }
-    public mutating func reset() { smoothed = nil; target = nil; lanes.removeAll() }
+    public mutating func reset() { smoothed = nil; target = nil; lastTick = nil; lanes.removeAll() }
 }
 
 extension LightDevice {

@@ -1,14 +1,14 @@
 // Luma is an open-source project built by Design X Develop LLC.
 // Copyright (c) 2026 Design X Develop LLC. MIT License.
 //
-// Screen Sync frame pump. Samples at most ~8 frames per second, one frame in the worker
+// Screen Sync frame pump. Samples at most ~30 frames per second, one frame in the worker
 // and one IPC call in flight at a time (latest only; extra frames are skipped, never
 // queued). Demo uses generated synthetic frames and never calls getDisplayMedia.
 // Real capture asks only for video, never audio, and stops every track on Stop.
 
-import type { LumaBridge, SyncGrant } from '../shared/types';
+import type { LumaBridge, SyncGrant, SyncGrid } from '../shared/types';
 
-const SAMPLE_MS = 125;
+const SAMPLE_MS = 1000 / 30;
 const WORKER_TIMEOUT_MS = 3000;
 type EndReason = 'ended' | 'muted' | 'denied' | 'worker' | 'hidden';
 
@@ -40,7 +40,7 @@ export class FramePump {
     this.stop();
     this.grant = grant;
     this.worker = new Worker(new URL('./screen-worker.js', import.meta.url), { type: 'module' });
-    this.worker.onmessage = (e: MessageEvent<{ seq: number; regions?: Record<string, [number, number, number]>; error?: boolean }>) => {
+    this.worker.onmessage = (e: MessageEvent<{ seq: number; grid?: SyncGrid; error?: boolean }>) => {
       if (this.grant === grant) this.analyzed(e.data);
     };
     this.worker.onerror = () => { if (this.grant === grant) this.end('worker'); };
@@ -55,7 +55,7 @@ export class FramePump {
       const endMine = (reason: EndReason) => () => { if (mine()) this.end(reason); };
       let stream: MediaStream;
       try {
-        stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 10, max: 15 } }, audio: false });
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 30, max: 30 } }, audio: false });
       } catch {
         endMine('denied')();
         return;
@@ -142,13 +142,13 @@ export class FramePump {
     return createImageBitmap(video, { resizeWidth: 96, resizeHeight: 54, resizeQuality: 'low' });
   }
 
-  private analyzed(data: { seq: number; regions?: Record<string, [number, number, number]>; error?: boolean }): void {
+  private analyzed(data: { seq: number; grid?: SyncGrid; error?: boolean }): void {
     clearTimeout(this.watchdog);
     this.inWorker = false;
     const grant = this.grant;
-    if (!grant || data.seq !== this.seq || !data.regions || this.paused || this.inIPC) return; // stale or busy: dropped
+    if (!grant || data.seq !== this.seq || !data.grid || this.paused || this.inIPC) return; // stale or busy: dropped
     this.inIPC = true;
-    void this.luma.syncFrame(grant.token, grant.generation, data.seq, data.regions as never)
+    void this.luma.syncFrame(grant.token, grant.generation, data.seq, data.grid)
       .catch(() => false)
       .finally(() => { if (this.grant === grant) this.inIPC = false; });
   }

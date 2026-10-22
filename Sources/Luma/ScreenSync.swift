@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import Observation
+import os
 import LumaCore
 
 /// Content the user explicitly chose. Holding a source never captures anything;
@@ -16,9 +17,16 @@ enum ScreenCaptureEnd: Error, Equatable {
     case userStopped, permissionDenied, sourceGone, failed(String)
 }
 
-/// One running capture. Only five region colors ever leave it, never pixels.
+/// Capture and mixer cadence. Capture is downsampled to 160 px, so 30 fps of
+/// analysis is cheap; light updates are capped separately per light.
+enum ScreenSyncTiming {
+    static let fps = 30
+}
+
+/// One running capture. Only a coarse grid of color sums and the capture time
+/// ever leave it, never pixels.
 protocol ScreenCaptureSession: AnyObject {
-    func start(onFrame: @escaping @MainActor (RegionColors) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) async throws
+    func start(onFrame: @escaping @MainActor (ScreenGrid, ContinuousClock.Instant) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) async throws
     func stop()
 }
 
@@ -59,6 +67,9 @@ protocol ScreenCaptureSession: AnyObject {
     @ObservationIgnored private var readbackGeneration: UInt64 = 0
     @ObservationIgnored private let origin = ContinuousClock.now
     @ObservationIgnored private var observers: [(NotificationCenter, any NSObjectProtocol)] = []
+    @ObservationIgnored private var latestCapture: ContinuousClock.Instant?
+    @ObservationIgnored private var frameTickPending = false
+    @ObservationIgnored private var latency = ProcessInfo.processInfo.environment["LUMA_LATENCY_LOG"] == "1" ? LatencyLog() : nil
 
     /// Pass nil defaults to keep settings in memory only (demo and tests).
     init(defaults: UserDefaults?) {
@@ -106,7 +117,7 @@ protocol ScreenCaptureSession: AnyObject {
         let session = source.makeSession()
         self.session = session
         do {
-            try await session.start(onFrame: { [weak self] colors in self?.receive(colors, generation: g) },
+            try await session.start(onFrame: { [weak self] grid, capturedAt in self?.receive(grid, generation: g, capturedAt: capturedAt) },
                                     onEnd: { [weak self] end in self?.ended(end, generation: g) })
         } catch {
             guard g == generation else { return }
@@ -166,6 +177,7 @@ protocol ScreenCaptureSession: AnyObject {
         // Resume must wait for a fresh frame from its new capture session.
         mixer.reset()
         regionPreview = nil
+        latestCapture = nil
     }
 
     private func requestReadback(_ device: LightDevice) {
@@ -212,20 +224,37 @@ protocol ScreenCaptureSession: AnyObject {
 
     // MARK: Frames and streaming
 
-    func receive(_ colors: RegionColors, generation g: UInt64) {
+    func receive(_ grid: ScreenGrid, generation g: UInt64, capturedAt: ContinuousClock.Instant = .now) {
         guard g == generation, phase == .starting || phase == .running else { return }
-        mixer.ingest(colors)
+        // Region colors use the current settings, so depth and vivid apply from the next frame.
+        mixer.ingest(grid.colors(depth: settings.edgeDepth, vivid: settings.vivid))
+        latestCapture = capturedAt
+        // Tick as soon as a frame lands instead of waiting for the ticker.
+        // Coalesced: frames arriving before it runs just replace the target.
+        guard phase == .running, !frameTickPending else { return }
+        frameTickPending = true
+        Task { [weak self] in
+            guard let self else { return }
+            self.frameTickPending = false
+            guard self.generation == g else { return }
+            self.tick(now: self.elapsed)
+        }
+    }
+
+    private var elapsed: Double {
+        let e = ContinuousClock.now - origin
+        return Double(e.components.seconds) + Double(e.components.attoseconds) / 1e18
     }
 
     private func startTicker(_ g: UInt64) {
         ticker = Task { [weak self] in
-            // Smoothing runs at a fixed 10 Hz, independent of capture frame rate;
-            // the mixer separately caps each light's update rate.
+            // Frames tick on arrival; this keeps smoothing converging and releases
+            // rate-limited lights when frames pause (a static screen sends none).
+            // The mixer stays latest-only and caps each light's update rate.
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(100))
+                try? await Task.sleep(for: .seconds(1) / ScreenSyncTiming.fps)
                 guard let self, self.generation == g, self.phase == .running else { return }
-                let elapsed = ContinuousClock.now - self.origin
-                self.tick(now: Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18)
+                self.tick(now: self.elapsed)
             }
         }
     }
@@ -248,6 +277,9 @@ protocol ScreenCaptureSession: AnyObject {
             do {
                 try send(device, update)
                 preview[update.deviceID] = update.target
+                if let latestCapture, let summary = latency?.record(ContinuousClock.now - latestCapture) {
+                    Logger(subsystem: "app.luma.govee", category: "screen-sync-latency").notice("\(summary, privacy: .public)")
+                }
             } catch {
                 excluded[update.deviceID] = "Couldn't reach this light"
                 mixer.forget(update.deviceID)
@@ -318,5 +350,25 @@ protocol ScreenCaptureSession: AnyObject {
         guard let defaults, store?.demo != true else { return }
         if let data = try? JSONEncoder().encode(settings) { defaults.set(data, forKey: "screenSync.settings") }
         defaults.set(regions.mapValues(\.rawValue), forKey: "screenSync.regions")
+    }
+}
+
+/// Opt-in QA timing (`LUMA_LATENCY_LOG=1`): age of the newest captured frame
+/// when its update is handed to the OS as LAN datagrams. UDP is unacknowledged,
+/// so this is capture → send, not capture → light. Aggregates only; no colors
+/// or pixels are logged.
+struct LatencyLog {
+    private var samples: [Double] = []
+    let every: Int
+    init(every: Int = 50) { self.every = every }
+
+    /// Returns a summary every `every` samples, then starts a new window.
+    mutating func record(_ age: Duration) -> String? {
+        samples.append(Double(age.components.seconds) * 1000 + Double(age.components.attoseconds) / 1e15)
+        guard samples.count >= every else { return nil }
+        let s = samples.sorted()
+        samples.removeAll()
+        func ms(_ q: Double) -> Int { Int(s[min(s.count - 1, Int(Double(s.count) * q))].rounded()) }
+        return "Screen Sync capture→send ms: n=\(s.count) p50=\(ms(0.5)) p95=\(ms(0.95)) max=\(ms(1))"
     }
 }

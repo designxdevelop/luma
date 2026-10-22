@@ -236,7 +236,7 @@ function registerIPC(): void {
   handle('dismissNotice', () => home.dismissNotice());
   handle('syncSources', () => capture.list());
   handle('syncStart', (key, lights) => capture.start(key, lights));
-  handle('syncFrame', (token, generation, seq, samples) => home.sync.frame(token, generation, seq, samples));
+  handle('syncFrame', (token, generation, seq, grid) => home.sync.frame(token, generation, seq, grid));
   handle('syncPause', () => home.sync.pause());
   handle('syncResume', (token) => home.sync.resume(token));
   handle('syncStop', () => { capture.revoke(); return home.sync.stop('Stopped.', true); });

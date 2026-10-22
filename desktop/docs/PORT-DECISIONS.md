@@ -29,4 +29,4 @@ Screen Sync adds a portable color-processing and bounded-streaming core behind W
 
 Pixels remain inside the local capture/worker path; only derived color summaries reach the main process. The stream has separate ownership/queues from confirmed controls, avoiding frame backlogs and per-frame cloud traffic. Manual controls and automations must take ownership before ordinary commands. No capture begins in the synthetic demo on this development Mac.
 
-Linux capture/session policy and packaging are included, with real compositor capture verification still pending. The native Mac implementation lives at the repository root. The pure sampler, smoothing, region selection and LAN queue remain portable. See [Screen Sync](SCREEN-SYNC.md) for platform and evidence boundaries.
+Linux capture/session policy and packaging are included, with real compositor capture verification still pending. The native Mac implementation lives at the repository root and mirrors the shared math. The pure sampler, smoothing, region selection and LAN queue remain portable. See [Screen Sync](SCREEN-SYNC.md) for platform and evidence boundaries.

@@ -54,7 +54,7 @@ Connected data lives in `%APPDATA%\LumaWindows` on Windows and Electron's app-da
 Screen Sync maps a selected screen/window to compatible LAN lights. Cloud-only lights are unavailable in this mode; no cloud fallback or per-frame cloud readback is used.
 
 1. Open **Screen Sync**, choose a screen/window explicitly, then select lights that are already on and reachable through LAN Control. Demo offers generated sources only.
-2. Map each light to the whole picture or its left/right/top/bottom region. Choose smoothing, change threshold, brightness cap and update speed (continuous sliders, maximum 5 LAN packets/second per light; default 2).
+2. Map each light to the whole picture or its left/right/top/bottom region. Choose smoothing, change threshold, brightness cap and update speed (continuous sliders, maximum 10 LAN packets/second per light; default 5).
 3. Press **Start**. The persistent indicator and tray controls show the session. Swatches show requested, unconfirmed colors; the normal light cards/API/storage keep reported state.
 4. **Pause** suspends processing and light updates; **Stop** releases capture. Hiding/minimizing the window pauses the session and requires Resume. Lock/sleep, display changes, capture interruptions and stalls stop it; Start again explicitly after those interruptions.
 5. Choose **Leave lights as they are** (default) or explicit **Restore previous state** for Stop. Restoration uses last confirmed brightness/color over LAN only. Manual changes remove the light from the stream and it will not be restored. Scenes, schedules and webhooks cannot issue competing commands to lights participating in sync.

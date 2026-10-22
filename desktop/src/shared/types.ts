@@ -104,18 +104,34 @@ export interface ActivityEntry {
 
 // ---------- Screen Sync ----------
 
-export type SyncRegion = 'full' | 'left' | 'right' | 'top' | 'bottom';
+/** Persisted values; they match the native Mac app's region names. */
+export type SyncRegion =
+  | 'full' | 'left' | 'right' | 'top' | 'bottom'
+  | 'edgeLeft' | 'edgeRight' | 'edgeTop' | 'edgeBottom'
+  | 'cornerTopLeft' | 'cornerTopRight' | 'cornerBottomLeft' | 'cornerBottomRight'
+  | 'edgeLeftUpper' | 'edgeLeftLower' | 'edgeRightUpper' | 'edgeRightLower'
+  | 'edgeTopLeft' | 'edgeTopRight' | 'edgeBottomLeft' | 'edgeBottomRight';
+
+/**
+ * A frame reduced to at most 30×18 cells over the cropped picture. Each cell is 8 numbers:
+ * pixel count, linear r/g/b sums, vivid weight sum, weight × linear r/g/b sums.
+ */
+export interface SyncGrid { columns: number; rows: number; cells: number[] }
 export type SyncPhase = 'idle' | 'starting' | 'running' | 'paused' | 'stopping';
 
 export interface SyncSettings {
-  /** 0 … 0.95, exponential smoothing per sampled frame. */
+  /** 0 … 0.95, share of the old color kept per 100 ms; eases off on large jumps. */
   smoothing: number;
   /** 0.005 … 0.2, minimum change (share of range) worth sending. */
   threshold: number;
   /** 1 … 100 %. */
   brightnessCap: number;
-  /** 0.5 … 5 updates per second per light (LAN cap). */
+  /** 0.5 … 10 updates per second per light (LAN cap). */
   updateHz: number;
+  /** 0.05 … 0.33, how deep edges, corners and half edges reach into the picture. */
+  edgeDepth: number;
+  /** Weight colorful pixels over gray/white ones. */
+  vivid: boolean;
   /** On an explicit Stop: restore last confirmed state (true) or leave lights as they are (false). */
   restore: boolean;
 }
@@ -219,7 +235,7 @@ export interface LumaBridge {
   syncSources(): Promise<SyncSource[]>;
   syncStart(sourceKey: string, lights: Array<{ id: string; region: SyncRegion }>): Promise<SyncGrant>;
   /** Region averages for one sampled frame; false when stale or rejected. */
-  syncFrame(token: string, generation: number, seq: number, samples: Record<SyncRegion, [number, number, number]>): Promise<boolean>;
+  syncFrame(token: string, generation: number, seq: number, grid: SyncGrid): Promise<boolean>;
   syncPause(): Promise<void>;
   syncResume(token: string): Promise<void>;
   /** Explicit user Stop: applies the chosen leave/restore setting. */

@@ -8,8 +8,8 @@ import LumaCore
 
 // ScreenCaptureKit adapter. The system picker is the only way a real source is
 // chosen: Luma never enumerates shareable content or preflights permission.
-// Frames are reduced to five region colors on a private queue; pixels are
-// never stored, logged, or sent anywhere.
+// Frames are reduced to a coarse grid of color sums on a private queue; pixels
+// are never stored, logged, or sent anywhere.
 
 extension ScreenSource {
     static func system(_ filter: SCContentFilter) -> ScreenSource {
@@ -91,7 +91,7 @@ final class SystemScreenCapture: ScreenCaptureSession {
 
     init(filter: SCContentFilter) { self.filter = filter }
 
-    func start(onFrame: @escaping @MainActor (RegionColors) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) async throws {
+    func start(onFrame: @escaping @MainActor (ScreenGrid, ContinuousClock.Instant) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) async throws {
         let configuration = SCStreamConfiguration()
         // Downsampled by the system before Luma sees a frame: at most 160 pixels
         // on the long side, matching the source's shape so padding stays minimal.
@@ -100,7 +100,7 @@ final class SystemScreenCapture: ScreenCaptureSession {
         let longSide = 160.0
         configuration.width = Int(aspect <= 1 ? longSide : max(2, (longSide / aspect).rounded()))
         configuration.height = Int(aspect <= 1 ? max(2, (longSide * aspect).rounded()) : longSide)
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 10)
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(ScreenSyncTiming.fps))
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.queueDepth = 3
         configuration.showsCursor = false
@@ -132,16 +132,16 @@ final class SystemScreenCapture: ScreenCaptureSession {
     }
 }
 
-/// Receives frames on its own queue and hands only the latest region colors
+/// Receives frames on its own queue and hands only the latest color grid
 /// to the main actor. A slow main thread drops frames instead of queueing them.
 private final class FrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     nonisolated let queue = DispatchQueue(label: "app.luma.screen-sync.frames", qos: .utility)
-    private struct Slot { var latest: RegionColors?; var scheduled = false; var cancelled = false }
+    private struct Slot { var latest: (ScreenGrid, ContinuousClock.Instant)?; var scheduled = false; var cancelled = false }
     nonisolated private let slot = OSAllocatedUnfairLock(initialState: Slot())
-    nonisolated private let onFrame: @MainActor (RegionColors) -> Void
+    nonisolated private let onFrame: @MainActor (ScreenGrid, ContinuousClock.Instant) -> Void
     nonisolated private let onEnd: @MainActor (ScreenCaptureEnd) -> Void
 
-    nonisolated init(onFrame: @escaping @MainActor (RegionColors) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) {
+    nonisolated init(onFrame: @escaping @MainActor (ScreenGrid, ContinuousClock.Instant) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) {
         self.onFrame = onFrame; self.onEnd = onEnd
     }
 
@@ -160,27 +160,30 @@ private final class FrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @un
         guard let base = CVPixelBufferGetBaseAddress(pixels) else { return }
         let height = CVPixelBufferGetHeight(pixels), bytesPerRow = CVPixelBufferGetBytesPerRow(pixels)
         let bytes = UnsafeRawBufferPointer(start: base, count: bytesPerRow * height)
-        guard let colors = ScreenColorMath.analyze(bytes, width: CVPixelBufferGetWidth(pixels), height: height, bytesPerRow: bytesPerRow) else { return }
-        deliver(colors)
+        guard let grid = ScreenColorMath.analyze(bytes, width: CVPixelBufferGetWidth(pixels), height: height, bytesPerRow: bytesPerRow) else { return }
+        // Presentation time is on the host clock; carry its age so latency QA
+        // includes ScreenCaptureKit's own delay.
+        let age = CMTimeGetSeconds(CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), sampleBuffer.presentationTimeStamp))
+        deliver(grid, capturedAt: .now - .seconds(age.isFinite ? max(0, age) : 0))
     }
 
     nonisolated func stream(_ stream: SCStream, didStopWithError error: any Error) { end(Self.ending(for: error)) }
 
-    nonisolated private func deliver(_ colors: RegionColors) {
+    nonisolated private func deliver(_ grid: ScreenGrid, capturedAt: ContinuousClock.Instant) {
         let schedule = slot.withLock { s -> Bool in
             guard !s.cancelled else { return false }
-            s.latest = colors
+            s.latest = (grid, capturedAt)
             if s.scheduled { return false }
             s.scheduled = true; return true
         }
         guard schedule else { return }
         Task { @MainActor in
-            let latest = self.slot.withLock { s -> RegionColors? in
+            let latest = self.slot.withLock { s -> (ScreenGrid, ContinuousClock.Instant)? in
                 s.scheduled = false
                 defer { s.latest = nil }
                 return s.cancelled ? nil : s.latest
             }
-            if let latest { self.onFrame(latest) }
+            if let (grid, capturedAt) = latest { self.onFrame(grid, capturedAt) }
         }
     }
 
@@ -211,20 +214,20 @@ private final class FrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @un
 final class SampleScreenCapture: ScreenCaptureSession {
     private var task: Task<Void, Never>?
 
-    func start(onFrame: @escaping @MainActor (RegionColors) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) async throws {
+    func start(onFrame: @escaping @MainActor (ScreenGrid, ContinuousClock.Instant) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) async throws {
         task = Task {
             var phase = 0.0
             while !Task.isCancelled {
-                if let colors = Self.frame(phase: phase) { onFrame(colors) }
-                phase += 0.01
-                try? await Task.sleep(for: .milliseconds(100))
+                if let grid = Self.frame(phase: phase) { onFrame(grid, .now) }
+                phase += 0.1 / Double(ScreenSyncTiming.fps)
+                try? await Task.sleep(for: .seconds(1) / ScreenSyncTiming.fps)
             }
         }
     }
 
     func stop() { task?.cancel(); task = nil }
 
-    static func frame(phase: Double, width: Int = 160, height: Int = 90, bar: Int = 10) -> RegionColors? {
+    static func frame(phase: Double, width: Int = 160, height: Int = 90, bar: Int = 10) -> ScreenGrid? {
         func bgra(hue: Double) -> [UInt8] {
             let c = NSColor(hue: hue.truncatingRemainder(dividingBy: 1), saturation: 0.8, brightness: 0.9, alpha: 1)
             return [UInt8(c.blueComponent * 255), UInt8(c.greenComponent * 255), UInt8(c.redComponent * 255), 255]

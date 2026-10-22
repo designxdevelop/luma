@@ -172,9 +172,11 @@ struct ScreenSyncView: View {
                 if excluded != nil { Button("Include Again") { sync.includeAgain(device.id) }.disabled(ownershipIssue != nil) }
                 else if region != nil { previewDot(sync.preview[device.id]) }
                 Picker("Screen region", selection: Binding(get: { region ?? .full }, set: { sync.setRegion($0, for: device.id) })) {
-                    ForEach(ScreenRegion.allCases) { Text($0.title).tag($0) }
+                    ForEach(ScreenRegion.Group.allCases) { group in
+                        Section(group.rawValue) { ForEach(group.regions) { Text($0.title).tag($0) } }
+                    }
                 }
-                .pickerStyle(.menu).labelsHidden().frame(width: 140).disabled(region == nil)
+                .pickerStyle(.menu).labelsHidden().frame(width: 190).disabled(region == nil)
                 .accessibilityLabel("Screen region for \(device.name)")
                 Toggle("Include", isOn: Binding(get: { region != nil }, set: { sync.setIncluded($0, for: device.id) }))
                     .toggleStyle(.switch).controlSize(.small)
@@ -214,7 +216,20 @@ struct ScreenSyncView: View {
                     tuningRow("Brightness cap", low: "Dimmer", high: "Brighter", value: "\(Int(sync.settings.brightnessCap.rounded()))%",
                               range: ScreenSyncSettings.brightnessCapRange, spoken: "\(Int(sync.settings.brightnessCap.rounded())) percent",
                               binding: Binding(get: { sync.settings.brightnessCap }, set: { sync.settings.brightnessCap = $0.rounded() }))
-                    Text("Lights update a few times per second over your local network; hardware timing varies. Capture runs at up to 10 frames per second; light updates are capped separately.")
+                    tuningRow("Edge depth", low: "Thin", high: "Deep", value: "\(Int((sync.settings.edgeDepth * 100).rounded()))%",
+                              range: ScreenSyncSettings.edgeDepthRange, spoken: "\(Int((sync.settings.edgeDepth * 100).rounded())) percent of the picture",
+                              binding: Binding(get: { sync.settings.edgeDepth }, set: { sync.settings.edgeDepth = ($0 * 100).rounded() / 100 }))
+                    Toggle(isOn: Binding(get: { sync.settings.vivid }, set: { sync.settings.vivid = $0 })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Vivid colors").font(.system(size: 13, weight: .medium))
+                            Text("Favors colorful parts of the picture over gray, white, and text, so lights stay colorful.")
+                                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .toggleStyle(.switch).controlSize(.small)
+                    Text("Edge depth sets how far edges, corners, and half edges reach into the picture.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text("Lights update a few times per second over your local network; hardware timing varies. Capture runs at up to \(ScreenSyncTiming.fps) frames per second; light updates are capped separately.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }

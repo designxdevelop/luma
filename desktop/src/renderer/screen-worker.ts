@@ -1,11 +1,11 @@
 // Luma is an open-source project built by Design X Develop LLC.
 // Copyright (c) 2026 Design X Develop LLC. MIT License.
 //
-// Screen Sync worker: downsamples one transferred frame on an OffscreenCanvas, computes
-// region averages, closes the frame, and posts back only those averages. Pixels never
-// leave this worker and nothing is stored.
+// Screen Sync worker: downsamples one transferred frame on an OffscreenCanvas, reduces it
+// to a coarse grid of color sums, closes the frame, and posts back only that grid. Pixels
+// never leave this worker and nothing is stored.
 
-import { regionAverages } from '../shared/sync-math.js';
+import { sampleGrid } from '../shared/sync-math.js';
 
 const W = 96, H = 54; // bounded analysis resolution
 const canvas = new OffscreenCanvas(W, H);
@@ -19,7 +19,7 @@ scope.onmessage = (event) => {
     ctx.drawImage(frame, 0, 0, W, H);
     frame.close();
     const pixels = ctx.getImageData(0, 0, W, H, { colorSpace: 'srgb' }).data;
-    scope.postMessage({ seq, regions: regionAverages(pixels, W, H) });
+    scope.postMessage({ seq, grid: sampleGrid(pixels, W, H) });
   } catch {
     try { frame.close(); } catch { /* already closed */ }
     scope.postMessage({ seq, error: true });

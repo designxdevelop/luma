@@ -51,7 +51,7 @@ test('first push sends the capped brightness first, then color one interval late
   assert.equal(h.sender.inflight, 1);
   await h.ok(0);
   assert.equal(h.sender.stats.sent, 1);
-  await h.advance(499);
+  await h.advance(199);
   assert.equal(h.calls.length, 1);
   await h.advance(1);
   assert.deepEqual(sig(h), ['a:brightness=10', 'a:colorRgb=1122867']);
@@ -89,12 +89,12 @@ test('rapid pushes keep only the latest; superseded targets are counted and neve
   assert.ok(!h.calls.some((c) => c.value === 10 || c.value === 20));
 });
 
-test('rate cap: the second send waits one interval; setRate clamps to 0.5..5 Hz', async () => {
+test('rate cap: the second send waits one interval; setRate clamps to 0.5..10 Hz', async () => {
   const fast = harness();
-  fast.sender.setRate(10); // clamped to 5 Hz = 200 ms
+  fast.sender.setRate(20); // clamped to 10 Hz = 100 ms
   fast.sender.push('a', { rgb: 1, brightness: 1 });
   await fast.ok(0);
-  await fast.advance(199);
+  await fast.advance(99);
   assert.equal(fast.calls.length, 1);
   await fast.advance(1);
   assert.equal(fast.calls.length, 2);
