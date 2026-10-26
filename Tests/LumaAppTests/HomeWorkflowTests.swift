@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 import LumaCore
-@testable import Luma
+@testable import LumaUI
 
 @MainActor struct HomeWorkflowTests {
     @Test func webhookActionExecutesAndExposesRunStatus() async throws {

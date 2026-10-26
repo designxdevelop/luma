@@ -1,11 +1,13 @@
+#if os(macOS)
 import SwiftUI
 import AppKit
 import LumaCore
 
-@main struct LumaApp: App {
+public struct LumaApp: App {
     @State private var store = HomeStore()
     @State private var navigation = LumaNavigation()
-    var body: some Scene {
+    public init() {}
+    public var body: some Scene {
         Window("Luma", id: "main") {
             RootView(store: store, navigation: navigation)
                 .acceptsActivationClicks()
@@ -94,3 +96,4 @@ struct MenuBarView: View {
         Button("Quit Luma") { store.shutdown(); NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
     }
 }
+#endif

@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 import LumaCore
-@testable import Luma
+@testable import LumaUI
 
 private struct InteractionReply: Sendable {
     var body = #"{"code":200}"#

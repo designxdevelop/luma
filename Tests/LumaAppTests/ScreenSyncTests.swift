@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 import LumaCore
-@testable import Luma
+@testable import LumaUI
 
 /// Stands in for ScreenCaptureKit. Tests push region colors and endings by hand,
 /// so no screen is captured and no permission prompt can appear.
