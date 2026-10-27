@@ -88,6 +88,7 @@ struct ScenesView: View {
     @State private var errorText: String?
     @State private var importing = false
     @State private var exporting: SceneFile?
+    @State private var showExporter = false
 
     var body: some View {
         let scenes = store.home.scenes
@@ -124,7 +125,8 @@ struct ScenesView: View {
             Text(count == 0 ? "This can't be undone." : "This also removes \(count) \(count == 1 ? "schedule" : "schedules") that \(count == 1 ? "runs" : "run") it. This can't be undone.")
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { importScene(from: $0) }
-        .fileExporter(isPresented: Binding(get: { exporting != nil }, set: { if !$0 { exporting = nil } }), document: exporting,
+        // A plain flag: a Binding(get:set:) here crashes the Swift 6.3 compiler (IRGen).
+        .fileExporter(isPresented: $showExporter, document: exporting,
                       contentType: .json, defaultFilename: exporting?.name) { result in
             if case .failure(let error) = result { errorText = error.localizedDescription } else { errorText = nil }
         }
@@ -297,7 +299,7 @@ struct ScenesView: View {
     }
 
     private func exportScene(_ scene: LightScene) {
-        do { exporting = SceneFile(name: scene.name, data: try JSONEncoder.pretty.encode(scene)); errorText = nil } catch { errorText = error.localizedDescription }
+        do { exporting = SceneFile(name: scene.name, data: try JSONEncoder.pretty.encode(scene)); showExporter = true; errorText = nil } catch { errorText = error.localizedDescription }
     }
 }
 
