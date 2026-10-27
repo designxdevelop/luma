@@ -36,15 +36,16 @@ extension Color {
     /// Kept for older call sites; the sidebar now uses the system material.
     static let sidebar = canvas
 
-    private static func dynamic(light: Int, dark: Int, lightAlpha: Double = 1, darkAlpha: Double = 1) -> Color {
+    // nonisolated: SwiftUI resolves dynamic colors on its render thread during animations.
+    nonisolated private static func dynamic(light: Int, dark: Int, lightAlpha: Double = 1, darkAlpha: Double = 1) -> Color {
         #if os(macOS)
-        Color(nsColor: NSColor(name: nil) { appearance in
+        Color(nsColor: NSColor(name: nil) { @Sendable appearance in
             let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let rgb = isDark ? dark : light
             return NSColor(srgbRed: CGFloat((rgb >> 16) & 255) / 255, green: CGFloat((rgb >> 8) & 255) / 255, blue: CGFloat(rgb & 255) / 255, alpha: isDark ? darkAlpha : lightAlpha)
         })
         #else
-        Color(uiColor: UIColor { traits in
+        Color(uiColor: UIColor { @Sendable traits in
             let isDark = traits.userInterfaceStyle == .dark
             let rgb = isDark ? dark : light
             return UIColor(red: CGFloat((rgb >> 16) & 255) / 255, green: CGFloat((rgb >> 8) & 255) / 255, blue: CGFloat(rgb & 255) / 255, alpha: isDark ? darkAlpha : lightAlpha)
