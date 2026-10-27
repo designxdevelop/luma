@@ -169,14 +169,24 @@ struct WebhookHTTPParser: Sendable {
 
     public init() {}
 
-    public func start(port: UInt16, allowLAN: Bool, token: String,
+    /// `identity` serves HTTPS; nil (plain HTTP) exists only for tests. The app
+    /// always passes one and never falls back to HTTP.
+    public func start(port: UInt16, allowLAN: Bool, token: String, identity: sec_identity_t?,
                       handler: @escaping @MainActor (WebhookRequest) async -> WebhookResponse,
                       onState: @escaping @MainActor (String) -> Void) throws {
         guard !token.isEmpty, token.utf8.allSatisfy({ (33...126).contains($0) }) else {
             throw LumaError.message("Webhook token must contain visible ASCII characters")
         }
         stop()
-        let parameters = NWParameters.tcp
+        let parameters: NWParameters
+        if let identity {
+            let tls = NWProtocolTLS.Options()
+            sec_protocol_options_set_local_identity(tls.securityProtocolOptions, identity)
+            sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
+            parameters = NWParameters(tls: tls, tcp: .init())
+        } else {
+            parameters = .tcp
+        }
         parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(allowLAN ? "0.0.0.0" : "127.0.0.1"), port: NWEndpoint.Port(rawValue: port)!)
         let listener = try NWListener(using: parameters)
         self.listener = listener

@@ -22,7 +22,7 @@ To run on a device, select your own team under **Signing & Capabilities**. No te
 
 ## What's the same
 
-Lights, rooms, search, power/brightness/color/white, model-specific effects and the advanced JSON editor, app scenes (create, edit, duplicate, import/export JSON through the Files picker), schedules, the authenticated webhook server, activity, appearance, demo mode, and Keychain-stored secrets. iPhone uses a tab bar; iPad keeps the Mac's sidebar with rooms.
+Lights, rooms, search, power/brightness/color/white, model-specific effects and the advanced JSON editor, app scenes (create, edit, duplicate, import/export JSON through the Files picker), schedules, the authenticated HTTPS webhook server (see [Mac guide](MACOS.md) for certificate pinning), activity, appearance, demo mode, and Keychain-stored secrets. iPhone uses a tab bar; iPad keeps the Mac's sidebar with rooms.
 
 ## Apple Watch
 

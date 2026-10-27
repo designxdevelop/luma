@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import Network
 import LumaCore
 
 struct SavedHome: Codable {
@@ -60,4 +61,71 @@ enum SecretStore {
         return bytes.map { String(format: "%02x", $0) }.joined()
     }
     static func error(_ status: OSStatus) -> LumaError { .message("Keychain: \((SecCopyErrorMessageString(status, nil) as String?) ?? String(status))") }
+}
+
+/// The webhook server's TLS identity: a self-signed key and certificate kept in
+/// the Keychain, replaced a week before it expires. Demo mode uses its own
+/// label and deletes it when the server stops.
+struct WebhookTLS {
+    let identity: sec_identity_t
+    let certificate: Data
+    var fingerprint: String { LocalCertificate.fingerprint(certificate) }
+    var pem: String {
+        "-----BEGIN CERTIFICATE-----\n\(certificate.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed]))\n-----END CERTIFICATE-----\n"
+    }
+
+    static func label(demo: Bool) -> String { demo ? "app.luma.webhook-tls.demo" : "app.luma.webhook-tls" }
+
+    static func load(demo: Bool, now: Date = .now) throws -> WebhookTLS {
+        let label = label(demo: demo)
+        if !demo, let expires = try SecretStore.read(label + ".expires").flatMap({ ISO8601DateFormatter().date(from: $0) }),
+           expires > now.addingTimeInterval(7 * 86_400), let existing = try? find(label) {
+            return existing
+        }
+        try delete(demo: demo)
+        let cert = try LocalCertificate(now: now)
+        let keyAttributes: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeyClass as String: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits as String: 256]
+        var error: Unmanaged<CFError>?
+        guard let key = SecKeyCreateWithData(cert.privateKey.x963Representation as CFData, keyAttributes as CFDictionary, &error) else {
+            throw LumaError.message("Couldn't create the HTTPS key: \(error?.takeRetainedValue().localizedDescription ?? "unknown error")")
+        }
+        guard let certificate = SecCertificateCreateWithData(nil, cert.der as CFData) else { throw LumaError.message("Couldn't create the HTTPS certificate.") }
+        try check(SecItemAdd([kSecClass as String: kSecClassKey, kSecValueRef as String: key, kSecAttrLabel as String: label,
+                              kSecAttrApplicationTag as String: Data(label.utf8),
+                              kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly] as CFDictionary, nil))
+        try check(SecItemAdd([kSecClass as String: kSecClassCertificate, kSecValueRef as String: certificate, kSecAttrLabel as String: label,
+                              kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly] as CFDictionary, nil))
+        if !demo { try SecretStore.save(ISO8601DateFormatter().string(from: cert.notAfter), account: label + ".expires") }
+        return try find(label)
+    }
+
+    static func delete(demo: Bool) throws {
+        let label = label(demo: demo)
+        for query in [[kSecClass as String: kSecClassKey, kSecAttrApplicationTag as String: Data(label.utf8)],
+                      [kSecClass as String: kSecClassCertificate, kSecAttrLabel as String: label]] as [[String: Any]] {
+            let status = SecItemDelete(query as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else { throw SecretStore.error(status) }
+        }
+        try SecretStore.delete(label + ".expires")
+    }
+
+    private static func find(_ label: String) throws -> WebhookTLS {
+        var result: CFTypeRef?
+        try check(SecItemCopyMatching([kSecClass as String: kSecClassCertificate, kSecAttrLabel as String: label,
+                                       kSecReturnRef as String: true, kSecMatchLimit as String: kSecMatchLimitOne] as CFDictionary, &result))
+        let certificate = result as! SecCertificate
+        var identity: SecIdentity?
+        #if os(macOS)
+        try check(SecIdentityCreateWithCertificate(nil, certificate, &identity))
+        #else
+        var found: CFTypeRef?
+        try check(SecItemCopyMatching([kSecClass as String: kSecClassIdentity, kSecAttrLabel as String: label,
+                                       kSecReturnRef as String: true, kSecMatchLimit as String: kSecMatchLimitOne] as CFDictionary, &found))
+        identity = (found as! SecIdentity)
+        #endif
+        guard let identity, let secIdentity = sec_identity_create(identity) else { throw LumaError.message("The HTTPS identity is incomplete.") }
+        return WebhookTLS(identity: secIdentity, certificate: SecCertificateCopyData(certificate) as Data)
+    }
+
+    private static func check(_ status: OSStatus) throws { guard status == errSecSuccess else { throw SecretStore.error(status) } }
 }

@@ -19,6 +19,8 @@ struct ActivityEntry: Identifiable {
     var webhookRunning = false
     var webhookStatus = "Stopped"
     var webhookToken = ""
+    /// SHA-256 fingerprint and PEM of the webhook server's certificate, once started.
+    var webhookCertificate: (fingerprint: String, pem: String)?
     var runningSceneID: UUID?
     var runs: [AutomationRun] = []
     var demo: Bool
@@ -478,7 +480,10 @@ struct ActivityEntry: Identifiable {
                 else if let saved = try SecretStore.read("webhook-token") { webhookToken = saved }
                 else { webhookToken = try SecretStore.token(); try SecretStore.save(webhookToken, account: "webhook-token") }
             }
-            try server.start(port: home.webhookPort, allowLAN: home.allowLAN, token: webhookToken, handler: { [weak self] request in
+            // HTTPS only, on loopback and LAN alike; there is no plain-HTTP fallback.
+            let tls = try WebhookTLS.load(demo: demo)
+            webhookCertificate = (tls.fingerprint, tls.pem)
+            try server.start(port: home.webhookPort, allowLAN: home.allowLAN, token: webhookToken, identity: tls.identity, handler: { [weak self] request in
                 guard let self else { return WebhookResponse(status: 503, json: .object(["error": .string("App shutting down")])) }
                 return await self.handle(request)
             }, onState: { [weak self] state in
@@ -489,7 +494,10 @@ struct ActivityEntry: Identifiable {
             persist(); log("Webhook listener starting on port \(home.webhookPort).")
         } catch { webhookRunning = false; log("Webhooks: \(error.localizedDescription)", error: true) }
     }
-    func stopWebhooks() { server.stop(); webhookRunning = false; webhookStatus = "Stopped"; log("Webhook listener stopped.") }
+    func stopWebhooks() {
+        server.stop(); webhookRunning = false; webhookStatus = "Stopped"; log("Webhook listener stopped.")
+        if demo && webhookCertificate != nil { try? WebhookTLS.delete(demo: true); webhookCertificate = nil }
+    }
     func rotateToken() {
         stopWebhooks()
         do {
@@ -535,7 +543,7 @@ struct ActivityEntry: Identifiable {
     func accepted(_ runID: UUID) -> WebhookResponse {
         .init(status: 202, json: .object(["accepted": .bool(true), "runID": .string(runID.uuidString), "statusURL": .string("/v1/runs/\(runID.uuidString)"), "note": .string("Commands run asynchronously. Completed means submitted, not hardware-confirmed.")]))
     }
-    func shutdown() { shuttingDown = true; screenSync.shutdown(); server.stop(); lan.stop(); timerTask?.cancel(); sceneTask?.cancel(); scanTask?.cancel(); reconnectTask?.cancel(); stopCommands() }
+    func shutdown() { shuttingDown = true; screenSync.shutdown(); server.stop(); if demo && webhookCertificate != nil { try? WebhookTLS.delete(demo: true) }; lan.stop(); timerTask?.cancel(); sceneTask?.cancel(); scanTask?.cancel(); reconnectTask?.cancel(); stopCommands() }
     func loadDemo() {
         // Explore Demo can enter from a real home with a chosen or running
         // capture. Detach first so demo content and tuning remain isolated.

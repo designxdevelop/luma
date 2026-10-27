@@ -98,7 +98,7 @@ struct WebhookTests {
         let server = WebhookServer()
         var received: [WebhookRequest] = []
         var state = "Waiting for listener"
-        try server.start(port: 0, allowLAN: false, token: token, handler: { request in
+        try server.start(port: 0, allowLAN: false, token: token, identity: nil, handler: { request in
             received.append(request)
             return .init(status: 200, json: .object(["ok": .bool(true)]))
         }, onState: { state = $0 })

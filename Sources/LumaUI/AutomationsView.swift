@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import LumaCore
 
 struct AutomationsView: View {
@@ -205,7 +206,18 @@ struct AutomationsView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Address").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
             CodeBlock(text: baseURL, copyLabel: "Copy address")
-            if store.home.allowLAN { Text("Other devices can use this \(PlatformCopy.device)’s local IP address instead of 127.0.0.1.").font(.system(size: 12)).foregroundStyle(.secondary) }
+            if store.home.allowLAN { Text("Other devices can use this \(PlatformCopy.device)’s local IP address instead of localhost.").font(.system(size: 12)).foregroundStyle(.secondary) }
+            Text("HTTPS certificate").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).padding(.top, 6)
+            if let certificate = store.webhookCertificate {
+                CodeBlock(text: "SHA-256 " + certificate.fingerprint, copyLabel: "Copy fingerprint")
+                ShareLink(item: CertificateFile(pem: certificate.pem), preview: SharePreview("Luma webhook certificate")) {
+                    Label("Export Certificate…", systemImage: "square.and.arrow.up")
+                }.controlSize(.small)
+                Text("The server uses a self-signed certificate made on this \(PlatformCopy.device). Callers should trust it by importing the exported file (curl --cacert luma.pem) or pinning this fingerprint, not by turning off certificate checks.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("A certificate is created the first time you start the server.").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -251,13 +263,13 @@ struct AutomationsView: View {
                 .disabled(store.webhookRunning)
                 .onChange(of: store.home.allowLAN) { store.persist() }
             if store.home.allowLAN {
-                Label("Local network mode uses plain HTTP on all network interfaces. Use it only on a trusted network or behind an authenticated HTTPS tunnel, and never port-forward it.", systemImage: "exclamationmark.triangle.fill")
+                Label("Local network mode listens on all network interfaces. Traffic is encrypted with HTTPS and every request needs the token, but use it only on a trusted network and never port-forward it.", systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 12)).foregroundStyle(Color.warning).fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
-    private var baseURL: String { "http://127.0.0.1:\(store.home.webhookPort)" }
+    private var baseURL: String { "https://localhost:\(store.home.webhookPort)" }
 
     private var examples: some View {
         let sceneID = store.home.scenes.first?.id.uuidString ?? "<scene-id>"
@@ -265,9 +277,9 @@ struct AutomationsView: View {
             Text("Set lights").font(.system(size: 12, weight: .medium))
             Text("Target a light ID, “all”, or “room:Living room”. Fields: power, brightness (1–100), and either color (hex) or kelvin.")
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            CodeBlock(text: "curl -X POST \(baseURL)/v1/actions \\\n  -H \"Authorization: Bearer $LUMA_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"target\":\"all\",\"power\":true,\"brightness\":40,\"color\":\"#FFB870\"}'")
+            CodeBlock(text: "curl --cacert luma.pem -X POST \(baseURL)/v1/actions \\\n  -H \"Authorization: Bearer $LUMA_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"target\":\"all\",\"power\":true,\"brightness\":40,\"color\":\"#FFB870\"}'")
             Text("Run a scene").font(.system(size: 12, weight: .medium))
-            CodeBlock(text: "curl -X POST \(baseURL)/v1/scenes/\(sceneID)/run \\\n  -H \"Authorization: Bearer $LUMA_TOKEN\"")
+            CodeBlock(text: "curl --cacert luma.pem -X POST \(baseURL)/v1/scenes/\(sceneID)/run \\\n  -H \"Authorization: Bearer $LUMA_TOKEN\"")
             Text("Look things up").font(.system(size: 12, weight: .medium))
             CodeBlock(text: ["GET /v1/devices", "GET /v1/scenes", "GET /v1/runs/<run-id>", "GET /health"].joined(separator: "\n"), copyLabel: "Copy list")
             Text("Send the same Authorization header with each request. Requests are accepted right away (HTTP 202 with a run ID); “completed” means the commands were sent, not that each light confirmed them.")
@@ -331,5 +343,14 @@ private struct DayChip: View {
         .help(name)
         .accessibilityLabel(name)
         .accessibilityAddTraits(isOn ? .isSelected : [])
+    }
+}
+
+/// The webhook certificate as a .pem file for the share sheet.
+struct CertificateFile: Transferable {
+    let pem: String
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .x509Certificate) { Data($0.pem.utf8) }
+            .suggestedFileName("luma.pem")
     }
 }
