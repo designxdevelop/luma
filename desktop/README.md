@@ -71,7 +71,9 @@ This produces architecture-labeled portable tar archives in `release-linux/`. Sa
 
 ## Local webhook API
 
-The listener is off by default. Start it explicitly in Automations; default binding is `127.0.0.1:8787`. LAN binding is a separate explicit choice. **HTTPS only:** the listener uses TLS 1.2 or newer in both loopback and LAN mode, with no plain HTTP fallback. Luma stores a self-signed P-256 identity using encrypted OS storage and renews it before expiry. In Automations, export `luma.pem` and use `curl --cacert luma.pem`, or pin the SHA-256 fingerprint. Never disable certificate checks. The certificate names `localhost`, `127.0.0.1`, and `::1`; LAN callers using other addresses must pin the certificate or fingerprint. **Upgrading from HTTP:** update existing scripts, Shortcuts, and Home Assistant callers to HTTPS and trust the exported certificate.
+The listener is off by default. Start it explicitly in Automations; default binding is `127.0.0.1:8787`. LAN binding is a separate explicit choice. **HTTPS only:** the listener uses TLS 1.2 or newer, with no plain HTTP fallback. Luma stores a self-signed P-256 identity in encrypted OS storage and renews it before expiry. Export `luma.pem` in Automations and use a client that supports a custom CA file, such as `curl --cacert luma.pem`, or configure the exported PEM as an OS trust anchor. Clients that support SPKI pins can also use the displayed curl pin; curl still needs to trust the PEM.
+
+In LAN mode the certificate covers this machine’s current non-loopback, non-link-local network addresses and, for a hostname without a dot, `hostname.local`. Luma regenerates the identity when those names or addresses change, so re-export the PEM and update any SPKI pins. Clients that can only toggle verification, including Home Assistant `rest_command` and iOS Shortcuts, should run on the same machine via `127.0.0.1` or trust the PEM at the OS level. Trust is still required for local connections; never disable verification. **Upgrading from HTTP:** update existing callers to HTTPS and trust the exported certificate.
 
 Every endpoint, including `/health`, requires `Authorization: Bearer …`. Tokens are masked in the UI and copied by the main process.
 
@@ -86,7 +88,7 @@ Every endpoint, including `/health`, requires `Authorization: Bearer …`. Token
 Export `luma.pem` from Automations and copy the token into an environment variable. For example:
 
 ```sh
-curl --cacert luma.pem https://localhost:8787/v1/actions \
+curl --cacert luma.pem https://127.0.0.1:8787/v1/actions \
   -H "Authorization: Bearer $LUMA_TOKEN" -H "Content-Type: application/json" \
   -d '{"target":"all","power":true,"brightness":40}'
 ```

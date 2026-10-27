@@ -42,3 +42,5 @@ Use only synthetic fixtures until an operator explicitly tests on Windows with t
 - Change Screen Sync response settings and per-light inclusion and regions, restart, and verify they remain; select a source again before starting.
 - From an empty home, open Explore Demo and verify the app restarts with sample lights and no real device or webhook access. Quit and start normally to return to the real home.
 - Open Settings and About from the tray. Check webhook examples against the documented routes on the Automations page.
+
+- With LAN enabled, verify the exported PEM covers current LAN IP addresses and an unqualified hostname’s `.local` name. Changing the address set regenerates the identity: re-export the PEM and update SPKI pins. Use a custom CA file or OS trust for the PEM, and use SPKI pinning where supported; never disable verification. Home Assistant `rest_command` and iOS Shortcuts clients that only offer a verification toggle should run on the same machine via `127.0.0.1` or trust the PEM at the OS level.

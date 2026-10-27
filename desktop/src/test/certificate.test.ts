@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { X509Certificate, createPrivateKey } from 'node:crypto';
+import { X509Certificate, createHash, createPrivateKey, createPublicKey } from 'node:crypto';
 import { request } from 'node:https';
 import { createConnection } from 'node:net';
-import { generateWebhookIdentity, loadWebhookIdentity } from '../core/certificate';
+import { generateWebhookIdentity, loadWebhookIdentity, webhookSans } from '../core/certificate';
 import { WebhookServer } from '../core/http';
 import type { SecretStore } from '../main/storage';
 
@@ -31,6 +31,38 @@ test('identity is reused until seven days before expiry; demo never accesses sto
   assert.equal(writes, 2);
   assert.notEqual(loadWebhookIdentity(undefined, true, now).cert, first.cert);
   assert.throws(() => loadWebhookIdentity(undefined), /Secure storage/);
+});
+
+test('LAN SANs cover current addresses and hostname and change the persisted identity', () => {
+  const interfaces = { lan: [
+    { address: '192.168.1.42', family: 'IPv4', internal: false },
+    { address: '2001:db8::42', family: 'IPv6', internal: false },
+    { address: '169.254.1.1', family: 'IPv4', internal: false },
+    { address: 'fe80::1', family: 'IPv6', internal: false },
+    { address: '127.0.0.2', family: 'IPv4', internal: true },
+  ] } as unknown as ReturnType<typeof import('node:os').networkInterfaces>;
+  const sans = webhookSans(true, interfaces, 'luma');
+  let value: string | undefined; let writes = 0;
+  const store: SecretStore = { available: true, read: () => value, write: (_name, v) => { value = v; writes++; }, delete: () => {} };
+  const now = new Date(); const first = loadWebhookIdentity(store, false, now, sans);
+  const cert = new X509Certificate(first.cert);
+  assert.equal(cert.checkIP('192.168.1.42'), '192.168.1.42');
+  assert.ok(cert.checkIP('2001:db8::42'));
+  assert.equal(cert.checkHost('luma.local'), 'luma.local');
+  assert.equal(cert.checkIP('169.254.1.1'), undefined);
+  assert.equal(cert.checkIP('fe80::1'), undefined);
+  assert.equal(loadWebhookIdentity(store, false, now, webhookSans(true, interfaces, 'luma')).cert, first.cert);
+  const changed = loadWebhookIdentity(store, false, now, webhookSans(true, interfaces, 'other'));
+  assert.notEqual(changed.cert, first.cert);
+  assert.equal(writes, 2);
+  assert.notEqual(loadWebhookIdentity(store, false, now, webhookSans(false, interfaces, 'luma')).cert, changed.cert);
+});
+
+test('SPKI pin hashes the certificate public key in DER form', () => {
+  const identity = generateWebhookIdentity();
+  const publicKey = createPublicKey(new X509Certificate(identity.cert).publicKey.export({ type: 'spki', format: 'pem' }));
+  const digest = createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('base64');
+  assert.equal(identity.spkiPin, `sha256//${digest}`);
 });
 
 test('HTTPS trusts only the generated CA and rejects plaintext HTTP', async () => {

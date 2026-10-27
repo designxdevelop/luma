@@ -359,17 +359,19 @@ function automationsView(s: AppSnapshot): string {
       <div class="actions">
         ${w.running ? `<button data-action="hook-stop">${icon('stop')}Stop server</button>` : `<button class="primary" data-action="hook-start" ${disabled ? 'disabled' : ''}>${icon('play')}Start server</button>`}
       </div>
-      <p><code>https://localhost:${w.port}</code></p>
+      <p><code>https://127.0.0.1:${w.port}</code></p>
       ${w.fingerprint ? `<div class="row"><code>SHA-256 ${esc(w.fingerprint)}</code><button data-action="copy-fingerprint">Copy fingerprint</button><button data-action="export-certificate">Export Certificate…</button></div>` : ''}
-      <p class="hint">Trust the exported certificate with <code>curl --cacert luma.pem</code> or pin its fingerprint. LAN addresses are not in the certificate; LAN callers must pin the certificate or fingerprint. Never disable certificate checks.</p>
+      ${w.spkiPin ? `<div class="row"><code>${esc(w.spkiPin)}</code><button data-action="copy-spki-pin">Copy SPKI pin</button></div>` : ''}
+      <p class="hint">Trust the exported certificate with <code>curl --cacert luma.pem</code>. LAN certificates cover current addresses and hostname.local; export the certificate and update pins again if they change. Never disable certificate checks.</p>
       <div class="row token"><span>Token</span><code aria-label="Token (masked)">${esc(w.maskedToken ?? 'Created when the server first starts')}</code>
         <button data-action="copy-token" ${disabled || !w.maskedToken ? 'disabled' : ''}>Copy</button><button data-action="rotate-token" ${disabled ? 'disabled' : ''}>Rotate</button></div>
       <details><summary>How to call it</summary>
         <p class="hint">Every request needs <code>Authorization: Bearer &lt;token&gt;</code>. POST bodies are JSON (max 64 KiB). Accepted actions return 202 with a run ID.</p>
-        <pre class="code">curl --cacert luma.pem -X POST https://localhost:${w.port}/v1/actions ^
+        <pre class="code">curl --cacert luma.pem -X POST https://127.0.0.1:${w.port}/v1/actions ^
   -H "Authorization: Bearer %LUMA_TOKEN%" ^
   -H "Content-Type: application/json" ^
   -d "{\\"target\\":\\"all\\",\\"power\\":true,\\"brightness\\":40}"</pre>
+        ${w.spkiPin ? `<pre class="code">curl --cacert luma.pem --pinnedpubkey '${esc(w.spkiPin)}' https://127.0.0.1:${w.port}/health -H "Authorization: Bearer %LUMA_TOKEN%"</pre>` : ''}
         <p class="hint">Targets: <code>all</code>, an exact device ID, or <code>room:Living room</code>. Also: GET /health, /v1/devices, /v1/scenes, /v1/runs, /v1/runs/&lt;id&gt;; POST /v1/scenes/&lt;id&gt;/run and /v1/devices/&lt;id&gt;/commands.</p>
       </details>
     </section>
@@ -925,6 +927,7 @@ document.addEventListener('click', (event) => {
     case 'sch-delete': void act(() => luma.deleteSchedule(id!)); break;
     case 'hook-start': void act(() => luma.startWebhook()); break;
     case 'hook-stop': void act(() => luma.stopWebhook()); break;
+    case 'copy-spki-pin': void act(() => luma.copySpkiPin(), 'SPKI pin copied.'); break;
     case 'copy-fingerprint': void act(() => luma.copyFingerprint(), 'Fingerprint copied.'); break;
     case 'export-certificate': void act(() => luma.exportCertificate()); break;
     case 'copy-token': void act(() => luma.copyToken(), 'Token copied. Paste it into your caller; it will not be shown here.'); break;

@@ -49,6 +49,7 @@ const bridge: LumaBridge = {
   rotateToken: call('rotateToken') as LumaBridge['rotateToken'],
   copyToken: call('copyToken') as LumaBridge['copyToken'],
   copyFingerprint: call('copyFingerprint') as LumaBridge['copyFingerprint'],
+  copySpkiPin: call('copySpkiPin') as LumaBridge['copySpkiPin'],
   exportCertificate: call('exportCertificate') as LumaBridge['exportCertificate'],
   openExternal: call('openExternal') as LumaBridge['openExternal'],
   exportScene: call('exportScene') as LumaBridge['exportScene'],
