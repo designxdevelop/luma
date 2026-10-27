@@ -1,11 +1,13 @@
 // Luma is an open-source project built by Design X Develop LLC.
 // Copyright (c) 2026 Design X Develop LLC. MIT License.
 //
-// Strict single-request HTTP/1.1 server for the webhook API. Deliberately built on node:net
+// Strict single-request HTTP/1.1 server for the webhook API. Deliberately uses sockets
 // instead of node:http: its parser is more permissive than our framing rules allow.
 // Ported from the Mac WebhookHTTPParser; auth is decided as soon as the headers are complete.
 
-import { createServer, type Server, type Socket } from 'node:net';
+import { createServer as createTcpServer, type Server, type Socket } from 'node:net';
+import { createServer as createTlsServer } from 'node:tls';
+import type { WebhookIdentity } from './certificate';
 import { timingSafeEqual } from 'node:crypto';
 import { LumaError } from './model';
 
@@ -143,6 +145,8 @@ export interface WebhookStartOptions {
   port: number;
   allowLAN: boolean;
   token: string;
+  /** Plain TCP is exclusively for parser and framing tests; the app always supplies an identity. */
+  tls: Pick<WebhookIdentity, 'key' | 'cert'> | { testOnlyPlainTcp: true };
   handler: (req: HttpRequest) => Promise<HttpResponse>;
 }
 
@@ -162,7 +166,12 @@ export class WebhookServer {
     await this.stop();
     const host = allowLAN ? '0.0.0.0' : '127.0.0.1';
     // allowHalfOpen lets a client that shuts down its write side still receive the response.
-    const server = createServer({ allowHalfOpen: true }, (socket) => this.accept(socket, token, handler));
+    const server = 'testOnlyPlainTcp' in options.tls
+      ? createTcpServer({ allowHalfOpen: true }, (socket) => this.accept(socket, token, handler))
+      : createTlsServer({ ...options.tls, minVersion: 'TLSv1.2', handshakeTimeout: CONNECTION_DEADLINE_MS, allowHalfOpen: true }, (socket) => this.accept(socket, token, handler));
+    server.maxConnections = MAX_CONNECTIONS;
+    // Track pre-handshake sockets as well, so stop closes stalled TLS connections.
+    server.on('connection', (socket) => { this.sockets.add(socket); socket.on('close', () => this.sockets.delete(socket)); });
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, host, () => { server.off('error', reject); resolve(); });
@@ -189,7 +198,6 @@ export class WebhookServer {
   }
 
   private accept(socket: Socket, token: string, handler: WebhookStartOptions['handler']): void {
-    if (this.sockets.size >= MAX_CONNECTIONS) { socket.destroy(); return; }
     this.sockets.add(socket);
     socket.setNoDelay(true);
     socket.on('error', () => socket.destroy());

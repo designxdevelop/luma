@@ -240,6 +240,8 @@ function registerIPC(): void {
   handle('stopWebhook', () => home.stopWebhook());
   handle('rotateToken', () => home.rotateToken());
   handle('copyToken', () => home.copyToken());
+  handle('copyFingerprint', () => { const fingerprint = home.snapshot().webhook.fingerprint; if (!fingerprint) throw new LumaError('Start the server first.'); clipboard.writeText(fingerprint); });
+  handle('exportCertificate', async () => { const cert = home.webhookCertificate(); const result = await dialog.showSaveDialog(window!, { defaultPath: 'luma.pem', filters: [{ name: 'PEM certificate', extensions: ['pem'] }] }); if (!result.canceled && result.filePath) writeFileSync(result.filePath, cert); });
   handle('dismissNotice', () => home.dismissNotice());
   handle('syncSources', () => capture.list());
   handle('syncStart', (key, lights) => capture.start(key, lights));

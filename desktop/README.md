@@ -71,7 +71,9 @@ This produces architecture-labeled portable tar archives in `release-linux/`. Sa
 
 ## Local webhook API
 
-The listener is off by default. Start it explicitly in Automations; default binding is `127.0.0.1:8787`. LAN binding is a separate explicit choice. Every endpoint, including `/health`, requires `Authorization: Bearer …`. Tokens are masked in the UI and copied by the main process.
+The listener is off by default. Start it explicitly in Automations; default binding is `127.0.0.1:8787`. LAN binding is a separate explicit choice. **HTTPS only:** the listener uses TLS 1.2 or newer in both loopback and LAN mode, with no plain HTTP fallback. Luma stores a self-signed P-256 identity using encrypted OS storage and renews it before expiry. In Automations, export `luma.pem` and use `curl --cacert luma.pem`, or pin the SHA-256 fingerprint. Never disable certificate checks. The certificate names `localhost`, `127.0.0.1`, and `::1`; LAN callers using other addresses must pin the certificate or fingerprint. **Upgrading from HTTP:** update existing scripts, Shortcuts, and Home Assistant callers to HTTPS and trust the exported certificate.
+
+Every endpoint, including `/health`, requires `Authorization: Bearer …`. Tokens are masked in the UI and copied by the main process.
 
 | Method | Path | Result |
 | --- | --- | --- |
@@ -81,15 +83,12 @@ The listener is off by default. Start it explicitly in Automations; default bind
 | POST | `/v1/scenes/:id/run` | Execute a saved scene |
 | POST | `/v1/devices/:id/commands` | Schema-validated `{type, instance, value}` |
 
-PowerShell example: copy the token from Luma first. The token is read from the clipboard into memory, not pasted into shell history.
+Export `luma.pem` from Automations and copy the token into an environment variable. For example:
 
-```powershell
-$lumaToken = Get-Clipboard
-$lumaHeaders = @{ Authorization = "Bearer $lumaToken" }
-$lumaBody = @{ target = 'room:Living room'; power = $true; brightness = 40 } | ConvertTo-Json
-$lumaRun = Invoke-RestMethod http://127.0.0.1:8787/v1/actions -Method Post -Headers $lumaHeaders -ContentType 'application/json' -Body $lumaBody
-Invoke-RestMethod ("http://127.0.0.1:8787" + $lumaRun.statusURL) -Headers $lumaHeaders
-Remove-Variable lumaToken, lumaHeaders
+```sh
+curl --cacert luma.pem https://localhost:8787/v1/actions \
+  -H "Authorization: Bearer $LUMA_TOKEN" -H "Content-Type: application/json" \
+  -d '{"target":"all","power":true,"brightness":40}'
 ```
 
 POST success returns HTTP 202 with `runID` and `statusURL`. Completion means commands were submitted, not hardware-confirmed. Busy execution returns 409. Requests use strict HTTP framing and bounded JSON bodies (64 KiB); chunked encoding is unsupported. Clear the clipboard after using a token. Rotating it invalidates previous copies.

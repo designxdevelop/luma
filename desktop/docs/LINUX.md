@@ -22,7 +22,7 @@ Report hardware results by distro, version, desktop environment, session type an
 ## Runtime prerequisites
 
 - 64-bit x64 or arm64 distro that can run Electron 44 / Chromium (glibc, GTK 3, NSS, `libgbm`, ALSA). Ubuntu 24.04 package names: `libgtk-3-0t64 libnss3 libgbm1 libasound2t64 libxss1 libxtst6 libatspi2.0-0t64 xdg-utils`.
-- **A real keyring for cloud API keys and webhook tokens** (see below). LAN-only discovery and Screen Sync do not require a cloud key.
+- **A real keyring for cloud API keys, webhook tokens, and webhook TLS identities** (see below). LAN-only discovery and Screen Sync do not require a cloud key.
 - A running desktop session. Demo and connected mode both need a display; headless use needs a virtual display such as Xvfb.
 - Screen Sync capture needs an X11 session, or a Wayland session with `xdg-desktop-portal`, a compositor backend for it, and PipeWire.
 - Screen Sync capture also needs **lock reporting**: a systemd-logind session (`loginctl`), `gdbus` (`libglib2.0-bin`), and a **GNOME or KDE Plasma** desktop (`XDG_CURRENT_DESKTOP`). See "Screen lock on Linux" below. Without it capture is refused with an explanatory message; LAN and cloud control still work.
