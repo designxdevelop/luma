@@ -33,10 +33,11 @@ import LumaCore
         guard WCSession.default.isReachable, let message = try? request.encoded() else {
             problem = "Open Luma on your iPhone, then try again."; return
         }
-        WCSession.default.sendMessage(message, replyHandler: { reply in
+        // @Sendable: WatchConnectivity calls these on its own queue, not the main actor.
+        WCSession.default.sendMessage(message, replyHandler: { @Sendable reply in
             let next = WatchSnapshot.decode(reply)
             Task { @MainActor in if let next { self.snapshot = next }; self.problem = nil }
-        }, errorHandler: { error in
+        }, errorHandler: { @Sendable error in
             Task { @MainActor in self.problem = error.localizedDescription }
         })
     }
@@ -48,6 +49,10 @@ import LumaCore
             if let error { self.problem = error.localizedDescription }
             // The phone may have nothing to send yet; ask instead of waiting.
             if self.snapshot == nil, WCSession.default.isReachable { self.send(.refresh) }
+            #if DEBUG
+            // QA hook: exercise watch → phone without tapping the watch UI.
+            if ProcessInfo.processInfo.arguments.contains("--relay-check-all-off") { self.send(.power(ids: [], on: false)) }
+            #endif
         }
     }
     nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
