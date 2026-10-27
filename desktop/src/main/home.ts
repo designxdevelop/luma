@@ -16,6 +16,7 @@ import { WebhookServer } from '../core/http';
 import { createApiHandler } from '../core/api';
 import { HomeStorage, emptyHome, type SecretStore } from './storage';
 import { demoDevices, demoEffects, demoScenes } from './demo';
+import { REGIONS } from '../shared/sync-math';
 import { SyncController } from './sync';
 import type { StreamField } from '../core/stream';
 
@@ -114,6 +115,7 @@ export class Home {
         this.log(`Your saved home could not be read. It was left untouched at ${options.storage.file}.`, true);
       }
     }
+    if (this.home.syncSettings) this.sync.setSettings(this.home.syncSettings);
     this.scheduleTimer = setInterval(() => this.tickSchedules(), 15_000);
     this.scheduleTimer.unref?.();
   }
@@ -130,6 +132,25 @@ export class Home {
     this.emit();
   }
 
+  clearActivity(): void { this.activity = []; this.emit(); }
+  setAppearance(value: unknown): void {
+    if (value !== 'system' && value !== 'light' && value !== 'dark') throw new LumaError('Invalid appearance.');
+    this.home.appearance = value; this.schedulePersist(); this.emit();
+  }
+  setSyncSettings(value: unknown): void {
+    this.sync.setSettings(value); this.home.syncSettings = { ...this.sync.settings }; this.schedulePersist();
+  }
+  setSyncAssignments(value: unknown): void {
+    if (!Array.isArray(value) || value.length > 1000) throw new LumaError('Invalid assignments.');
+    const ids = new Set<string>();
+    const assignments = value.map((item: unknown) => {
+      if (!item || typeof item !== 'object') throw new LumaError('Invalid assignment.');
+      const v = item as Record<string, unknown>;
+      if (typeof v.id !== 'string' || !v.id.trim() || v.id.length > 128 || /[\u0000-\u001f]/.test(v.id) || ids.has(v.id) || typeof v.region !== 'string' || !REGIONS.includes(v.region as never) || typeof v.included !== 'boolean') throw new LumaError('Invalid assignment.');
+      ids.add(v.id); return { id: v.id, region: v.region as (typeof REGIONS)[number], included: v.included };
+    });
+    this.home.syncAssignments = assignments; this.schedulePersist(); this.emit();
+  }
   dismissNotice(): void { this.notice = undefined; this.emit(); }
 
   /** Confirmed state only. */
@@ -164,6 +185,8 @@ export class Home {
       canSave: this.canSave && !this.demo,
       version: this.options.version,
       sync: this.sync.view(),
+      appearance: this.home.appearance ?? 'system',
+      syncAssignments: this.home.syncAssignments ?? [],
     };
   }
 

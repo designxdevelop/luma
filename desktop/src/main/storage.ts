@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, 
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { Capability, CapabilityCommand, JSONValue, LightDevice, LightScene, SavedHome, SceneSchedule, SceneStep } from '../shared/types';
+import { DEFAULT_SYNC_SETTINGS, REGIONS, validateSettings } from '../shared/sync-math';
 import { isObject, repairStepIDs, safeInt } from '../core/model';
 
 export const emptyHome = (): SavedHome => ({ version: 1, devices: [], scenes: [], schedules: [], webhookPort: 8787, allowLAN: false });
@@ -130,6 +131,12 @@ function decodeHome(v: unknown): SavedHome {
     schedules: unique(list(v.schedules, 1000).map(schedule)),
     webhookPort: safeInt(v.webhookPort, 1024, 65535) ?? 8787,
     allowLAN: v.allowLAN === true,
+    appearance: v.appearance === 'light' || v.appearance === 'dark' ? v.appearance : 'system',
+    syncSettings: v.syncSettings === undefined ? { ...DEFAULT_SYNC_SETTINGS } : validateSettings(v.syncSettings, DEFAULT_SYNC_SETTINGS),
+    syncAssignments: v.syncAssignments === undefined ? [] : unique(list(v.syncAssignments, 1000).map(raw => {
+      if (!isObject(raw) || typeof raw.region !== 'string' || !REGIONS.includes(raw.region as never) || typeof raw.included !== 'boolean') throw invalidHome();
+      return { id: text(raw.id, 128), region: raw.region as (typeof REGIONS)[number], included: raw.included };
+    })),
   };
 }
 

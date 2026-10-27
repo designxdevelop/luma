@@ -32,3 +32,13 @@ Use only synthetic fixtures until an operator explicitly tests on Windows with t
 - LAN-only bounded latest-value streaming, with a conservative per-device frequency cap and no cloud/readback fallback. Prove a slow sender does not accumulate frames, Stop drops pending work, old-session results are rejected, and no pixels/source titles are written to logs/disk or uploaded.
 - Manual control excludes a mapped light before its command. Scenes/schedules/webhooks cannot fight an active stream. Handoff and explicit optional restoration drain old work first; never restore a manually excluded light or invent original state. Default Stop leaves the last sent colors.
 - Release tracks, workers and pending frames on Stop/quit/interruption; handle source/monitor changes, ended/muted capture, renderer loss, lock/sleep and processing stalls. Resume requires fresh explicit consent. Windows source/capture behavior, HDR approximation and measured model latency remain platform runtime gates.
+
+## Desktop navigation and preferences
+
+- Set System, Light, or Dark in Settings; restart and verify the selected appearance remains. System follows the OS.
+- Search lights by name, room, or model. Verify Ctrl+1–6, Ctrl+F, Ctrl+,, Ctrl+Alt+Up/Down, and Ctrl+. (Cmd instead of Ctrl on macOS).
+- Duplicate a scene and verify its name ends in ` Copy` and edits do not affect the original. Apply each schedule day preset.
+- In Activity, filter problems, check the error badge, and clear the list. In a light's Details, check available address, last seen, model, and copyable device ID.
+- Change Screen Sync response settings and per-light inclusion and regions, restart, and verify they remain; select a source again before starting.
+- From an empty home, open Explore Demo and verify the app restarts with sample lights and no real device or webhook access. Quit and start normally to return to the real home.
+- Open Settings and About from the tray. Check webhook examples against the documented routes on the Automations page.

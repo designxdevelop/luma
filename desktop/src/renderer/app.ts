@@ -5,6 +5,7 @@
 // as the latest-intent overlay; sliders keep a local draft only while being dragged.
 
 import type { AppSnapshot, Capability, CapabilityCommand, JSONValue, LightDevice, LightScene, LumaBridge, SceneSchedule, SceneStep, SyncRegion, SyncSettings, SyncSource } from '../shared/types';
+import { DAY_PRESETS, duplicateScene, filterLights } from './preferences.js';
 import { morph } from './morph.js';
 import { FramePump } from './screen-sync.js';
 import { ToggleIntents } from './toggles.js';
@@ -15,7 +16,7 @@ import {
 
 const luma = (window as unknown as { luma: LumaBridge }).luma;
 
-type View = 'lights' | 'scenes' | 'sync' | 'automations' | 'settings' | 'about';
+type View = 'activity' | 'lights' | 'scenes' | 'sync' | 'automations' | 'settings' | 'about';
 type Tab = 'light' | 'effects' | 'details';
 type SceneEditor = { kind: 'editor'; draft: LightScene; json: boolean; jsonText: string; error?: string; isNew: boolean };
 type Capture = { kind: 'capture'; name: string; icon: string; ids: string[]; error?: string };
@@ -38,6 +39,9 @@ const state = {
   syncSources: undefined as SyncSource[] | undefined,
   syncSource: undefined as string | undefined,
   syncLights: new Map<string, SyncRegion>(),
+  syncRegions: new Map<string, SyncRegion>(),
+  search: '',
+  problemsOnly: false,
 };
 const pump = new FramePump(luma);
 
@@ -80,18 +84,18 @@ function fill(el: HTMLInputElement): void {
 }
 
 function shell(s: AppSnapshot): string {
-  const nav: Array<[View, string, string]> = [['lights', 'Lights', 'bulb'], ['scenes', 'Scenes', 'scenes'], ['sync', 'Screen Sync', 'screen'], ['automations', 'Automations', 'clock'], ['settings', 'Settings', 'gear'], ['about', 'About', 'info']];
+  const nav: Array<[View, string, string]> = [['lights', 'Lights', 'bulb'], ['scenes', 'Scenes', 'scenes'], ['sync', 'Screen Sync', 'screen'], ['automations', 'Automations', 'clock'], ['activity', 'Activity', 'clock'], ['settings', 'Settings', 'gear'], ['about', 'About', 'info']];
   return `
   <nav class="sidebar" aria-label="Sections">
     <div class="brand"><span class="orb small" data-color="#ffb347"></span><span>Luma</span>${s.demo ? '<span class="badge">Demo</span>' : ''}</div>
-    <ul>${nav.map(([v, label, ic]) => `<li><button class="nav ${state.view === v ? 'active' : ''}" data-action="view" data-view="${v}" ${state.view === v ? 'aria-current="page"' : ''}>${icon(ic)}<span>${label}</span></button></li>`).join('')}</ul>
+    <ul>${nav.map(([v, label, ic]) => `<li><button class="nav ${state.view === v ? 'active' : ''}" data-action="view" data-view="${v}" ${state.view === v ? 'aria-current="page"' : ''}>${icon(ic)}<span>${label}</span>${v === 'activity' && s.activity.some(a => a.isError) ? `<span class="badge">${s.activity.filter(a => a.isError).length}</span>` : ''}</button></li>`).join('')}</ul>
     <div class="sidebar-foot">${s.demo ? 'Sample lights only. Nothing real is controlled and changes are not saved.' : s.cloudConnected ? 'Govee cloud connected' : 'Cloud not connected'}</div>
   </nav>
   <main class="content" id="main">
     ${s.notice ? `<div class="notice" role="alert"><span>${esc(s.notice)}</span><button class="ghost" data-action="dismiss-notice" aria-label="Dismiss message">${icon('close')}</button></div>` : ''}
     ${syncBanner(s)}
     ${state.status ? `<div class="status ${state.status.error ? 'error' : ''}">${esc(state.status.text)}</div>` : ''}
-    ${state.view === 'lights' ? lightsView(s) : state.view === 'scenes' ? scenesView(s) : state.view === 'sync' ? syncView(s) : state.view === 'automations' ? automationsView(s) : state.view === 'settings' ? settingsView(s) : aboutView(s)}
+    ${state.view === 'lights' ? lightsView(s) : state.view === 'scenes' ? scenesView(s) : state.view === 'sync' ? syncView(s) : state.view === 'automations' ? automationsView(s) : state.view === 'settings' ? settingsView(s) : state.view === 'activity' ? activityView(s) : aboutView(s)}
   </main>`;
 }
 
@@ -102,7 +106,8 @@ function pendingLabel(s: AppSnapshot, id: string): string {
 }
 
 function lightsView(s: AppSnapshot): string {
-  const rooms = [...new Set(s.devices.map((d) => d.room))].sort((a, b) => (a === 'Unassigned' ? 1 : b === 'Unassigned' ? -1 : a.localeCompare(b)));
+  const filtered = filterLights(s.devices, state.search);
+  const rooms = [...new Set(filtered.map((d) => d.room))].sort((a, b) => (a === 'Unassigned' ? 1 : b === 'Unassigned' ? -1 : a.localeCompare(b)));
   const on = s.devices.filter((d) => d.power === true).length;
   const selected = s.devices.find((d) => d.id === state.selected);
   return `
@@ -116,9 +121,10 @@ function lightsView(s: AppSnapshot): string {
           <button data-action="discover" ${s.demo || s.scanning ? 'disabled' : ''} title="${s.demo ? 'Disabled in demo' : 'Find lights with LAN Control enabled'}">${icon('wifi')}${s.scanning ? 'Scanning…' : 'Discover'}</button>
         </div>
       </header>
-      ${s.devices.length === 0 ? `<div class="empty"><span class="orb large" data-color="#ffb347"></span><h2>Bring your lights in</h2><p>Connect your Govee account in Settings, or enable <strong>LAN Control</strong> for each light in the Govee Home app and choose Discover.</p><button class="primary" data-action="view" data-view="settings">Open Settings</button></div>` : ''}
+      ${s.devices.length ? `<label class="block" for="light-search">Search lights</label><input id="light-search" type="search" data-action="search" value="${esc(state.search)}" placeholder="Search lights">${filtered.length === 0 ? '<p class="hint">No matching lights.</p>' : ''}` : ''}
+      ${s.devices.length === 0 ? `<div class="empty"><span class="orb large" data-color="#ffb347"></span><h2>Bring your lights in</h2><p>Connect your Govee account in Settings, or enable <strong>LAN Control</strong> for each light in the Govee Home app and choose Discover.</p><button class="primary" data-action="view" data-view="settings">Open Settings</button> <button data-action="explore-demo">Explore Demo</button></div>` : ''}
       ${rooms.map((room) => {
-        const devices = s.devices.filter((d) => d.room === room);
+        const devices = filtered.filter((d) => d.room === room);
         return `<section class="room" aria-label="${esc(room)}">
           <div class="room-head"><h2>${esc(room)}</h2><div class="room-actions"><button class="ghost" data-action="room" data-room="${esc(room)}" data-on="1">On</button><button class="ghost" data-action="room" data-room="${esc(room)}" data-on="0">Off</button></div></div>
           <div class="cards">${devices.map((d) => card(s, d)).join('')}</div>
@@ -297,7 +303,9 @@ function detailsTab(s: AppSnapshot, d: LightDevice): string {
     </form>
     <dl class="facts">
       <dt>Model</dt><dd>${esc(d.sku)}</dd>
-      <dt>Device ID</dt><dd class="code">${esc(d.id)}</dd>
+      <dt>Device ID</dt><dd class="code">${esc(d.id)} <button data-action="copy-device-id" data-id="${esc(d.id)}">Copy</button></dd>
+      ${d.ip ? `<dt>Network address</dt><dd>${esc(d.ip)}</dd>` : ''}
+      ${d.lastSeen ? `<dt>Last seen</dt><dd>${esc(new Date(d.lastSeen).toLocaleString())}</dd>` : ''}
       <dt>Control</dt><dd>${d.isDemo ? 'Demo (simulated)' : d.ip ? `LAN at ${esc(d.ip)} for basic controls; cloud for effects` : 'Govee cloud'}</dd>
       <dt>Status</dt><dd>${d.online === false ? 'Offline' : d.online ? 'Online' : 'Unknown'}${d.lastSeen ? ` · seen ${relativeTime(d.lastSeen)}` : ''}</dd>
       <dt>Capabilities</dt><dd>${d.capabilities.length ? d.capabilities.map((c) => esc(friendly(c.instance))).join(', ') : 'Basic LAN controls'}</dd>
@@ -323,6 +331,7 @@ function scenesView(s: AppSnapshot): string {
       <div class="actions">
         <button class="primary" data-action="run-scene" data-id="${esc(scene.id)}" ${s.runningSceneID ? 'disabled' : ''} aria-label="Run ${esc(scene.name)}">${icon('play')}Run</button>
         <button data-action="edit-scene" data-id="${esc(scene.id)}" aria-label="Edit ${esc(scene.name)}">Edit</button>
+        <button data-action="duplicate-scene" data-id="${esc(scene.id)}">Duplicate</button>
         <button class="ghost" data-action="export-scene" data-id="${esc(scene.id)}" aria-label="Export ${esc(scene.name)}">Export</button>
         <button class="ghost danger" data-action="delete-scene" data-id="${esc(scene.id)}" aria-label="Delete ${esc(scene.name)}">${icon('trash')}</button>
       </div>
@@ -375,6 +384,7 @@ function scheduleRow(s: AppSnapshot, sch: SceneSchedule): string {
   return `<li class="schedule" data-key="${esc(sch.id)}">
     <select aria-label="Scene" data-action="sch-scene" data-id="${esc(sch.id)}">${s.scenes.map((sc) => `<option value="${esc(sc.id)}" ${sc.id === sch.sceneID ? 'selected' : ''}>${esc(sc.name)}</option>`).join('')}</select>
     <input type="time" aria-label="Time" value="${time}" data-action="sch-time" data-id="${esc(sch.id)}">
+    <div class="actions"><button data-action="sch-preset" data-id="${esc(sch.id)}" data-preset="daily">Every Day</button><button data-action="sch-preset" data-id="${esc(sch.id)}" data-preset="weekdays">Weekdays</button><button data-action="sch-preset" data-id="${esc(sch.id)}" data-preset="weekends">Weekends</button></div>
     <div class="weekdays" role="group" aria-label="Days">${WEEKDAYS.map((day, i) => `<button class="day" aria-pressed="${sch.weekdays.includes(i + 1)}" data-action="sch-day" data-id="${esc(sch.id)}" data-day="${i + 1}">${day}</button>`).join('')}</div>
     <input type="checkbox" role="switch" class="switch" aria-label="Enabled" data-action="sch-enabled" data-id="${esc(sch.id)}" ${sch.enabled ? 'checked' : ''}>
     <span class="next">${next ? `Next: ${next.toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : 'Not scheduled'}</span>
@@ -385,6 +395,7 @@ function scheduleRow(s: AppSnapshot, sch: SceneSchedule): string {
 function settingsView(s: AppSnapshot): string {
   return `<section class="pane" aria-labelledby="settings-title">
     <header class="toolbar"><div><h1 id="settings-title">Settings</h1></div></header>
+    <section class="card-block"><h2>Appearance</h2><label for="appearance">Theme</label> <select id="appearance" data-action="appearance">${(['system', 'light', 'dark'] as const).map(v => `<option value="${v}" ${s.appearance === v ? 'selected' : ''}>${v[0]!.toUpperCase() + v.slice(1)}</option>`).join('')}</select></section>
     <section class="card-block" aria-labelledby="acct-title"><h2 id="acct-title">Govee account</h2>
       ${s.demo ? '<p class="hint">Demo mode: account connection is disabled. Start Luma without --demo on Windows or Linux to connect.</p>' : ''}
       ${!s.demo && !s.platformSecretsAvailable ? '<p class="hint warn">Secure storage (Windows DPAPI, or GNOME Keyring/KWallet on Linux) is unavailable, so Luma will not store an API key.</p>' : ''}
@@ -406,10 +417,14 @@ function settingsView(s: AppSnapshot): string {
       <div class="actions"><button data-action="discover" ${s.demo || s.scanning ? 'disabled' : ''}>${icon('wifi')}${s.scanning ? 'Scanning…' : 'Discover lights'}</button><button class="ghost" data-action="link" data-link="lan-guide">How to enable LAN Control</button></div>
       <p class="hint">Luma listens on UDP port 4002. Your firewall may ask for permission; another Govee tool running on this PC can receive the replies instead.</p>
     </section>
-    <section class="card-block" aria-labelledby="log-title"><h2 id="log-title">Activity</h2>
-      <ul class="activity">${s.activity.slice(0, 40).map((a) => `<li class="${a.isError ? 'err' : ''}"><time>${new Date(a.time).toLocaleTimeString()}</time><span>${esc(a.message)}</span></li>`).join('') || '<li>No activity yet.</li>'}</ul>
-    </section>
   </section>`;
+}
+
+function activityView(s: AppSnapshot): string {
+  const entries = s.activity.filter(a => !state.problemsOnly || a.isError);
+  return `<section class="pane"><header class="toolbar"><h1>Activity</h1><button data-action="clear-activity" ${s.activity.length ? '' : 'disabled'}>Clear</button></header>
+    <div class="segmented" role="group" aria-label="Activity filter"><button data-action="activity-filter" data-problems="0" aria-pressed="${!state.problemsOnly}">All</button><button data-action="activity-filter" data-problems="1" aria-pressed="${state.problemsOnly}">Problems</button></div>
+    <ul class="activity">${entries.map(a => `<li class="${a.isError ? 'err' : ''}"><time>${esc(new Date(a.time).toLocaleString())}</time><span>${esc(a.message)}</span></li>`).join('') || '<li>No activity.</li>'}</ul></section>`;
 }
 
 function aboutView(s: AppSnapshot): string {
@@ -476,9 +491,9 @@ function syncSlider(s: AppSnapshot, d: (typeof SYNC_SLIDERS)[number]): string {
 
 function syncView(s: AppSnapshot): string {
   const y = s.sync, idle = y.phase === 'idle';
-  const canStart = idle && !!state.syncSource && state.syncLights.size > 0;
   const eligible = y.eligibility.filter((e) => e.eligible), blocked = y.eligibility.filter((e) => !e.eligible);
-  for (const id of [...state.syncLights.keys()]) if (!eligible.some((e) => e.id === id)) state.syncLights.delete(id);
+  const canStart = idle && !!state.syncSource && eligible.some(e => state.syncLights.has(e.id));
+
   const platform = y.synthetic
     ? '<p class="hint">Demo: Screen Sync uses generated synthetic frames. Nothing on this computer is captured.</p>'
     : y.captureSupported ? '' : '<p class="hint warn">Screen capture is available on Windows and Linux.</p>';
@@ -501,7 +516,7 @@ function syncView(s: AppSnapshot): string {
       <h2 id="sync-lights-title">Lights</h2>
       ${idle ? `${eligible.length ? `<ul class="sync-lights">${eligible.map((e) => `<li>
           <label class="choice"><input type="checkbox" data-action="sync-light" data-id="${esc(e.id)}" ${state.syncLights.has(e.id) ? 'checked' : ''}><span>${esc(e.name)}</span></label>
-          <select data-action="sync-region" data-id="${esc(e.id)}" aria-label="${esc(e.name)} screen area">${REGION_GROUPS.map(([group, regions]) => `<optgroup label="${group}">${regions.map(([r, label]) => `<option value="${r}" ${(state.syncLights.get(e.id) ?? 'full') === r ? 'selected' : ''}>${label}</option>`).join('')}</optgroup>`).join('')}</select>
+          <select data-action="sync-region" data-id="${esc(e.id)}" aria-label="${esc(e.name)} screen area">${REGION_GROUPS.map(([group, regions]) => `<optgroup label="${group}">${regions.map(([r, label]) => `<option value="${r}" ${(state.syncRegions.get(e.id) ?? 'full') === r ? 'selected' : ''}>${label}</option>`).join('')}</optgroup>`).join('')}</select>
         </li>`).join('')}</ul>` : '<p class="hint">No light can stream right now.</p>'}
         ${blocked.length ? `<details class="advanced"><summary>Unavailable lights (${blocked.length})</summary><ul class="sync-blocked">${blocked.map((e) => `<li><span>${esc(e.name)}</span><span class="sub">${esc(e.reason ?? '')}</span></li>`).join('')}</ul></details>` : ''}
         <p class="hint">Only lights that are on and reachable with Govee LAN Control can stream; Screen Sync never uses the cloud. It does not turn lights on.</p>`
@@ -560,7 +575,7 @@ document.addEventListener('click', (event) => {
       void act(async () => { state.syncSources = await luma.syncSources(); state.syncSource = undefined; render(); });
       break;
     case 'sync-start': {
-      const key = state.syncSource, lights = [...state.syncLights].map(([id, region]) => ({ id, region }));
+      const key = state.syncSource, lights = [...state.syncLights].filter(([id]) => state.snap?.sync.eligibility.some(e => e.id === id && e.eligible)).map(([id, region]) => ({ id, region }));
       if (!key || lights.length === 0) break;
       luma.syncStart(key, lights).then((grant) => {
         void pump.start(grant, state.snap?.demo === true); // first, while the click's activation is fresh
@@ -589,18 +604,21 @@ document.addEventListener('change', (event) => {
     case 'sync-source': state.syncSource = el.value; render(); break;
     case 'sync-light': {
       const region = document.querySelector<HTMLSelectElement>(`select[data-action="sync-region"][data-id="${CSS.escape(el.dataset.id!)}"]`)?.value as SyncRegion | undefined;
+      state.syncRegions.set(el.dataset.id!, region ?? 'full');
       if (el.checked) state.syncLights.set(el.dataset.id!, region ?? 'full'); else state.syncLights.delete(el.dataset.id!);
-      render();
+      saveAssignments(); render();
       break;
     }
     case 'sync-region': {
       const id = el.dataset.id!;
-      if (REGION_LABELS.some(([r]) => r === el.value)) state.syncLights.set(id, el.value as SyncRegion);
+      if (REGION_LABELS.some(([r]) => r === el.value)) { state.syncRegions.set(id, el.value as SyncRegion); if (state.syncLights.has(id)) state.syncLights.set(id, el.value as SyncRegion); saveAssignments(); }
       render();
       break;
     }
   }
 });
+
+function saveAssignments(): void { void act(() => luma.setSyncAssignments([...state.syncRegions].map(([id, region]) => ({ id, region, included: state.syncLights.has(id) })))); }
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : String(error);
@@ -832,6 +850,12 @@ document.addEventListener('click', (event) => {
   const a = target.dataset.action!, id = target.dataset.id;
   const m = editor();
   switch (a) {
+    case 'explore-demo': void act(() => luma.exploreDemo()); break;
+    case 'copy-device-id': void act(() => luma.copyDeviceID(id!), 'Device ID copied.'); break;
+    case 'clear-activity': void act(() => luma.clearActivity()); break;
+    case 'activity-filter': state.problemsOnly = target.dataset.problems === '1'; render(); break;
+    case 'sch-preset': { const sch = state.snap?.schedules.find(x => x.id === id); if (sch) void act(() => luma.saveSchedule({ ...sch, weekdays: [...DAY_PRESETS[target.dataset.preset as keyof typeof DAY_PRESETS]] })); break; }
+    case 'duplicate-scene': { const sc = state.snap?.scenes.find(x => x.id === id); if (sc) void act(() => luma.saveScene(duplicateScene(sc, uuid))); break; }
     case 'view': state.view = target.dataset.view as View; render(); document.getElementById('main')?.focus(); break;
     case 'dismiss-notice': void luma.dismissNotice(); break;
     case 'select': selectDevice(state.selected === id ? undefined : id); break;
@@ -954,6 +978,7 @@ document.addEventListener('input', (event) => {
   if (el.type === 'range' && el.dataset.key) { state.dragging.add(el.dataset.key); readout(el); return; }
   if (el.type === 'color' && el.dataset.key && !a) { state.dragging.add(el.dataset.key); return; }
   switch (a) {
+    case 'search': state.search = el.value; render(); break;
     case 'adv-text': { const cur = state.advanced.get(el.dataset.id!) ?? { instance: device(el.dataset.id)?.capabilities[0]?.instance ?? '', text: '' }; state.advanced.set(el.dataset.id!, { ...cur, text: el.value }); break; }
     case 'cap-name': if (state.modal?.kind === 'capture') state.modal.name = el.value; break;
     case 'ed-name': if (m) m.draft.name = el.value; break;
@@ -977,6 +1002,7 @@ document.addEventListener('change', (event) => {
     return;
   }
   switch (a) {
+    case 'appearance': void act(() => luma.setAppearance(el.value as 'system' | 'light' | 'dark')); break;
     case 'power': { const d = device(id); if (d) control(d.id, basicCommand(d, 'powerSwitch', el.checked ? 1 : 0)); break; }
     case 'effect-toggle': {
       const d = device(id), cap = d && capOf(d, el.dataset.instance!);
@@ -1032,6 +1058,15 @@ document.addEventListener('change', (event) => {
 
 document.addEventListener('keydown', (event) => {
   const el = event.target as HTMLElement;
+  const modifier = navigator.platform.toLowerCase().includes('mac') ? event.metaKey : event.ctrlKey;
+  if (modifier && !event.shiftKey) {
+    const pages: View[] = ['lights', 'scenes', 'automations', 'activity', 'settings', 'sync'];
+    if (!event.altKey && /^[1-6]$/.test(event.key)) { state.view = pages[Number(event.key) - 1]!; render(); event.preventDefault(); return; }
+    if (!event.altKey && event.key === ',') { state.view = 'settings'; render(); event.preventDefault(); return; }
+    if (!event.altKey && event.key.toLowerCase() === 'f') { state.view = 'lights'; render(); document.getElementById('light-search')?.focus(); event.preventDefault(); return; }
+    if (!event.altKey && event.key === '.') { void act(() => luma.stopScene()); event.preventDefault(); return; }
+    if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) { for (const d of state.snap?.devices ?? []) if (supports(d, 'powerSwitch')) control(d.id, basicCommand(d, 'powerSwitch', event.key === 'ArrowUp' ? 1 : 0)); event.preventDefault(); return; }
+  }
   if (el instanceof HTMLInputElement && el.type === 'range') {
     const v = sliderStep(el, event.key);
     if (v !== undefined) { event.preventDefault(); setSlider(el, v); }
@@ -1091,5 +1126,5 @@ modalHost.addEventListener('cancel', (event) => { event.preventDefault(); state.
 
 luma.onSnapshot((snap) => { state.snap = snap; followSync(snap); render(); });
 luma.onNavigate((target) => { if (target.deviceID) selectDevice(target.deviceID, 'light'); else if (target.tab) { state.view = target.tab as View; render(); } });
-void luma.snapshot().then((snap) => { state.snap = snap; render(); });
+void luma.snapshot().then((snap) => { state.snap = snap; for (const a of snap.syncAssignments) { state.syncRegions.set(a.id, a.region); if (a.included) state.syncLights.set(a.id, a.region); } render(); });
 setInterval(() => { if (state.view === 'automations') render(); }, 30_000); // keep "Next:" times fresh
