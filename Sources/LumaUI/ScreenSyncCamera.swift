@@ -1,0 +1,77 @@
+#if os(iOS)
+@preconcurrency import AVFoundation
+import os
+import LumaCore
+
+// Camera adapter for iOS, where other apps' screens can't be read without a
+// broadcast extension. Frames are reduced to the same coarse color grid as
+// macOS capture on a private queue; pixels are never stored or sent.
+
+extension ScreenSource {
+    static var camera: ScreenSource { ScreenSource(name: "Back camera", kind: .camera) { CameraScreenCapture() } }
+}
+
+final class CameraScreenCapture: ScreenCaptureSession {
+    private var session: AVCaptureSession?
+    private var output: CameraFrameOutput?
+
+    func start(onFrame: @escaping @MainActor (ScreenGrid, ContinuousClock.Instant) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) async throws {
+        guard await AVCaptureDevice.requestAccess(for: .video) else { throw ScreenCaptureEnd.permissionDenied }
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) ?? AVCaptureDevice.default(for: .video) else {
+            throw ScreenCaptureEnd.failed("No camera is available.")
+        }
+        let session = AVCaptureSession()
+        // The lowest preset is plenty: the analyzer reduces to a 30×18 grid.
+        session.sessionPreset = .low
+        let input = try AVCaptureDeviceInput(device: device)
+        let video = AVCaptureVideoDataOutput()
+        video.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        video.alwaysDiscardsLateVideoFrames = true
+        let output = CameraFrameOutput(onFrame: onFrame, onEnd: onEnd)
+        video.setSampleBufferDelegate(output, queue: output.queue)
+        guard session.canAddInput(input), session.canAddOutput(video) else { throw ScreenCaptureEnd.failed("The camera couldn't be configured.") }
+        session.addInput(input); session.addOutput(video)
+        // Camera frames arrive landscape; match the TV's orientation.
+        if let connection = video.connection(with: .video), connection.isVideoRotationAngleSupported(0) { connection.videoRotationAngle = 0 }
+        self.session = session; self.output = output
+        await withCheckedContinuation { done in output.queue.async { session.startRunning(); done.resume() } }
+    }
+
+    func stop() {
+        output?.cancel()
+        guard let session, let output else { return }
+        self.session = nil; self.output = nil
+        output.queue.async { session.stopRunning() }
+    }
+}
+
+/// Hands only the latest grid to the main actor; a busy main thread drops frames.
+private final class CameraFrameOutput: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+    nonisolated let queue = DispatchQueue(label: "app.luma.screen-sync.camera", qos: .utility)
+    nonisolated private let state = OSAllocatedUnfairLock(initialState: (scheduled: false, cancelled: false))
+    nonisolated private let onFrame: @MainActor (ScreenGrid, ContinuousClock.Instant) -> Void
+    nonisolated private let onEnd: @MainActor (ScreenCaptureEnd) -> Void
+
+    nonisolated init(onFrame: @escaping @MainActor (ScreenGrid, ContinuousClock.Instant) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) {
+        self.onFrame = onFrame; self.onEnd = onEnd
+    }
+
+    nonisolated func cancel() { state.withLock { $0.cancelled = true } }
+
+    nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard state.withLock({ !$0.cancelled && !$0.scheduled }), let pixels = sampleBuffer.imageBuffer,
+              CVPixelBufferLockBaseAddress(pixels, .readOnly) == kCVReturnSuccess else { return }
+        defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pixels) else { return }
+        let height = CVPixelBufferGetHeight(pixels), bytesPerRow = CVPixelBufferGetBytesPerRow(pixels)
+        let bytes = UnsafeRawBufferPointer(start: base, count: bytesPerRow * height)
+        guard let grid = ScreenColorMath.analyze(bytes, width: CVPixelBufferGetWidth(pixels), height: height, bytesPerRow: bytesPerRow) else { return }
+        let capturedAt = ContinuousClock.now
+        state.withLock { $0.scheduled = true }
+        Task { @MainActor in
+            let deliver = self.state.withLock { s -> Bool in s.scheduled = false; return !s.cancelled }
+            if deliver { self.onFrame(grid, capturedAt) }
+        }
+    }
+}
+#endif

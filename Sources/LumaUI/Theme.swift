@@ -1,5 +1,9 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 import LumaCore
 
 // Luma's visual language: neutral surfaces, one warm accent, and light colors
@@ -33,11 +37,19 @@ extension Color {
     static let sidebar = canvas
 
     private static func dynamic(light: Int, dark: Int, lightAlpha: Double = 1, darkAlpha: Double = 1) -> Color {
+        #if os(macOS)
         Color(nsColor: NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let rgb = isDark ? dark : light
             return NSColor(srgbRed: CGFloat((rgb >> 16) & 255) / 255, green: CGFloat((rgb >> 8) & 255) / 255, blue: CGFloat(rgb & 255) / 255, alpha: isDark ? darkAlpha : lightAlpha)
         })
+        #else
+        Color(uiColor: UIColor { traits in
+            let isDark = traits.userInterfaceStyle == .dark
+            let rgb = isDark ? dark : light
+            return UIColor(red: CGFloat((rgb >> 16) & 255) / 255, green: CGFloat((rgb >> 8) & 255) / 255, blue: CGFloat(rgb & 255) / 255, alpha: isDark ? darkAlpha : lightAlpha)
+        })
+        #endif
     }
 }
 
@@ -47,7 +59,12 @@ enum Appearance: String, CaseIterable, Identifiable {
     var title: String { switch self { case .system: "System"; case .light: "Light"; case .dark: "Dark" } }
     /// Applied app-wide so sheets, Settings, and the menu bar extra follow it.
     func apply() {
+        #if os(macOS)
         NSApp?.appearance = switch self { case .system: nil; case .light: NSAppearance(named: .aqua); case .dark: NSAppearance(named: .darkAqua) }
+        #else
+        let style: UIUserInterfaceStyle = switch self { case .system: .unspecified; case .light: .light; case .dark: .dark }
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes { scene.windows.forEach { $0.overrideUserInterfaceStyle = style } }
+        #endif
     }
 }
 
@@ -106,8 +123,15 @@ func kelvinColor(_ kelvin: Int) -> Color {
 }
 
 func rgbValue(of color: Color) -> Int? {
+    #if os(macOS)
     guard let c = NSColor(color).usingColorSpace(.sRGB) else { return nil }
-    return (Int((c.redComponent * 255).rounded()) << 16) | (Int((c.greenComponent * 255).rounded()) << 8) | Int((c.blueComponent * 255).rounded())
+    let (r, g, b) = (c.redComponent, c.greenComponent, c.blueComponent)
+    #else
+    var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0
+    guard UIColor(color).getRed(&r, green: &g, blue: &b, alpha: nil) else { return nil }
+    (r, g, b) = (min(max(r, 0), 1), min(max(g, 0), 1), min(max(b, 0), 1))
+    #endif
+    return (Int((r * 255).rounded()) << 16) | (Int((g * 255).rounded()) << 8) | Int((b * 255).rounded())
 }
 
 // MARK: - Shared views
@@ -258,8 +282,12 @@ struct CodeBlock: View {
 }
 
 func copyToPasteboard(_ text: String) {
+    #if os(macOS)
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(text, forType: .string)
+    #else
+    UIPasteboard.general.string = text
+    #endif
 }
 
 /// Brightness control shared by light cards and the device sheet.
@@ -310,5 +338,27 @@ struct BrightnessSlider: View {
     private func requestBrightness(_ value: Double) {
         guard store.devices.first(where: { $0.id == device.id })?.brightness != Int(value) else { return }
         store.perform(.brightness(Int(value)), ids: [device.id])
+    }
+}
+
+// MARK: - Platform modifiers
+
+extension View {
+    /// Checkbox on macOS; iOS has no checkbox style, so a standard switch.
+    @ViewBuilder func checkboxToggle() -> some View {
+        #if os(macOS)
+        toggleStyle(.checkbox)
+        #else
+        toggleStyle(.switch)
+        #endif
+    }
+
+    /// Escape on macOS; iOS has no exit command.
+    @ViewBuilder func onExitCommandIfAvailable(perform action: @escaping () -> Void) -> some View {
+        #if os(macOS)
+        onExitCommand(perform: action)
+        #else
+        self
+        #endif
     }
 }

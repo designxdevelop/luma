@@ -1,16 +1,19 @@
 import Foundation
-import AppKit
 import CoreMedia
 import CoreVideo
 import os
-@preconcurrency import ScreenCaptureKit
 import LumaCore
+#if os(macOS)
+import AppKit
+@preconcurrency import ScreenCaptureKit
+#endif
 
 // ScreenCaptureKit adapter. The system picker is the only way a real source is
 // chosen: Luma never enumerates shareable content or preflights permission.
 // Frames are reduced to a coarse grid of color sums on a private queue; pixels
 // are never stored, logged, or sent anywhere.
 
+#if os(macOS)
 extension ScreenSource {
     static func system(_ filter: SCContentFilter) -> ScreenSource {
         let isWindow = filter.style == .window
@@ -26,12 +29,17 @@ extension ScreenSource {
         }
         return ScreenSource(name: name, kind: isWindow ? .window : .display) { SystemScreenCapture(filter: filter) }
     }
+}
+#endif
+
+extension ScreenSource {
 
     /// Synthetic letterboxed frames for the demo home. Runs through the same
     /// analyzer as real capture; nothing on screen is read.
     static var sample: ScreenSource { ScreenSource(name: "Sample video", kind: .sample) { SampleScreenCapture() } }
 }
 
+#if os(macOS)
 private extension String { var nilIfEmpty: String? { isEmpty ? nil : self } }
 
 // MARK: - System picker
@@ -207,6 +215,8 @@ private final class FrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @un
     }
 }
 
+#endif
+
 // MARK: - Demo sample
 
 /// Generates 160×90 BGRA frames with letterbox bars and two slowly drifting
@@ -229,8 +239,13 @@ final class SampleScreenCapture: ScreenCaptureSession {
 
     static func frame(phase: Double, width: Int = 160, height: Int = 90, bar: Int = 10) -> ScreenGrid? {
         func bgra(hue: Double) -> [UInt8] {
-            let c = NSColor(hue: hue.truncatingRemainder(dividingBy: 1), saturation: 0.8, brightness: 0.9, alpha: 1)
-            return [UInt8(c.blueComponent * 255), UInt8(c.greenComponent * 255), UInt8(c.redComponent * 255), 255]
+            // HSV (s 0.8, v 0.9) to BGRA.
+            let h = hue.truncatingRemainder(dividingBy: 1) * 6, v = 0.9, s = 0.8
+            func channel(_ n: Double) -> UInt8 {
+                let k = (n + h).truncatingRemainder(dividingBy: 6)
+                return UInt8((v - v * s * max(0, min(k, 4 - k, 1))) * 255)
+            }
+            return [channel(1), channel(3), channel(5), 255]
         }
         let left = bgra(hue: phase), right = bgra(hue: phase + 0.33)
         var pixels = [UInt8](repeating: 0, count: width * height * 4)

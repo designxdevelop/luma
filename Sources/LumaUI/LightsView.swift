@@ -79,7 +79,7 @@ struct LightsView: View {
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary).font(.system(size: 12))
-            TextField("Search", text: $search).textFieldStyle(.plain).focused($searchFocused).onExitCommand { search = ""; searchFocused = false }
+            TextField("Search", text: $search).textFieldStyle(.plain).focused($searchFocused).onExitCommandIfAvailable { search = ""; searchFocused = false }
             if !search.isEmpty {
                 Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }.buttonStyle(.plain).accessibilityLabel("Clear search")
             }

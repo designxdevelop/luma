@@ -1,5 +1,9 @@
 import Foundation
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 import Observation
 import os
 import LumaCore
@@ -7,7 +11,7 @@ import LumaCore
 /// Content the user explicitly chose. Holding a source never captures anything;
 /// only `ScreenSync.start()` creates a session from it.
 struct ScreenSource {
-    enum Kind { case display, window, sample }
+    enum Kind { case display, window, camera, sample }
     let name: String
     let kind: Kind
     let makeSession: () -> any ScreenCaptureSession
@@ -90,6 +94,11 @@ protocol ScreenCaptureSession: AnyObject {
         guard !isActive else { return }
         message = nil; permissionDenied = false
         if store?.demo == true { select(.sample); return }
+        #if os(iOS)
+        // iOS can't read other apps' screens without a broadcast extension; the
+        // camera pointed at a TV or monitor is the source instead.
+        select(.camera)
+        #else
         ScreenSourcePicker.shared.present { [weak self] result in
             guard let self, !self.isActive else { return }
             switch result {
@@ -100,6 +109,7 @@ protocol ScreenCaptureSession: AnyObject {
                 if self.source == nil { ScreenSourcePicker.shared.deactivate() }
             }
         }
+        #endif
     }
 
     func select(_ source: ScreenSource) {
@@ -158,7 +168,9 @@ protocol ScreenCaptureSession: AnyObject {
         phase = .idle; source = nil; pauseReason = nil
         excluded.removeAll(); preview.removeAll(); regionPreview = nil
         mixer.reset()
+        #if os(macOS)
         ScreenSourcePicker.shared.deactivate()
+        #endif
     }
 
     /// Cancels the ticker and capture. Bumping the generation makes every
@@ -207,6 +219,12 @@ protocol ScreenCaptureSession: AnyObject {
         self.defaults = defaults
     }
 
+    #if os(iOS)
+    static let permissionMessage = "iOS didn't allow Luma to use the camera."
+    #else
+    static let permissionMessage = "macOS didn't allow Luma to capture your screen."
+    #endif
+
     private func ended(_ end: ScreenCaptureEnd, generation g: UInt64) {
         guard g == generation else { return }
         let keepsSource = end == .permissionDenied
@@ -215,7 +233,7 @@ protocol ScreenCaptureSession: AnyObject {
         if keepsSource { self.source = source }
         switch end {
         case .userStopped: message = "Screen Sync stopped from the macOS menu bar."
-        case .permissionDenied: permissionDenied = true; message = "macOS didn't allow Luma to capture your screen."
+        case .permissionDenied: permissionDenied = true; message = Self.permissionMessage
         case .sourceGone: message = "The window or display you chose is no longer available. Choose it again to continue."
         case .failed(let text): message = "Screen Sync stopped: \(text)"
         }
@@ -330,6 +348,12 @@ protocol ScreenCaptureSession: AnyObject {
     /// is always an explicit choice; nothing restarts on wake or unlock.
     func observeSystem() {
         guard observers.isEmpty else { return }
+        #if os(iOS)
+        // iOS stops camera capture in the background; pause so resuming stays explicit.
+        let events: [(NotificationCenter, Notification.Name, String)] = [
+            (.default, UIApplication.didEnterBackgroundNotification, "Paused while Luma was in the background.")
+        ]
+        #else
         let workspace = NSWorkspace.shared.notificationCenter
         let events: [(NotificationCenter, Notification.Name, String)] = [
             (workspace, NSWorkspace.willSleepNotification, "Paused while your Mac slept."),
@@ -338,6 +362,7 @@ protocol ScreenCaptureSession: AnyObject {
             // ponytail: undocumented lock notification, paired with the session events above.
             (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsLocked"), "Paused while your Mac was locked.")
         ]
+        #endif
         for (center, name, reason) in events {
             let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.pause(reason: reason) }

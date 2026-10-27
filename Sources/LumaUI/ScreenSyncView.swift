@@ -1,5 +1,9 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 import LumaCore
 
 struct ScreenSyncView: View {
@@ -11,7 +15,7 @@ struct ScreenSyncView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                PageHeader(title: "Screen Sync", subtitle: "Match local lights to a display or window on this Mac.") { actions }
+                PageHeader(title: "Screen Sync", subtitle: Copy.subtitle) { actions }
                 sourceCard
                 if sync.phase == .idle { privacyCard }
                 if let colors = sync.regionPreview { colorMap(colors) }
@@ -26,7 +30,7 @@ struct ScreenSyncView: View {
     @ViewBuilder private var actions: some View {
         switch sync.phase {
         case .idle where sync.source == nil:
-            Button(store.demo ? "Use Sample Video" : "Choose Display or Window…") { sync.chooseSource() }.buttonStyle(.borderedProminent)
+            Button(store.demo ? "Use Sample Video" : Copy.choose) { sync.chooseSource() }.buttonStyle(.borderedProminent)
         case .idle:
             Button("Change…") { sync.chooseSource() }
             Button("Start") { Task { await sync.start() } }.buttonStyle(.borderedProminent)
@@ -52,7 +56,7 @@ struct ScreenSyncView: View {
                         .frame(width: 28, height: 28).background(Color.lumaAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(sync.source?.name ?? "No display or window chosen").font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                        Text(sync.source?.name ?? Copy.noSource).font(.system(size: 13, weight: .semibold)).lineLimit(2)
                         Text(sync.source == nil ? "You pick what Luma follows. Nothing is captured until you start." : "Only the content you chose is used.")
                             .font(.system(size: 12)).foregroundStyle(.secondary)
                     }
@@ -67,16 +71,22 @@ struct ScreenSyncView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if sync.permissionDenied {
+                    #if os(iOS)
+                    Text("Luma needs camera access to follow the colors on your TV or monitor. You can allow it in Settings › Luma › Camera, then start again.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) }
+                    #else
                     Text("Luma needs your permission to read a display or window. You can allow it in System Settings under Privacy & Security › Screen & System Audio Recording, then start again.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button("Open Privacy Settings") { NSWorkspace.shared.open(Self.privacySettings) }
+                    #endif
                 }
             }
         }
     }
 
     private var sourceIcon: String {
-        switch sync.source?.kind { case .display: "display"; case .window: "macwindow"; case .sample: "film"; case nil: "rectangle.dashed" }
+        switch sync.source?.kind { case .display: "display"; case .window: "macwindow"; case .camera: "camera"; case .sample: "film"; case nil: "rectangle.dashed" }
     }
 
     @ViewBuilder private var statusPill: some View {
@@ -92,7 +102,7 @@ struct ScreenSyncView: View {
         Card {
             VStack(alignment: .leading, spacing: 8) {
                 Label("Private by design", systemImage: "lock.shield").font(.system(size: 13, weight: .medium))
-                Text("When you choose a display or window, macOS asks you to confirm. Luma reads only small color samples of what you choose, here on this Mac. Nothing is recorded, saved, or uploaded, and audio and camera are never used. Capture stops when you pause, stop, lock, or sleep your Mac.")
+                Text(Copy.privacy)
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -291,4 +301,18 @@ struct ScreenSyncIndicator: View {
             .padding(10).background((paused ? Color.warning : Color.danger).opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
     }
+}
+
+private enum Copy {
+    #if os(iOS)
+    static let subtitle = "Point your camera at a TV or monitor and match local lights to it."
+    static let choose = "Use Camera"
+    static let noSource = "Camera not started"
+    static let privacy = "Luma reads only small color samples from the back camera, here on this device. Nothing is recorded, saved, or uploaded, and audio is never used. Capture stops when you pause, stop, or leave Luma."
+    #else
+    static let subtitle = "Match local lights to a display or window on this Mac."
+    static let choose = "Choose Display or Window…"
+    static let noSource = "No display or window chosen"
+    static let privacy = "When you choose a display or window, macOS asks you to confirm. Luma reads only small color samples of what you choose, here on this Mac. Nothing is recorded, saved, or uploaded, and audio and camera are never used. Capture stops when you pause, stop, lock, or sleep your Mac."
+    #endif
 }

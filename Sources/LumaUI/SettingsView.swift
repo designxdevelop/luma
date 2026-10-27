@@ -1,5 +1,7 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#endif
 import LumaCore
 
 struct SettingsView: View {
@@ -91,13 +93,17 @@ struct AboutCard: View {
     var body: some View {
         Card {
             HStack(alignment: .top, spacing: 16) {
+                #if os(macOS)
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56).accessibilityHidden(true)
+                #else
+                Image(systemName: "lightbulb.led.wide.fill").font(.system(size: 34)).foregroundStyle(Color.lumaAccent).frame(width: 56, height: 56).accessibilityHidden(true)
+                #endif
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("Luma").font(.system(size: 17, weight: .bold))
                         Text(Links.version).font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
                     }
-                    Text("A native Mac home for your Govee lights.").font(.system(size: 13))
+                    Text(platformTagline).font(.system(size: 13))
                     Text(Links.attribution).font(.system(size: 12)).foregroundStyle(.secondary)
                     Text(Links.warranty).font(.system(size: 12)).foregroundStyle(.secondary)
                     Text("Luma is not affiliated with or endorsed by Govee.").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -112,6 +118,13 @@ struct AboutCard: View {
     }
 }
 
+#if os(macOS)
+private let platformTagline = "A native Mac home for your Govee lights."
+#else
+private let platformTagline = "A native iPhone and iPad home for your Govee lights."
+#endif
+
+#if os(macOS)
 /// Standard About panel, with the same attribution and links as Settings.
 func showAboutPanel() {
     let credits = NSMutableAttributedString()
@@ -125,6 +138,7 @@ func showAboutPanel() {
     NSApp.orderFrontStandardAboutPanel(options: [.credits: credits, .applicationName: "Luma"])
     NSApp.activate(ignoringOtherApps: true)
 }
+#endif
 
 struct ConnectionSheet: View {
     let store: HomeStore
