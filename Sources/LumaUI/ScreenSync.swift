@@ -1,5 +1,9 @@
 import Foundation
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 import Observation
 import os
 import LumaCore
@@ -7,10 +11,16 @@ import LumaCore
 /// Content the user explicitly chose. Holding a source never captures anything;
 /// only `ScreenSync.start()` creates a session from it.
 struct ScreenSource {
-    enum Kind { case display, window, sample }
+    enum Kind { case display, window, camera, sample }
     let name: String
     let kind: Kind
     let makeSession: () -> any ScreenCaptureSession
+}
+
+/// Counters for the current session. Reset on a fresh start, kept across pause.
+struct ScreenSyncStats: Equatable {
+    /// Frames ingested; `skipped` of them landed before the previous one ticked and were folded into it.
+    var analyzed = 0, skipped = 0, sent = 0, superseded = 0, errors = 0
 }
 
 enum ScreenCaptureEnd: Error, Equatable {
@@ -52,11 +62,18 @@ protocol ScreenCaptureSession: AnyObject {
     /// Smoothed region colors, for the on-page color map.
     private(set) var regionPreview: RegionColors?
 
+    private(set) var stats = ScreenSyncStats()
+
     var isActive: Bool { phase != .idle }
 
     @ObservationIgnored weak var store: HomeStore?
     /// Sends one update directly to a light. HomeStore installs its LAN path.
     @ObservationIgnored var send: (LightDevice, StreamUpdate) throws -> Void = { _, _ in }
+    /// Sends restore commands to one light over LAN. HomeStore installs it.
+    @ObservationIgnored var restore: (LightDevice, [CapabilityCommand]) throws -> Void = { _, _ in }
+    /// Each light's state when the session began, for restore on Stop.
+    @ObservationIgnored private var snapshots: [String: LightDevice] = [:]
+    @ObservationIgnored private var supersededBase = 0
     @ObservationIgnored var readback: (LightDevice) async -> Void = { _ in }
     @ObservationIgnored private var mixer: ScreenSyncMixer
     @ObservationIgnored private var session: (any ScreenCaptureSession)?
@@ -90,6 +107,11 @@ protocol ScreenCaptureSession: AnyObject {
         guard !isActive else { return }
         message = nil; permissionDenied = false
         if store?.demo == true { select(.sample); return }
+        #if os(iOS)
+        // iOS can't read other apps' screens without a broadcast extension; the
+        // camera pointed at a TV or monitor is the source instead.
+        select(.camera)
+        #else
         ScreenSourcePicker.shared.present { [weak self] result in
             guard let self, !self.isActive else { return }
             switch result {
@@ -100,6 +122,7 @@ protocol ScreenCaptureSession: AnyObject {
                 if self.source == nil { ScreenSourcePicker.shared.deactivate() }
             }
         }
+        #endif
     }
 
     func select(_ source: ScreenSource) {
@@ -110,6 +133,11 @@ protocol ScreenCaptureSession: AnyObject {
     /// Starts or resumes capture from the chosen source. Explicit user action only.
     func start() async {
         guard let source, phase == .idle || phase == .paused else { return }
+        if phase == .idle {
+            stats = ScreenSyncStats(); supersededBase = mixer.superseded
+            snapshots = [:]
+            for id in regions.keys { snapshot(id) }
+        }
         cancelReadbacks()
         generation &+= 1
         let g = generation
@@ -142,8 +170,51 @@ protocol ScreenCaptureSession: AnyObject {
     func stop() {
         guard isActive || source != nil else { return }
         let wasActive = isActive
-        reset()
-        if wasActive { store?.log("Screen Sync stopped. Lights keep their last synced color and brightness.") }
+        let restored = wasActive && settings.restore ? restoreLights() : []
+        // An immediate readback could catch a light before it applies the restore
+        // and record the streamed color as confirmed; ask once it has settled.
+        reset(refreshLights: restored.isEmpty)
+        if !restored.isEmpty {
+            let generation = readbackGeneration
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1.5))
+                guard let self, self.readbackGeneration == generation else { return }
+                for device in restored { self.requestReadback(device) }
+            }
+        }
+        if wasActive {
+            store?.log(restored.isEmpty ? "Screen Sync stopped. Lights keep their last synced color and brightness."
+                                        : "Screen Sync stopped. Restored \(restored.count) \(restored.count == 1 ? "light" : "lights") to their earlier color and brightness.")
+        }
+    }
+
+    /// Remembers a light's last confirmed state; the first snapshot of a session wins,
+    /// since later readbacks of streamed colors are not the person's state.
+    private func snapshot(_ id: String) {
+        guard snapshots[id] == nil, let device = store?.home.devices.first(where: { $0.id == id }), device.screenSyncIssue == nil else { return }
+        snapshots[id] = device
+    }
+
+    /// Only lights this session actually streamed to, and that nothing took over.
+    @discardableResult private func restoreLights() -> [LightDevice] {
+        var restored: [LightDevice] = []
+        for (id, saved) in snapshots where regions[id] != nil && excluded[id] == nil && preview[id] != nil {
+            guard let device = store?.home.devices.first(where: { $0.id == id }) else { continue }
+            let commands = Self.restoreCommands(saved)
+            guard !commands.isEmpty else { continue }
+            do { try restore(device, commands); restored.append(device) }
+            catch { store?.log("\(device.name) was not restored: \(error.localizedDescription)", error: true) }
+        }
+        return restored
+    }
+
+    /// Brightness, then the previous color mode. Power is never changed: only lights that were on stream.
+    static func restoreCommands(_ saved: LightDevice) -> [CapabilityCommand] {
+        var commands: [CapabilityCommand] = []
+        if let brightness = saved.brightness, brightness >= 1 { commands.append(.brightness(brightness)) }
+        if let kelvin = saved.colorTemperature, kelvin > 0 { if (2000...9000).contains(kelvin) { commands.append(.kelvin(kelvin)) } }
+        else if let rgb = saved.rgb { commands.append(.rgb(rgb)) }
+        return commands
     }
 
     func shutdown() {
@@ -156,9 +227,11 @@ protocol ScreenCaptureSession: AnyObject {
     private func reset(refreshLights: Bool = true) {
         halt(refreshLights: refreshLights)
         phase = .idle; source = nil; pauseReason = nil
-        excluded.removeAll(); preview.removeAll(); regionPreview = nil
+        excluded.removeAll(); preview.removeAll(); regionPreview = nil; snapshots = [:]
         mixer.reset()
+        #if os(macOS)
         ScreenSourcePicker.shared.deactivate()
+        #endif
     }
 
     /// Cancels the ticker and capture. Bumping the generation makes every
@@ -207,6 +280,12 @@ protocol ScreenCaptureSession: AnyObject {
         self.defaults = defaults
     }
 
+    #if os(iOS)
+    static let permissionMessage = "iOS didn't allow Luma to use the camera."
+    #else
+    static let permissionMessage = "macOS didn't allow Luma to capture your screen."
+    #endif
+
     private func ended(_ end: ScreenCaptureEnd, generation g: UInt64) {
         guard g == generation else { return }
         let keepsSource = end == .permissionDenied
@@ -215,7 +294,7 @@ protocol ScreenCaptureSession: AnyObject {
         if keepsSource { self.source = source }
         switch end {
         case .userStopped: message = "Screen Sync stopped from the macOS menu bar."
-        case .permissionDenied: permissionDenied = true; message = "macOS didn't allow Luma to capture your screen."
+        case .permissionDenied: permissionDenied = true; message = Self.permissionMessage
         case .sourceGone: message = "The window or display you chose is no longer available. Choose it again to continue."
         case .failed(let text): message = "Screen Sync stopped: \(text)"
         }
@@ -231,7 +310,9 @@ protocol ScreenCaptureSession: AnyObject {
         latestCapture = capturedAt
         // Tick as soon as a frame lands instead of waiting for the ticker.
         // Coalesced: frames arriving before it runs just replace the target.
-        guard phase == .running, !frameTickPending else { return }
+        stats.analyzed += 1
+        guard phase == .running else { return }
+        if frameTickPending { stats.skipped += 1; return }
         frameTickPending = true
         Task { [weak self] in
             guard let self else { return }
@@ -272,15 +353,18 @@ protocol ScreenCaptureSession: AnyObject {
         guard phase == .running, let store else { return }
         let updates = mixer.tick(now: now, lights: streamingLights)
         if regionPreview != mixer.smoothed { regionPreview = mixer.smoothed }
+        if stats.superseded != mixer.superseded - supersededBase { stats.superseded = mixer.superseded - supersededBase }
         for update in updates {
             guard let device = store.home.devices.first(where: { $0.id == update.deviceID }) else { continue }
             do {
                 try send(device, update)
                 preview[update.deviceID] = update.target
+                stats.sent += 1
                 if let latestCapture, let summary = latency?.record(ContinuousClock.now - latestCapture) {
                     Logger(subsystem: "app.luma.govee", category: "screen-sync-latency").notice("\(summary, privacy: .public)")
                 }
             } catch {
+                stats.errors += 1
                 excluded[update.deviceID] = "Couldn't reach this light"
                 mixer.forget(update.deviceID)
                 store.log("Screen Sync skipped \(device.name): \(error.localizedDescription)")
@@ -291,7 +375,7 @@ protocol ScreenCaptureSession: AnyObject {
     // MARK: Light selection and ownership
 
     func setIncluded(_ included: Bool, for id: String) {
-        if included { regions[id] = regions[id] ?? .full }
+        if included { regions[id] = regions[id] ?? .full; if isActive { snapshot(id) } }
         else {
             if preview[id] != nil, let device = store?.home.devices.first(where: { $0.id == id }), device.ip != nil, !device.isDemo { requestReadback(device) }
             regions[id] = nil; excluded[id] = nil; preview[id] = nil; mixer.forget(id)
@@ -330,6 +414,12 @@ protocol ScreenCaptureSession: AnyObject {
     /// is always an explicit choice; nothing restarts on wake or unlock.
     func observeSystem() {
         guard observers.isEmpty else { return }
+        #if os(iOS)
+        // iOS stops camera capture in the background; pause so resuming stays explicit.
+        let events: [(NotificationCenter, Notification.Name, String)] = [
+            (.default, UIApplication.didEnterBackgroundNotification, "Paused while Luma was in the background.")
+        ]
+        #else
         let workspace = NSWorkspace.shared.notificationCenter
         let events: [(NotificationCenter, Notification.Name, String)] = [
             (workspace, NSWorkspace.willSleepNotification, "Paused while your Mac slept."),
@@ -338,6 +428,7 @@ protocol ScreenCaptureSession: AnyObject {
             // ponytail: undocumented lock notification, paired with the session events above.
             (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsLocked"), "Paused while your Mac was locked.")
         ]
+        #endif
         for (center, name, reason) in events {
             let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.pause(reason: reason) }

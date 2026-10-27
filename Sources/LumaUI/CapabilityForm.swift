@@ -113,7 +113,7 @@ struct CapabilityValueForm: View {
                                 object[name] = include ? defaultCapabilityValue(field) : nil
                                 value = .object(object)
                             }))
-                            .toggleStyle(.checkbox).font(.callout.weight(.medium))
+                            .checkboxToggle().font(.callout.weight(.medium))
                             .accessibilityLabel("Include \(fieldLabel(name).lowercased())")
                             if value[name] != nil {
                                 if name == "rgb" { nested(RGBValueControl(value: fieldValue(name, field: field))) }

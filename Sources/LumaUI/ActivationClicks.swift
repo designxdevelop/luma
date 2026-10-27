@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import SwiftUI
 
@@ -34,3 +35,4 @@ private struct ActivationClickHost<Content: View>: NSViewRepresentable {
 private final class FirstMouseHostingView: NSHostingView<AnyView> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
+#endif

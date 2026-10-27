@@ -1,5 +1,9 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 import LumaCore
 
 struct ScreenSyncView: View {
@@ -11,13 +15,14 @@ struct ScreenSyncView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                PageHeader(title: "Screen Sync", subtitle: "Match local lights to a display or window on this Mac.") { actions }
+                PageHeader(title: "Screen Sync", subtitle: Copy.subtitle) { actions }
                 sourceCard
                 if sync.phase == .idle { privacyCard }
                 if let colors = sync.regionPreview { colorMap(colors) }
+                if sync.isActive { statsRow }
                 lightsSection
                 tuningSection
-            }.padding(28).frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)
+            }.pagePadding().frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)
         }
     }
 
@@ -26,7 +31,7 @@ struct ScreenSyncView: View {
     @ViewBuilder private var actions: some View {
         switch sync.phase {
         case .idle where sync.source == nil:
-            Button(store.demo ? "Use Sample Video" : "Choose Display or Window…") { sync.chooseSource() }.buttonStyle(.borderedProminent)
+            Button(store.demo ? "Use Sample Video" : Copy.choose) { sync.chooseSource() }.buttonStyle(.borderedProminent)
         case .idle:
             Button("Change…") { sync.chooseSource() }
             Button("Start") { Task { await sync.start() } }.buttonStyle(.borderedProminent)
@@ -52,7 +57,7 @@ struct ScreenSyncView: View {
                         .frame(width: 28, height: 28).background(Color.lumaAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(sync.source?.name ?? "No display or window chosen").font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                        Text(sync.source?.name ?? Copy.noSource).font(.system(size: 13, weight: .semibold)).lineLimit(2)
                         Text(sync.source == nil ? "You pick what Luma follows. Nothing is captured until you start." : "Only the content you chose is used.")
                             .font(.system(size: 12)).foregroundStyle(.secondary)
                     }
@@ -67,16 +72,22 @@ struct ScreenSyncView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if sync.permissionDenied {
+                    #if os(iOS)
+                    Text("Luma needs camera access to follow the colors on your TV or monitor. You can allow it in Settings › Luma › Camera, then start again.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) }
+                    #else
                     Text("Luma needs your permission to read a display or window. You can allow it in System Settings under Privacy & Security › Screen & System Audio Recording, then start again.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button("Open Privacy Settings") { NSWorkspace.shared.open(Self.privacySettings) }
+                    #endif
                 }
             }
         }
     }
 
     private var sourceIcon: String {
-        switch sync.source?.kind { case .display: "display"; case .window: "macwindow"; case .sample: "film"; case nil: "rectangle.dashed" }
+        switch sync.source?.kind { case .display: "display"; case .window: "macwindow"; case .camera: "camera"; case .sample: "film"; case nil: "rectangle.dashed" }
     }
 
     @ViewBuilder private var statusPill: some View {
@@ -92,7 +103,7 @@ struct ScreenSyncView: View {
         Card {
             VStack(alignment: .leading, spacing: 8) {
                 Label("Private by design", systemImage: "lock.shield").font(.system(size: 13, weight: .medium))
-                Text("When you choose a display or window, macOS asks you to confirm. Luma reads only small color samples of what you choose, here on this Mac. Nothing is recorded, saved, or uploaded, and audio and camera are never used. Capture stops when you pause, stop, lock, or sleep your Mac.")
+                Text(Copy.privacy)
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -128,6 +139,28 @@ struct ScreenSyncView: View {
         Color(red: ScreenColorMath.srgb(c.r) / 255, green: ScreenColorMath.srgb(c.g) / 255, blue: ScreenColorMath.srgb(c.b) / 255)
     }
 
+    // MARK: Session stats
+
+    private var statsRow: some View {
+        let s = sync.stats
+        let items = [("Analyzed", s.analyzed), ("Skipped", s.skipped), ("Sent", s.sent), ("Superseded", s.superseded), ("Errors", s.errors)]
+        return VStack(alignment: .leading, spacing: 10) {
+            SectionHeader("Session", detail: "Frames and light updates")
+            Card {
+                HStack {
+                    ForEach(items, id: \.0) { title, value in
+                        VStack(spacing: 2) {
+                            Text("\(value)").font(.system(size: 15, weight: .semibold)).monospacedDigit().foregroundStyle(title == "Errors" && value > 0 ? Color.warning : .primary)
+                            Text(title).font(.system(size: 11)).foregroundStyle(.secondary)
+                        }.frame(maxWidth: .infinity)
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Session: \(items.map { "\($0.1) \($0.0.lowercased())" }.joined(separator: ", "))")
+            }
+        }
+    }
+
     // MARK: Lights
 
     private var lightsSection: some View {
@@ -149,7 +182,7 @@ struct ScreenSyncView: View {
                     }
                 }
             }
-            Text("Manual changes, scenes, schedules, and webhooks take over a light right away. Stopping leaves lights at their last synced color and brightness.")
+            Text("Manual changes, scenes, schedules, and webhooks take over a light right away. Stopping leaves lights at their last synced color and brightness unless you turn on Restore previous state.")
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -159,7 +192,7 @@ struct ScreenSyncView: View {
         let region = sync.regions[device.id]
         let excluded = sync.excluded[device.id]
         let ownershipIssue = sync.ownershipIssue(for: device.id)
-        return HStack(spacing: 12) {
+        return HStack(spacing: compactSpacing(12, 8)) {
             LightOrb(device: device, size: 32)
             VStack(alignment: .leading, spacing: 2) {
                 Text(device.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
@@ -176,14 +209,18 @@ struct ScreenSyncView: View {
                         Section(group.rawValue) { ForEach(group.regions) { Text($0.title).tag($0) } }
                     }
                 }
-                .pickerStyle(.menu).labelsHidden().frame(width: 190).disabled(region == nil)
+                .pickerStyle(.menu).labelsHidden().frame(width: compactSpacing(190, 120)).disabled(region == nil)
                 .accessibilityLabel("Screen region for \(device.name)")
-                Toggle("Include", isOn: Binding(get: { region != nil }, set: { sync.setIncluded($0, for: device.id) }))
+                Toggle(isOn: Binding(get: { region != nil }, set: { sync.setIncluded($0, for: device.id) })) {
+                    #if os(macOS)
+                    Text("Include")
+                    #endif
+                }
                     .toggleStyle(.switch).controlSize(.small)
                     .accessibilityLabel("Include \(device.name) in Screen Sync")
             }
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
+        .padding(.horizontal, compactSpacing(16, 12)).padding(.vertical, 10)
         .opacity(issue == nil ? 1 : 0.55)
     }
 
@@ -223,6 +260,14 @@ struct ScreenSyncView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Vivid colors").font(.system(size: 13, weight: .medium))
                             Text("Favors colorful parts of the picture over gray, white, and text, so lights stay colorful.")
+                                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .toggleStyle(.switch).controlSize(.small)
+                    Toggle(isOn: Binding(get: { sync.settings.restore }, set: { sync.settings.restore = $0 })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Restore previous state").font(.system(size: 13, weight: .medium))
+                            Text("When you press Stop, send each synced light back to the brightness and color it had before. Local network only. Lights you changed by hand are left alone, and automatic stops (sleep, lock, errors) don't restore.")
                                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -291,4 +336,18 @@ struct ScreenSyncIndicator: View {
             .padding(10).background((paused ? Color.warning : Color.danger).opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
     }
+}
+
+private enum Copy {
+    #if os(iOS)
+    static let subtitle = "Point your camera at a TV or monitor and match local lights to it."
+    static let choose = "Use Camera"
+    static let noSource = "Camera not started"
+    static let privacy = "Luma reads only small color samples from the back camera, here on this device. Nothing is recorded, saved, or uploaded, and audio is never used. Capture stops when you pause, stop, or leave Luma."
+    #else
+    static let subtitle = "Match local lights to a display or window on this Mac."
+    static let choose = "Choose Display or Window…"
+    static let noSource = "No display or window chosen"
+    static let privacy = "When you choose a display or window, macOS asks you to confirm. Luma reads only small color samples of what you choose, here on this Mac. Nothing is recorded, saved, or uploaded, and audio and camera are never used. Capture stops when you pause, stop, lock, or sleep your Mac."
+    #endif
 }

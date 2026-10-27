@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 import LumaCore
-@testable import Luma
+@testable import LumaUI
 
 /// Stands in for ScreenCaptureKit. Tests push region colors and endings by hand,
 /// so no screen is captured and no permission prompt can appear.
@@ -473,6 +473,121 @@ private final class ScreenSyncCloudProtocol: URLProtocol, @unchecked Sendable {
         #expect(max(top.r, top.g, top.b) > 0.3)
     }
 }
+
+@MainActor struct ScreenSyncRestoreTests {
+    @Test func stopRestoresStreamedLightsToTheirStateAtStart() async {
+        // Demo lamp starts at 65%, 0xFFB66A.
+        let f = Fixture(); defer { f.finish() }
+        f.sync.settings.restore = true
+        let box = RestoreBox(); f.sync.restore = { box.calls.append(($0.id, $1)) }
+        await f.start(); f.session.onFrame?(red); f.sync.tick(now: 100)
+        f.sync.stop()
+        #expect(box.calls.map(\.0) == ["demo-floor"])
+        #expect(box.calls.first?.1 == [.brightness(65), .rgb(0xFFB66A)])
+    }
+
+    @Test func restoreIsOptIn() async {
+        let f = Fixture(); defer { f.finish() }
+        let box = RestoreBox(); f.sync.restore = { box.calls.append(($0.id, $1)) }
+        await f.start(); f.session.onFrame?(red); f.sync.tick(now: 100)
+        f.sync.stop()
+        #expect(box.calls.isEmpty)
+    }
+
+    @Test func pauseAndAutomaticEndsDoNotRestore() async {
+        let f = Fixture(); defer { f.finish() }
+        f.sync.settings.restore = true
+        let box = RestoreBox(); f.sync.restore = { box.calls.append(($0.id, $1)) }
+        await f.start(); f.session.onFrame?(red); f.sync.tick(now: 100)
+        f.sync.pause()
+        #expect(box.calls.isEmpty)
+        await f.sync.start()
+        f.session.onEnd?(.sourceGone)
+        #expect(box.calls.isEmpty)
+    }
+
+    @Test func lightsTakenOverByHandOrNeverStreamedAreNotRestored() async {
+        let f = Fixture(include: ["demo-floor", "demo-strip"]); defer { f.finish() }
+        f.sync.settings.restore = true
+        let box = RestoreBox(); f.sync.restore = { box.calls.append(($0.id, $1)) }
+        await f.start(); f.session.onFrame?(red); f.sync.tick(now: 100)
+        f.sync.yield("demo-strip")
+        f.sync.stop()
+        #expect(box.calls.map(\.0) == ["demo-floor"])
+    }
+
+    @Test func restoreUsesTheSnapshotNotWhatReadbackSawLater() async {
+        let f = Fixture(); defer { f.finish() }
+        f.sync.settings.restore = true
+        let box = RestoreBox(); f.sync.restore = { box.calls.append(($0.id, $1)) }
+        await f.start(); f.session.onFrame?(red); f.sync.tick(now: 100)
+        let i = f.store.home.devices.firstIndex { $0.id == "demo-floor" }!
+        f.store.home.devices[i].rgb = 0xFF0000; f.store.home.devices[i].brightness = 80
+        f.sync.stop()
+        #expect(box.calls.first?.1 == [.brightness(65), .rgb(0xFFB66A)])
+    }
+
+    @Test func restoredLightsAreReadBackOnlyAfterTheyHadTimeToApplyIt() async throws {
+        let f = Fixture(); defer { f.finish() }
+        f.sync.settings.restore = true
+        f.sync.restore = { _, _ in }
+        var readbacks: [String] = []
+        f.sync.readback = { readbacks.append($0.id) }
+        await f.start(); f.session.onFrame?(red); f.sync.tick(now: 100)
+        f.sync.stop()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(readbacks.isEmpty, "An immediate readback could record the streamed color as confirmed")
+        try await Task.sleep(for: .seconds(1.8))
+        #expect(readbacks == ["demo-floor"])
+    }
+
+    @Test func whiteModeRestoresKelvinAndSkipsOutOfRange() {
+        func saved(_ k: Int) -> LightDevice { .init(id: "x", sku: "H1", name: "x", brightness: 40, rgb: 0x123456, colorTemperature: k) }
+        #expect(ScreenSync.restoreCommands(saved(3000)) == [.brightness(40), .kelvin(3000)])
+        #expect(ScreenSync.restoreCommands(saved(1500)) == [.brightness(40)])
+        #expect(ScreenSync.restoreCommands(saved(0)) == [.brightness(40), .rgb(0x123456)])
+    }
+
+    @Test func restoreSettingPersistsAndOldSettingsDecode() throws {
+        var s = ScreenSyncSettings(); s.restore = true
+        #expect(try JSONDecoder().decode(ScreenSyncSettings.self, from: JSONEncoder().encode(s)).restore)
+        #expect(try JSONDecoder().decode(ScreenSyncSettings.self, from: Data(#"{"smoothing":0.5}"#.utf8)).restore == false)
+    }
+
+    @Test func statsCountFramesSendsAndResetOnFreshStart() async {
+        let f = Fixture(); defer { f.finish() }
+        await f.start()
+        f.session.onFrame?(red); f.sync.tick(now: 100)
+        #expect(f.sync.stats.analyzed == 1 && f.sync.stats.sent == 1 && f.sync.stats.errors == 0)
+        f.sync.pause(); await f.sync.start()
+        #expect(f.sync.stats.sent == 1, "Resume keeps the session counters")
+        f.sync.stop()
+        await f.start()
+        #expect(f.sync.stats == ScreenSyncStats())
+    }
+
+    @Test func sendFailuresAreCounted() async {
+        let f = Fixture(); defer { f.finish() }
+        f.sync.send = { _, _ in throw LumaError.message("no route") }
+        await f.start()
+        f.session.onFrame?(red); f.sync.tick(now: 100)
+        #expect(f.sync.stats.errors == 1 && f.sync.stats.sent == 0)
+    }
+
+    @Test func mixerCountsTargetsReplacedWhileRateLimited() {
+        var mixer = ScreenSyncMixer(settings: ScreenSyncSettings().with { $0.smoothing = 0; $0.updateHz = 1 })
+        let lights = ["a": ScreenRegion.full]
+        mixer.ingest(red); _ = mixer.tick(now: 0, lights: lights)
+        mixer.ingest(blue); _ = mixer.tick(now: 0.2, lights: lights)
+        #expect(mixer.superseded == 0, "First waiting change is pending, not replaced")
+        mixer.ingest(RegionColors(all: LinearColor(0, 1, 0))); _ = mixer.tick(now: 0.4, lights: lights)
+        #expect(mixer.superseded == 1)
+        _ = mixer.tick(now: 1.5, lights: lights)
+        #expect(mixer.superseded == 1)
+    }
+}
+
+@MainActor private final class RestoreBox { var calls: [(String, [CapabilityCommand])] = [] }
 
 private extension ScreenSyncSettings {
     func with(_ change: (inout Self) -> Void) -> Self { var copy = self; change(&copy); return copy }

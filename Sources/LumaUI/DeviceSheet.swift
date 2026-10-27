@@ -7,6 +7,7 @@ struct DeviceSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var tab = Tab.light
     @State private var room = ""
+    @State private var name = ""
     @State private var roomMessage: String?
     @State private var instance = ""
     @State private var json = "1"
@@ -32,7 +33,7 @@ struct DeviceSheet: View {
             if let device {
                 header(device)
                 Picker("Section", selection: $tab) { ForEach(Tab.allCases) { Text($0.rawValue).tag($0) } }
-                    .pickerStyle(.segmented).labelsHidden().padding(.horizontal, 24).padding(.bottom, 16)
+                    .pickerStyle(.segmented).labelsHidden().padding(.horizontal, compactSpacing(24, 16)).padding(.bottom, 16)
                 Divider()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
@@ -41,7 +42,7 @@ struct DeviceSheet: View {
                         case .effects: effectsTab(device)
                         case .details: detailsTab(device)
                         }
-                    }.padding(24)
+                    }.padding(compactSpacing(24, 16))
                 }
             } else {
                 EmptyState(icon: "lightbulb.slash", title: "This light is no longer available", message: "It may have been removed from your account or the network.") {
@@ -49,10 +50,10 @@ struct DeviceSheet: View {
                 }.frame(maxHeight: .infinity)
             }
         }
-        .frame(width: 660, height: 720).background(Color.canvas)
+        .sheetFrame(width: 660, height: 720).background(Color.canvas)
         .onAppear {
             guard let device else { return }
-            room = device.room
+            room = device.room; name = device.name
             instance = features(device).first?.instance ?? ""; resetValue()
         }
         .onChange(of: instance) { _, _ in resetValue() }
@@ -65,7 +66,7 @@ struct DeviceSheet: View {
 
     private func header(_ device: LightDevice) -> some View {
         HStack(spacing: 16) {
-            LightOrb(device: device, size: 52)
+            LightOrb(device: device, size: compactSpacing(52, 44))
             VStack(alignment: .leading, spacing: 4) {
                 Text(device.name).font(.system(size: 19, weight: .semibold)).lineLimit(1).truncationMode(.tail)
                 Text("\(device.room) · \(device.sku)").font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
@@ -82,7 +83,7 @@ struct DeviceSheet: View {
                 .help("Turn \(device.name) on or off")
                 .accessibilityLabel("Power for \(device.name)")
             Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-        }.padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 16)
+        }.padding(.horizontal, compactSpacing(24, 16)).padding(.top, 20).padding(.bottom, 16)
     }
 
     // MARK: Light tab
@@ -168,6 +169,15 @@ struct DeviceSheet: View {
     @ViewBuilder private func detailsTab(_ device: LightDevice) -> some View {
         Card {
             VStack(alignment: .leading, spacing: 12) {
+                SectionHeader("Name")
+                HStack(spacing: 8) {
+                    TextField("Name", text: $name).textFieldStyle(.roundedBorder).onSubmit { saveName() }
+                        .onChange(of: name) { _, value in if value.count > 64 { name = String(value.prefix(64)) } }
+                    Button("Save") { saveName() }
+                    if let own = store.home.devices.first(where: { $0.id == deviceID }), own.customName != nil {
+                        Button("Reset") { store.rename("", id: deviceID); name = own.name }.help("Use the name \(own.name) from the light")
+                    }
+                }
                 SectionHeader("Room")
                 HStack(spacing: 8) {
                     TextField("Room", text: $room).textFieldStyle(.roundedBorder).onSubmit { saveRoom() }
@@ -209,6 +219,11 @@ struct DeviceSheet: View {
             }.help("Ask the light for its current state")
             Spacer()
         }
+    }
+
+    private func saveName() {
+        store.rename(name, id: deviceID)
+        name = device?.name ?? name
     }
 
     private func saveRoom() {
@@ -283,7 +298,7 @@ private struct ColorCard: View {
                     if device.supports("colorRgb") && !colorActive { Text("Not active").font(.system(size: 12)).foregroundStyle(.secondary) }
                 }
                 if device.supports("colorRgb") {
-                    HStack(spacing: 12) {
+                    HStack(spacing: compactSpacing(12, 6)) {
                         ForEach(Self.presets, id: \.rgb) { preset in
                             let selected = colorActive && device.rgb == preset.rgb
                             Button { store.perform(.rgb(preset.rgb), ids: [device.id]) } label: {

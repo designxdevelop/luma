@@ -59,7 +59,7 @@ struct LightsView: View {
                     Label("Local lights confirm changes directly. Cloud lights confirm once Govee reports back, which can take a few seconds.", systemImage: "info.circle")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
-            }.padding(28)
+            }.pagePadding()
         }
         .background { Button("Find") { searchFocused = true }.keyboardShortcut("f").opacity(0).accessibilityHidden(true) }
         .sheet(item: $selected) { device in DeviceSheet(store: store, deviceID: device.id) }
@@ -67,7 +67,7 @@ struct LightsView: View {
 
     private var subtitle: String {
         let lights = room == nil ? store.devices : store.devices.filter { $0.room == room }
-        if lights.isEmpty { return store.scanning ? "Looking for lights on your Wi-Fi…" : "Bring your Govee lights together on your Mac." }
+        if lights.isEmpty { return store.scanning ? "Looking for lights on your Wi-Fi…" : "Bring your Govee lights together in one place." }
         let on = lights.filter { $0.power == true }.count
         let offline = lights.filter { $0.online == false }.count
         var parts = [on == 0 ? "All \(lights.count) off" : on == lights.count ? "All \(lights.count) on" : "\(on) of \(lights.count) on"]
@@ -79,7 +79,7 @@ struct LightsView: View {
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary).font(.system(size: 12))
-            TextField("Search", text: $search).textFieldStyle(.plain).focused($searchFocused).onExitCommand { search = ""; searchFocused = false }
+            TextField("Search", text: $search).textFieldStyle(.plain).focused($searchFocused).onExitCommandIfAvailable { search = ""; searchFocused = false }
             if !search.isEmpty {
                 Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }.buttonStyle(.plain).accessibilityLabel("Clear search")
             }
@@ -107,7 +107,7 @@ struct LightsView: View {
 
     private var scenesStrip: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionHeader("Scenes", detail: "Click to set the mood")
+            SectionHeader("Scenes", detail: PlatformCopy.tapVerb + " to set the mood")
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(store.home.scenes) { scene in SceneChip(store: store, scene: scene) }
@@ -125,7 +125,7 @@ struct LightsView: View {
                         Image(systemName: "lightbulb.led.wide.fill").font(.system(size: 44, weight: .medium)).foregroundStyle(Color.lumaAccent)
                     }.accessibilityHidden(true)
                     Text("Welcome to Luma").font(.system(size: 24, weight: .bold)).tracking(-0.4)
-                    Text("Control your Govee lights from your Mac: quick power and brightness, color, scenes, schedules, and automations.")
+                    Text("Control your Govee lights from your \(PlatformCopy.device): quick power and brightness, color, scenes, schedules, and automations.")
                         .font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 440)
                 }
                 HStack(alignment: .top, spacing: 14) {

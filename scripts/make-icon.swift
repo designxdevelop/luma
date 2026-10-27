@@ -1,9 +1,11 @@
 import AppKit
 
 let output = CommandLine.arguments[1]
+// A .png output is a full-bleed square for iOS, which applies its own mask.
+let iOS = output.hasSuffix(".png")
 let image = NSImage(size: NSSize(width: 1024, height: 1024))
 image.lockFocus()
-let square = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 1024, height: 1024), xRadius: 220, yRadius: 220)
+let square = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 1024, height: 1024), xRadius: iOS ? 0 : 220, yRadius: iOS ? 0 : 220)
 NSColor(red: 0.20, green: 0.16, blue: 0.13, alpha: 1).setFill(); square.fill()
 let halo = NSGradient(starting: NSColor(red: 1, green: 0.69, blue: 0.33, alpha: 0.5), ending: .clear)!
 halo.draw(in: NSBezierPath(ovalIn: NSRect(x: 112, y: 130, width: 800, height: 800)), relativeCenterPosition: .zero)
@@ -21,6 +23,7 @@ for y in [260, 205] {
 image.unlockFocus()
 let bitmap = NSBitmapImageRep(data: image.tiffRepresentation!)!
 let png = bitmap.representation(using: .png, properties: [:])!
+if iOS { try png.write(to: URL(fileURLWithPath: output)); exit(0) }
 // ICNS supports a PNG 1024x1024 representation in an ic10 element.
 var body = Data("ic10".utf8)
 var chunkLength = UInt32(png.count + 8).bigEndian

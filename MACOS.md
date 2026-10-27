@@ -59,10 +59,10 @@ All POSTs require `Content-Type: application/json` and Content-Length (curl sets
 read -r -s LUMA_TOKEN
 export LUMA_TOKEN
 
-curl http://127.0.0.1:8787/v1/devices \
+curl --cacert luma.pem https://127.0.0.1:8787/v1/devices \
   -H "Authorization: Bearer $LUMA_TOKEN"
 
-curl -X POST http://127.0.0.1:8787/v1/actions \
+curl --cacert luma.pem -X POST https://127.0.0.1:8787/v1/actions \
   -H "Authorization: Bearer $LUMA_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"target":"all","power":true,"brightness":40,"color":"#FFB870"}'
@@ -71,14 +71,14 @@ curl -X POST http://127.0.0.1:8787/v1/actions \
 Targets: `all`, an exact device ID, or `room:Living room` (room names are case sensitive). Choose `color` or `kelvin` in one action. Brightness is 1–100; use `power:false` for off. Each device's advertised range can be narrower. Actions and saved scenes allow at most 200 commands and five minutes of explicit delays. Cloud pacing can add time. The entire sequence is validated before starting; network failures can still leave earlier steps applied. Stopping a run does not undo earlier commands.
 
 ```sh
-curl http://127.0.0.1:8787/v1/scenes -H "Authorization: Bearer $LUMA_TOKEN"
+curl --cacert luma.pem https://127.0.0.1:8787/v1/scenes -H "Authorization: Bearer $LUMA_TOKEN"
 
 # Substitute the scene UUID from the response.
-curl -X POST http://127.0.0.1:8787/v1/scenes/SCENE_UUID/run \
+curl --cacert luma.pem -X POST https://127.0.0.1:8787/v1/scenes/SCENE_UUID/run \
   -H "Authorization: Bearer $LUMA_TOKEN" -H 'Content-Type: application/json' -d '{}'
 
 # Every accepted action returns {accepted:true, runID:..., statusURL:...}.
-curl http://127.0.0.1:8787/v1/runs/RUN_UUID -H "Authorization: Bearer $LUMA_TOKEN"
+curl --cacert luma.pem https://127.0.0.1:8787/v1/runs/RUN_UUID -H "Authorization: Bearer $LUMA_TOKEN"
 ```
 
 Run status is `running`, `completed`, `failed`, or `cancelled`. Completion means all commands were submitted; hardware confirmation is separate. Run history keeps the latest 100 entries in memory. `/v1/runs` lists them. `/health` reports status and demo mode. API dates use Foundation's seconds since 2001-01-01 UTC.
@@ -91,7 +91,9 @@ For raw model-specific commands, POST `/v1/devices/DEVICE_ID/commands` (URL-enco
 
 Only send capabilities advertised by that device. In macOS Shortcuts, use **Get Contents of URL** with POST, JSON body, and the Authorization header. Home Assistant's `rest_command`, Stream Deck scripts, and other HTTP callers can use the same API.
 
-**Remote webhook services:** localhost is reachable only from this Mac. Explicit LAN mode listens on all interfaces over HTTP. Use a trusted LAN or a separately configured authenticated HTTPS tunnel/VPN; do not port-forward this HTTP port directly. This build does not provision a public webhook URL or keep the Mac awake.
+**HTTPS only:** the webhook server always uses HTTPS (TLS 1.2+), on localhost and in LAN mode; there is no plain-HTTP fallback. Luma creates a self-signed P-256 certificate on first start, keeps it in the Keychain, and replaces it before it expires (825-day validity). Under **Automations → Webhooks**, **Export Certificate…** (`luma.pem`) and have callers trust that file (`curl --cacert luma.pem`), or pin the public key (`curl --pinnedpubkey 'sha256//…'`, shown in the app next to the certificate's SHA-256 fingerprint). Don't disable certificate checks. Use `https://127.0.0.1:8787`: the listener is IPv4, and `localhost` often resolves to `::1` first. The certificate always names `localhost`, `127.0.0.1`, and `::1`; in LAN mode it also names the Mac's current LAN addresses and its `.local` hostname, and Luma replaces it when those change, so export it again (or re-pin) after a network change. Apps that can only switch certificate checks on or off, such as Home Assistant's `rest_command` or Shortcuts, should run on the Mac against `127.0.0.1`, or trust `luma.pem` at the system level. **Upgrading from an HTTP build:** update existing Shortcuts, Home Assistant, or scripts to `https://` and the exported certificate.
+
+**Remote webhook services:** localhost is reachable only from this Mac. Explicit LAN mode listens on all interfaces, still over HTTPS and with the bearer token. Use it on a trusted LAN or behind a VPN; do not port-forward it. This build does not provision a public webhook URL or keep the Mac awake.
 
 ## Coverage and known limits
 

@@ -130,9 +130,9 @@ test('loopback server: auth, handler, headers, binding, restart', async () => {
   const seen: HttpRequest[] = [];
   const handler = async (req: HttpRequest) => { seen.push(req); return { status: 202, body: { got: req.body.toString() } }; };
   assert.equal(server.running, false);
-  await assert.rejects(server.start({ port: 0, allowLAN: false, token: 'short', handler }), /at least 16/);
-  await assert.rejects(server.start({ port: 0, allowLAN: false, token: 'has space in token!!', handler }), /visible ASCII/);
-  const { port, host } = await server.start({ port: 0, allowLAN: false, token: TOKEN, handler });
+  await assert.rejects(server.start({ tls: { testOnlyPlainTcp: true }, port: 0, allowLAN: false, token: 'short', handler }), /at least 16/);
+  await assert.rejects(server.start({ tls: { testOnlyPlainTcp: true }, port: 0, allowLAN: false, token: 'has space in token!!', handler }), /visible ASCII/);
+  const { port, host } = await server.start({ tls: { testOnlyPlainTcp: true }, port: 0, allowLAN: false, token: TOKEN, handler });
   try {
     assert.equal(host, '127.0.0.1');
     assert.equal(server.running, true);
@@ -163,7 +163,7 @@ test('loopback server: auth, handler, headers, binding, restart', async () => {
     assert.match(reply, /^HTTP\/1\.1 202 Accepted\r\n/);
 
     // Restart on a new ephemeral port stops the previous listener.
-    const second = await server.start({ port: 0, allowLAN: false, token: TOKEN, handler });
+    const second = await server.start({ tls: { testOnlyPlainTcp: true }, port: 0, allowLAN: false, token: TOKEN, handler });
     await assert.rejects(raw(port, request('GET', { path: '/health' })), /ECONNREFUSED/);
     assert.equal(server.port, second.port);
   } finally {
@@ -175,7 +175,7 @@ test('loopback server: auth, handler, headers, binding, restart', async () => {
 
 test('loopback server: binds 127.0.0.1 only, handler errors are generic 500s', async () => {
   const server = new WebhookServer();
-  const { port } = await server.start({ port: 0, allowLAN: false, token: TOKEN, handler: async () => { throw new Error('secret stack detail'); } });
+  const { port } = await server.start({ tls: { testOnlyPlainTcp: true }, port: 0, allowLAN: false, token: TOKEN, handler: async () => { throw new Error('secret stack detail'); } });
   try {
     // The loopback connection must come from/to 127.0.0.1 (start() also reports host '127.0.0.1').
     const probe = createConnection({ host: '127.0.0.1', port });
@@ -197,7 +197,7 @@ test('loopback server: EADDRINUSE gives an actionable message', async () => {
   const server = new WebhookServer();
   try {
     await assert.rejects(
-      server.start({ port: taken, allowLAN: false, token: TOKEN, handler: async () => ({ status: 200, body: null }) }),
+      server.start({ tls: { testOnlyPlainTcp: true }, port: taken, allowLAN: false, token: TOKEN, handler: async () => ({ status: 200, body: null }) }),
       (error: Error) => error.message.startsWith(`Port ${taken} is in use`),
     );
     assert.equal(server.running, false);
@@ -209,7 +209,7 @@ test('loopback server: EADDRINUSE gives an actionable message', async () => {
 
 test('loopback server: early-auth rejection while a body is still streaming', async () => {
   const server = new WebhookServer();
-  const { port } = await server.start({ port: 0, allowLAN: false, token: TOKEN, handler: async () => ({ status: 200, body: null }) });
+  const { port } = await server.start({ tls: { testOnlyPlainTcp: true }, port: 0, allowLAN: false, token: TOKEN, handler: async () => ({ status: 200, body: null }) });
   try {
     const reply = await raw(port, request('POST', { body: Buffer.alloc(BODY_LIMIT, 32), auth: 'Bearer nope' }));
     assert.match(reply, /^HTTP\/1\.1 401 /);

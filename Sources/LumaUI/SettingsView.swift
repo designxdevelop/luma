@@ -1,5 +1,7 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#endif
 import LumaCore
 
 struct SettingsView: View {
@@ -24,7 +26,7 @@ struct SettingsView: View {
                                 if store.cloudConnected { Button("Disconnect…", role: .destructive) { confirmingDisconnect = true } }
                             }.padding(.leading, 40)
                             Divider()
-                            settingRow(icon: "wifi", title: "Local network", detail: "Faster, private control for lights with LAN Control turned on in the Govee Home app (Light › Settings › LAN Control). This Mac must be on the same Wi-Fi.") {
+                            settingRow(icon: "wifi", title: "Local network", detail: "Faster, private control for lights with LAN Control turned on in the Govee Home app (Light › Settings › LAN Control). This \(PlatformCopy.device) must be on the same Wi-Fi.") {
                                 StatusPill(text: "\(store.devices.filter { $0.ip != nil }.count) local", icon: "wifi", tint: .secondary)
                             }
                             HStack(spacing: 8) {
@@ -45,7 +47,7 @@ struct SettingsView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text("Theme").font(.system(size: 13, weight: .medium))
-                                Text("Match your Mac, or keep Luma light or dark.").font(.system(size: 12)).foregroundStyle(.secondary)
+                                Text("Match your \(PlatformCopy.device), or keep Luma light or dark.").font(.system(size: 12)).foregroundStyle(.secondary)
                             }
                             Spacer()
                             Picker("Theme", selection: $appearance) { ForEach(Appearance.allCases) { Text($0.title).tag($0) } }
@@ -60,13 +62,13 @@ struct SettingsView: View {
                 Card {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("How Luma runs", systemImage: "info.circle").font(.system(size: 13, weight: .medium))
-                        Text("Closing the window keeps Luma in your menu bar so schedules and webhooks keep working. Quit Luma to stop them. Scenes and schedules are saved on this Mac; your API key and webhook token stay in the macOS Keychain. Activity is kept only until you quit.")
+                        Text(PlatformCopy.storageNote)
                             .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         Text("Coverage depends on LAN support and the features Govee's API reports for each model. Bluetooth-only lights and features only available in the Govee app aren't supported yet.")
                             .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
-            }.padding(28).frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)
+            }.pagePadding().frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)
         }
         .sheet(isPresented: $connecting) { ConnectionSheet(store: store) }
         .confirmationDialog("Disconnect your Govee account?", isPresented: $confirmingDisconnect) {
@@ -91,13 +93,17 @@ struct AboutCard: View {
     var body: some View {
         Card {
             HStack(alignment: .top, spacing: 16) {
+                #if os(macOS)
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56).accessibilityHidden(true)
+                #else
+                Image(systemName: "lightbulb.led.wide.fill").font(.system(size: 34)).foregroundStyle(Color.lumaAccent).frame(width: 56, height: 56).accessibilityHidden(true)
+                #endif
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("Luma").font(.system(size: 17, weight: .bold))
                         Text(Links.version).font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
                     }
-                    Text("A native Mac home for your Govee lights.").font(.system(size: 13))
+                    Text(platformTagline).font(.system(size: 13))
                     Text(Links.attribution).font(.system(size: 12)).foregroundStyle(.secondary)
                     Text(Links.warranty).font(.system(size: 12)).foregroundStyle(.secondary)
                     Text("Luma is not affiliated with or endorsed by Govee.").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -112,6 +118,13 @@ struct AboutCard: View {
     }
 }
 
+#if os(macOS)
+private let platformTagline = "A native Mac home for your Govee lights."
+#else
+private let platformTagline = "A native iPhone and iPad home for your Govee lights."
+#endif
+
+#if os(macOS)
 /// Standard About panel, with the same attribution and links as Settings.
 func showAboutPanel() {
     let credits = NSMutableAttributedString()
@@ -125,6 +138,7 @@ func showAboutPanel() {
     NSApp.orderFrontStandardAboutPanel(options: [.credits: credits, .applicationName: "Luma"])
     NSApp.activate(ignoringOtherApps: true)
 }
+#endif
 
 struct ConnectionSheet: View {
     let store: HomeStore
@@ -155,7 +169,7 @@ struct ConnectionSheet: View {
                     HStack(spacing: 6) { if store.busy { ProgressView().controlSize(.small) }; Text(store.busy ? "Connecting…" : "Connect") }
                 }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(key.isEmpty || store.busy)
             }
-        }.padding(24).frame(width: 460)
+        }.padding(24).sheetFrame(width: 460)
     }
     func connect(saved: Bool) {
         failure = nil

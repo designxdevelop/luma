@@ -139,6 +139,8 @@ public struct ScreenSyncSettings: Codable, Equatable, Sendable {
     public var edgeDepth: Double = 0.15
     /// Weights colorful pixels over gray and white ones, so color isn't washed out by UI or text.
     public var vivid = false
+    /// On a user Stop, send each streamed light back to the state it had at start (LAN only).
+    public var restore = false
     public static let smoothingRange = 0.0...0.95
     public static let thresholdRange = 0.005...0.2
     public static let brightnessCapRange = 1.0...100
@@ -154,6 +156,7 @@ public struct ScreenSyncSettings: Codable, Equatable, Sendable {
         updateHz = try c.decodeIfPresent(Double.self, forKey: .updateHz) ?? d.updateHz
         edgeDepth = try c.decodeIfPresent(Double.self, forKey: .edgeDepth) ?? d.edgeDepth
         vivid = try c.decodeIfPresent(Bool.self, forKey: .vivid) ?? d.vivid
+        restore = try c.decodeIfPresent(Bool.self, forKey: .restore) ?? d.restore
     }
     /// Clamps every field; non-finite values fall back to defaults.
     public func clamped() -> Self {
@@ -315,7 +318,9 @@ public struct ScreenSyncMixer: Sendable {
     public var settings: ScreenSyncSettings { didSet { settings = settings.clamped() } }
     public private(set) var smoothed: RegionColors?
     private var target: RegionColors?
-    private var lanes: [String: (sent: LightTarget, nextAt: Double)] = [:]
+    private var lanes: [String: (sent: LightTarget, nextAt: Double, pending: LightTarget?)] = [:]
+    /// Changes that were waiting on a light's rate cap and got replaced by a newer target before sending.
+    public private(set) var superseded = 0
     private var lastTick: Double?
 
     public init(settings: ScreenSyncSettings = .init()) { self.settings = settings.clamped() }
@@ -334,13 +339,19 @@ public struct ScreenSyncMixer: Sendable {
         for (id, region) in lights.sorted(by: { $0.key < $1.key }) {
             let wanted = ScreenColorMath.target(next[region], brightnessCap: settings.brightnessCap)
             let lane = lanes[id]
-            if let lane, now < lane.nextAt { continue }
+            if let lane, now < lane.nextAt {
+                if ScreenColorMath.exceedsThreshold(lane.sent, wanted, threshold: settings.threshold) {
+                    if let pending = lane.pending, pending != wanted { superseded += 1 }
+                    lanes[id]?.pending = wanted
+                }
+                continue
+            }
             // A lowered cap is a hard limit, even when the adjustment is
             // smaller than the color-change dead band. Keep the rate limit.
             let exceedsCap = lane.map { $0.sent.brightness > Int(settings.brightnessCap.rounded()) } ?? false
             guard exceedsCap || ScreenColorMath.exceedsThreshold(lane?.sent, wanted, threshold: settings.threshold) else { continue }
             updates.append(.init(deviceID: id, target: wanted, sendsColor: lane?.sent.rgb != wanted.rgb, sendsBrightness: lane?.sent.brightness != wanted.brightness))
-            lanes[id] = (wanted, now + 1 / settings.updateHz)
+            lanes[id] = (wanted, now + 1 / settings.updateHz, nil)
         }
         return updates
     }

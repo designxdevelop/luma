@@ -1,3 +1,4 @@
+import { loadWebhookIdentity, webhookSans, type WebhookIdentity } from '../core/certificate';
 // Luma is an open-source project built by Design X Develop LLC.
 // Copyright (c) 2026 Design X Develop LLC. MIT License.
 //
@@ -16,6 +17,7 @@ import { WebhookServer } from '../core/http';
 import { createApiHandler } from '../core/api';
 import { HomeStorage, emptyHome, type SecretStore } from './storage';
 import { demoDevices, demoEffects, demoScenes } from './demo';
+import { REGIONS } from '../shared/sync-math';
 import { SyncController } from './sync';
 import type { StreamField } from '../core/stream';
 
@@ -55,6 +57,7 @@ export class Home {
   private cloudAbort = new AbortController();
   private canSave = true;
   private webhookStatus = 'Stopped';
+  private webhookIdentity?: WebhookIdentity;
   private token?: string;
   private listeners = new Set<() => void>();
   private persistTimer?: NodeJS.Timeout;
@@ -114,6 +117,7 @@ export class Home {
         this.log(`Your saved home could not be read. It was left untouched at ${options.storage.file}.`, true);
       }
     }
+    if (this.home.syncSettings) this.sync.setSettings(this.home.syncSettings);
     this.scheduleTimer = setInterval(() => this.tickSchedules(), 15_000);
     this.scheduleTimer.unref?.();
   }
@@ -130,6 +134,25 @@ export class Home {
     this.emit();
   }
 
+  clearActivity(): void { this.activity = []; this.emit(); }
+  setAppearance(value: unknown): void {
+    if (value !== 'system' && value !== 'light' && value !== 'dark') throw new LumaError('Invalid appearance.');
+    this.home.appearance = value; this.schedulePersist(); this.emit();
+  }
+  setSyncSettings(value: unknown): void {
+    this.sync.setSettings(value); this.home.syncSettings = { ...this.sync.settings }; this.schedulePersist();
+  }
+  setSyncAssignments(value: unknown): void {
+    if (!Array.isArray(value) || value.length > 1000) throw new LumaError('Invalid assignments.');
+    const ids = new Set<string>();
+    const assignments = value.map((item: unknown) => {
+      if (!item || typeof item !== 'object') throw new LumaError('Invalid assignment.');
+      const v = item as Record<string, unknown>;
+      if (typeof v.id !== 'string' || !v.id.trim() || v.id.length > 128 || /[\u0000-\u001f]/.test(v.id) || ids.has(v.id) || typeof v.region !== 'string' || !REGIONS.includes(v.region as never) || typeof v.included !== 'boolean') throw new LumaError('Invalid assignment.');
+      ids.add(v.id); return { id: v.id, region: v.region as (typeof REGIONS)[number], included: v.included };
+    });
+    this.home.syncAssignments = assignments; this.schedulePersist(); this.emit();
+  }
   dismissNotice(): void { this.notice = undefined; this.emit(); }
 
   /** Confirmed state only. */
@@ -156,6 +179,8 @@ export class Home {
       webhook: {
         running: this.server.running,
         status: this.webhookStatus,
+        fingerprint: this.webhookIdentity?.fingerprint,
+        spkiPin: this.webhookIdentity?.spkiPin,
         port: this.home.webhookPort,
         allowLAN: this.home.allowLAN,
         maskedToken: this.token ? `${this.token.slice(0, 3)}…${this.token.slice(-4)}` : this.demo ? undefined : this.hasSecret(WEBHOOK_TOKEN) ? 'lm_…saved' : undefined,
@@ -164,6 +189,8 @@ export class Home {
       canSave: this.canSave && !this.demo,
       version: this.options.version,
       sync: this.sync.view(),
+      appearance: this.home.appearance ?? 'system',
+      syncAssignments: this.home.syncAssignments ?? [],
     };
   }
 
@@ -524,7 +551,9 @@ export class Home {
       if (!this.token) { this.token = newToken(); secrets.write(WEBHOOK_TOKEN, this.token); }
     }
     try {
-      const { port, host } = await this.server.start({ port: this.home.webhookPort, allowLAN: this.home.allowLAN, token: this.token, handler: createApiHandler(this.apiHost()) });
+      const identity = loadWebhookIdentity(secrets, false, new Date(), webhookSans(this.home.allowLAN));
+      const { port, host } = await this.server.start({ tls: identity, port: this.home.webhookPort, allowLAN: this.home.allowLAN, token: this.token, handler: createApiHandler(this.apiHost()) });
+      this.webhookIdentity = identity;
       this.webhookStatus = `Listening on ${host === '0.0.0.0' ? 'all network interfaces (LAN)' : 'this PC only'} · port ${port}`;
       this.log(`Webhook server started on port ${port}.`);
     } catch (error) {
@@ -532,6 +561,11 @@ export class Home {
       this.log(this.webhookStatus, true);
       throw error;
     }
+  }
+
+  webhookCertificate(): string {
+    if (!this.webhookIdentity) throw new LumaError('Start the server to access its certificate.');
+    return this.webhookIdentity.cert;
   }
 
   async stopWebhook(): Promise<void> {

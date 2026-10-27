@@ -86,15 +86,18 @@ struct ScenesView: View {
     @State private var editor: LightScene?
     @State private var deleting: LightScene?
     @State private var errorText: String?
+    @State private var importing = false
+    @State private var exporting: SceneFile?
+    @State private var showExporter = false
 
     var body: some View {
         let scenes = store.home.scenes
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 PageHeader(title: "Scenes", subtitle: scenes.isEmpty
-                           ? "Save your lighting as scenes you can run from the menu bar, schedules, and webhooks."
-                           : "\(scenes.count) \(scenes.count == 1 ? "scene" : "scenes") · Run them here, from the menu bar, on a schedule, or with a webhook.") {
-                    Button("Import…", systemImage: "square.and.arrow.down") { importScene() }
+                           ? PlatformCopy.scenesEmpty
+                           : "\(scenes.count) \(scenes.count == 1 ? "scene" : "scenes") · \(PlatformCopy.scenesWhere)") {
+                    Button("Import…", systemImage: "square.and.arrow.down") { importing = true }
                         .help("Import a scene from a JSON file")
                     Button("New Scene", systemImage: "plus") { showNew = true }
                         .buttonStyle(.borderedProminent)
@@ -108,7 +111,7 @@ struct ScenesView: View {
                 Text("Scenes run their steps in order, with optional pauses in between. Stopping a scene skips the remaining steps, but it doesn't undo anything already sent to your lights.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            .padding(28)
+            .pagePadding()
         }
         .sheet(isPresented: $showNew) { NewSceneSheet(store: store) }
         .sheet(item: $editor) { SceneEditor(store: store, scene: $0) }
@@ -120,6 +123,12 @@ struct ScenesView: View {
         } message: { scene in
             let count = store.home.schedules.filter { $0.sceneID == scene.id }.count
             Text(count == 0 ? "This can't be undone." : "This also removes \(count) \(count == 1 ? "schedule" : "schedules") that \(count == 1 ? "runs" : "run") it. This can't be undone.")
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { importScene(from: $0) }
+        // ponytail: a plain flag instead of a computed Binding; one fewer closure for older compilers.
+        .fileExporter(isPresented: $showExporter, document: exporting,
+                      contentType: .json, defaultFilename: exporting?.name) { result in
+            if case .failure(let error) = result { errorText = error.localizedDescription } else { errorText = nil }
         }
     }
 
@@ -277,10 +286,12 @@ struct ScenesView: View {
         store.persist()
     }
 
-    private func importScene() {
-        let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+    private func importScene(from result: Result<URL, any Error>) {
         do {
+            let url = try result.get()
+            // Files from the iOS document picker are security scoped.
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             let data = try Data(contentsOf: url)
             guard data.count < 1024 * 1024 else { throw LumaError.message("Scene file must be smaller than 1 MB.") }
             try store.saveScene(JSONDecoder().decode(LightScene.self, from: data)); errorText = nil
@@ -288,10 +299,18 @@ struct ScenesView: View {
     }
 
     private func exportScene(_ scene: LightScene) {
-        let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = "\(scene.name).json"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { try JSONEncoder.pretty.encode(scene).write(to: url, options: .atomic); errorText = nil } catch { errorText = error.localizedDescription }
+        do { exporting = SceneFile(name: scene.name, data: try JSONEncoder.pretty.encode(scene)); showExporter = true; errorText = nil } catch { errorText = error.localizedDescription }
     }
+}
+
+/// A scene's JSON for the system save panel or document picker.
+struct SceneFile: FileDocument {
+    static let readableContentTypes: [UTType] = [.json]
+    let name: String
+    let data: Data
+    init(name: String, data: Data) { self.name = name; self.data = data }
+    init(configuration: ReadConfiguration) throws { name = "Scene"; data = configuration.file.regularFileContents ?? Data() }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
 }
 
 // MARK: - New scene sheet
@@ -349,7 +368,7 @@ private struct NewSceneSheet: View {
                                     Text(device.room).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                                 }.frame(maxWidth: .infinity, alignment: .leading)
                             }
-                            .toggleStyle(.checkbox).padding(.horizontal, 12).frame(height: 36)
+                            .checkboxToggle().padding(.horizontal, 12).frame(height: 36)
                         }
                     }
                 }
@@ -367,7 +386,7 @@ private struct NewSceneSheet: View {
                     .disabled(trimmedName.isEmpty || selected.isEmpty)
             }
         }
-        .padding(24).frame(width: 520).background(Color.canvas)
+        .padding(24).sheetFrame(width: 520).background(Color.canvas)
         .onAppear { nameFocused = true }
     }
 
@@ -440,7 +459,8 @@ struct SceneEditor: View {
             if let errorText { InlineMessage(text: errorText) }
             DisclosureGroup("Advanced") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Edit as JSON", isOn: Binding(get: { jsonMode }, set: setJSONMode(_:)))
+                    // A closure, not `setJSONMode(_:)`: that method reference crashes Swift 6.3 IRGen (Xcode 26).
+                    Toggle("Edit as JSON", isOn: Binding(get: { jsonMode }, set: { setJSONMode($0) }))
                     Text("For power users and effects the step editor doesn't cover. Switching back checks your changes.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }.padding(.top, 6)
@@ -452,7 +472,7 @@ struct SceneEditor: View {
                     .buttonStyle(.borderedProminent)
             }
         }
-        .padding(24).frame(width: 720, height: 620).background(Color.canvas)
+        .padding(24).sheetFrame(width: 720, height: 620).background(Color.canvas)
     }
 
     // MARK: Steps

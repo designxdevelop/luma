@@ -1,3 +1,4 @@
+import { request as httpsRequest } from 'node:https';
 // Luma is an open-source project built by Design X Develop LLC.
 // Copyright (c) 2026 Design X Develop LLC. MIT License.
 //
@@ -703,23 +704,23 @@ test('a due schedule is skipped and logged while another scene is running', asyn
 
 // ---------- 8. webhook (loopback only) ----------
 
+let activeCertificate: string;
 async function startOnFreePort(home: Home): Promise<number> {
   for (let i = 0; i < 25; i++) {
     const port = 40000 + Math.floor(Math.random() * 20000);
     home.setWebhookConfig(port, false);
-    try { await home.startWebhook(); return port; }
+    try { await home.startWebhook(); activeCertificate = home.webhookCertificate(); return port; }
     catch (error) { if (!/in use|elevated permission/i.test((error as Error).message)) throw error; }
   }
   throw new Error('no free loopback port found');
 }
 
 async function call(port: number, path: string, opts: { token?: string; method?: string; body?: unknown } = {}): Promise<{ status: number; json: any }> {
-  const res = await fetch(`http://127.0.0.1:${port}${path}`, {
-    method: opts.method ?? 'GET',
-    headers: { ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}), ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest({ host: '127.0.0.1', port, path, method: opts.method ?? 'GET', ca: activeCertificate, headers: { ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}), ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}) } }, res => {
+      const chunks: Buffer[] = []; res.on('data', (chunk: Buffer) => chunks.push(chunk)); res.on('end', () => resolve({ status: res.statusCode!, json: JSON.parse(Buffer.concat(chunks).toString()) }));
+    }); req.on('error', reject); req.end(opts.body === undefined ? undefined : JSON.stringify(opts.body));
   });
-  return { status: res.status, json: await res.json() };
 }
 
 test('webhook: token creation, masking, auth, actions, confirmed-only device state, and rotation', async (t) => {

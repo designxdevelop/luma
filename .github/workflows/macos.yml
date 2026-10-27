@@ -20,9 +20,16 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Select the newest Xcode on the runner
+        run: |
+          xcode="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$xcode"
+          echo "Using $xcode"
       - name: Swift toolchain
         run: swift --version
       - name: Synthetic contracts and localhost webhook integration
         run: ./scripts/verify.sh
       - name: Build and verify ad-hoc signed app
         run: ./scripts/build-app.sh
+      - name: Build iOS app for the simulator (unsigned)
+        run: xcodebuild -project ios/Luma.xcodeproj -scheme LumaiOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build

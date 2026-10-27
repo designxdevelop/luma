@@ -10,6 +10,11 @@ import type { AppSnapshot, LumaBridge } from '../shared/types';
 const call = (channel: string) => (...args: unknown[]) => ipcRenderer.invoke(`luma:${channel}`, ...args);
 
 const bridge: LumaBridge = {
+  setAppearance: call('setAppearance') as LumaBridge['setAppearance'],
+  setSyncAssignments: call('setSyncAssignments') as LumaBridge['setSyncAssignments'],
+  clearActivity: call('clearActivity') as LumaBridge['clearActivity'],
+  copyDeviceID: call('copyDeviceID') as LumaBridge['copyDeviceID'],
+  exploreDemo: call('exploreDemo') as LumaBridge['exploreDemo'],
   snapshot: call('snapshot') as LumaBridge['snapshot'],
   onSnapshot(listener) {
     const handler = (_event: unknown, snapshot: AppSnapshot) => listener(snapshot);
@@ -43,6 +48,9 @@ const bridge: LumaBridge = {
   stopWebhook: call('stopWebhook') as LumaBridge['stopWebhook'],
   rotateToken: call('rotateToken') as LumaBridge['rotateToken'],
   copyToken: call('copyToken') as LumaBridge['copyToken'],
+  copyFingerprint: call('copyFingerprint') as LumaBridge['copyFingerprint'],
+  copySpkiPin: call('copySpkiPin') as LumaBridge['copySpkiPin'],
+  exportCertificate: call('exportCertificate') as LumaBridge['exportCertificate'],
   openExternal: call('openExternal') as LumaBridge['openExternal'],
   exportScene: call('exportScene') as LumaBridge['exportScene'],
   importScene: call('importScene') as LumaBridge['importScene'],
