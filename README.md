@@ -1,6 +1,6 @@
 # Luma
 
-An experimental desktop app for controlling Govee lights, programming scenes, and connecting lighting to local automations.
+An experimental app for controlling Govee lights on Mac, iPhone/iPad, Windows, and Linux, programming scenes, and connecting lighting to local automations.
 
 **An open-source project built by Design X Develop LLC.** Licensed under [MIT](LICENSE) and provided **as is, without warranty**. Luma is an independent project and is not affiliated with or endorsed by Govee.
 
@@ -14,7 +14,8 @@ Screen Sync processes frames locally, with explicit source selection, region map
 
 | Platform | Implementation | Source and instructions | Verification status |
 | --- | --- | --- | --- |
-| macOS 14+ | Native SwiftUI / Swift / ScreenCaptureKit | [Mac guide](MACOS.md), `Sources/`, `Tests/` | 104 automated tests and synthetic Screen Sync UI checks; basic cloud/LAN controls tested with hardware |
+| macOS 14+ | Native SwiftUI / Swift / ScreenCaptureKit | [Mac guide](MACOS.md), `Sources/`, `Tests/` | 113 automated tests and synthetic Screen Sync UI checks; basic cloud/LAN controls tested with hardware |
+| iOS / iPadOS 17+ | Native SwiftUI, shares the Mac app's code (`Sources/LumaUI`) | [iOS guide](IOS.md), `ios/` | Builds in CI; demo mode checked in the iOS Simulator; Screen Sync uses the camera; not yet tested with hardware |
 | Windows 11 x64 | Electron / TypeScript | [Desktop guide](desktop/README.md), `desktop/` | Unsigned installer built; 189 portable contracts pass; actual Windows runtime, installer, DPAPI, capture, and light response still need testing |
 | Linux x64 / arm64 | Electron / TypeScript | [Linux guide](desktop/docs/LINUX.md), `desktop/` | Archives built; 189 contracts on Linux and 19 synthetic arm64 app checks; real X11/Wayland capture and keyring integration still need testing |
 
@@ -29,6 +30,8 @@ On macOS, install Swift 6.2+ / Xcode Command Line Tools:
 ./scripts/build-app.sh
 open dist/Luma.app
 ```
+
+For iPhone and iPad, open `ios/Luma.xcodeproj` (scheme **LumaiOS**); see the [iOS guide](IOS.md).
 
 For Windows or Linux, install Node.js 22.12+ (Node 24 is used in CI):
 
@@ -53,6 +56,7 @@ Found a bug, an unsupported model, or an idea worth trying? [File an Issue](http
 ## Details
 
 - [Native Mac usage, webhooks, and build instructions](MACOS.md)
+- [iPhone and iPad](IOS.md)
 - [Windows/Linux usage and webhooks](desktop/README.md)
 - [Screen Sync behavior and limits on Windows/Linux](desktop/docs/SCREEN-SYNC.md)
 - [Protocol research](docs/PROTOCOL-RESEARCH.md)

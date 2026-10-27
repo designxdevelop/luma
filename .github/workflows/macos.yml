@@ -26,3 +26,5 @@ jobs:
         run: ./scripts/verify.sh
       - name: Build and verify ad-hoc signed app
         run: ./scripts/build-app.sh
+      - name: Build iOS app for the simulator (unsigned)
+        run: xcodebuild -project ios/Luma.xcodeproj -scheme LumaiOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
