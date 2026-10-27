@@ -14,6 +14,7 @@ extension ScreenSource {
 final class CameraScreenCapture: ScreenCaptureSession {
     private var session: AVCaptureSession?
     private var output: CameraFrameOutput?
+    private var observers: [any NSObjectProtocol] = []
 
     func start(onFrame: @escaping @MainActor (ScreenGrid, ContinuousClock.Instant) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) async throws {
         guard await AVCaptureDevice.requestAccess(for: .video) else { throw ScreenCaptureEnd.permissionDenied }
@@ -34,11 +35,25 @@ final class CameraScreenCapture: ScreenCaptureSession {
         // Camera frames arrive landscape; match the TV's orientation.
         if let connection = video.connection(with: .video), connection.isVideoRotationAngleSupported(0) { connection.videoRotationAngle = 0 }
         self.session = session; self.output = output
-        await withCheckedContinuation { done in output.queue.async { session.startRunning(); done.resume() } }
+        // Runtime errors and interruptions (a call, another camera app) end the session.
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: .main) { note in
+                let error = note.userInfo?[AVCaptureSessionErrorKey] as? Error
+                MainActor.assumeIsolated { onEnd(.failed(error?.localizedDescription ?? "The camera stopped.")) }
+            },
+            center.addObserver(forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: .main) { _ in
+                MainActor.assumeIsolated { onEnd(.failed("Another app is using the camera.")) }
+            }
+        ]
+        let running = await withCheckedContinuation { done in output.queue.async { session.startRunning(); done.resume(returning: session.isRunning) } }
+        guard running else { stop(); throw ScreenCaptureEnd.failed("The camera couldn't start.") }
     }
 
     func stop() {
         output?.cancel()
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
         guard let session, let output else { return }
         self.session = nil; self.output = nil
         output.queue.async { session.stopRunning() }

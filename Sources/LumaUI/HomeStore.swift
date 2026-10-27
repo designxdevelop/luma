@@ -65,6 +65,8 @@ struct ActivityEntry: Identifiable {
             || inFlightControls[deviceID] != nil
     }
     var rooms: [String] { Array(Set(devices.map(\.room))).sorted() }
+    /// Waits for the launch-time cloud reconnect, so early requests have a route.
+    func ready() async { await reconnectTask?.value }
     var poweredCount: Int { devices.filter { $0.power == true }.count }
 
     init(demo demoOverride: Bool? = nil, cloud: GoveeCloud? = nil, screenSyncDefaults: UserDefaults? = .standard) {

@@ -25,7 +25,9 @@ struct HomeStorage {
     func save(_ home: SavedHome) throws {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let file = folder.appending(path: "home.json")
-        try JSONEncoder.pretty.encode(home).write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
+        // Until first unlock, like the Keychain items: a watch request can launch
+        // Luma in the background while the iPhone is locked.
+        try JSONEncoder.pretty.encode(home).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
 }

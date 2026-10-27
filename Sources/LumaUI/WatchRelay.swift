@@ -66,6 +66,8 @@ final class WatchRelay: NSObject, WCSessionDelegate {
         let reply = SendableReply(replyHandler)
         Task { @MainActor in
             guard let store = self.store else { reply([:]); return }
+            // A watch message can cold-launch Luma; wait for the cloud reconnect first.
+            await store.ready()
             store.handleWatch(request)
             reply((try? store.watchSnapshot.encoded()) ?? [:])
         }

@@ -45,3 +45,18 @@ test('HTTPS trusts only the generated CA and rejects plaintext HTTP', async () =
     assert.doesNotMatch(result, /^HTTP\/1\.1/);
   } finally { await server.stop(); }
 });
+
+test('silent clients that never finish the TLS handshake are closed and free their slots', async () => {
+  const identity = generateWebhookIdentity();
+  const server = new WebhookServer();
+  const { port } = await server.start({ port: 0, allowLAN: false, token: 'long-enough-token-123', tls: identity, deadlineMs: 200, handler: async () => ({ status: 200, body: { ok: true } }) });
+  try {
+    const sockets = Array.from({ length: 16 }, () => createConnection({ host: '127.0.0.1', port }));
+    const closed = await Promise.all(sockets.map((socket) => new Promise<boolean>((resolve) => {
+      socket.on('error', () => undefined);
+      socket.on('close', () => resolve(true));
+      setTimeout(() => resolve(false), 3_000);
+    })));
+    assert.ok(closed.every(Boolean), 'every idle pre-handshake connection was closed');
+  } finally { await server.stop(); }
+});
