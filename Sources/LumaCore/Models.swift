@@ -49,6 +49,8 @@ public struct LightDevice: Codable, Sendable, Identifiable, Equatable {
     public var id: String
     public var sku: String
     public var name: String
+    /// User-set label that survives cloud and LAN refreshes; `name` stays the device's own.
+    public var customName: String?
     public var room: String
     public var ip: String?
     public var capabilities: [Capability]
@@ -61,11 +63,11 @@ public struct LightDevice: Codable, Sendable, Identifiable, Equatable {
     public var isDemo: Bool
     public init(id: String, sku: String, name: String, room: String = "Unassigned", ip: String? = nil,
                 capabilities: [Capability] = [], power: Bool? = nil, brightness: Int? = nil, rgb: Int? = nil,
-                colorTemperature: Int? = nil, online: Bool? = nil, lastSeen: Date? = nil, isDemo: Bool = false) {
+                colorTemperature: Int? = nil, online: Bool? = nil, lastSeen: Date? = nil, isDemo: Bool = false, customName: String? = nil) {
         self.id = id; self.sku = sku; self.name = name; self.room = room; self.ip = ip
         self.capabilities = capabilities; self.power = power; self.brightness = brightness
         self.rgb = rgb; self.colorTemperature = colorTemperature; self.online = online
-        self.lastSeen = lastSeen; self.isDemo = isDemo
+        self.lastSeen = lastSeen; self.isDemo = isDemo; self.customName = customName
     }
     public func supports(_ instance: String) -> Bool { ip != nil && ["powerSwitch", "brightness", "colorRgb", "colorTemperatureK"].contains(instance) || capabilities.contains { $0.instance == instance } }
 }

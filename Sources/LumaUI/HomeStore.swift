@@ -49,6 +49,7 @@ struct ActivityEntry: Identifiable {
     var devices: [LightDevice] {
         home.devices.map { device in
             var displayed = device
+            displayed.name = device.customName ?? device.name
             for (key, pending) in pendingControls where key.deviceID == device.id { displayed.display(pending.command) }
             return displayed
         }
@@ -96,6 +97,7 @@ struct ActivityEntry: Identifiable {
         }
         screenSync.store = self
         screenSync.send = { [weak self] device, update in try self?.streamToLight(device, update) }
+        screenSync.restore = { [weak self] device, commands in try self?.restoreToLight(device, commands) }
         screenSync.readback = { [weak self] device in await self?.refresh(device) }
         screenSync.observeSystem()
     }
@@ -330,9 +332,19 @@ struct ActivityEntry: Identifiable {
         guard !shuttingDown, !hasOrdinaryControl(for: device.id) else { return }
         guard !device.isDemo else { return }
         guard device.ip != nil else { throw LumaError.message("Screen Sync needs local (LAN) control for this light.") }
-        try lan.start(onDevice: { [weak self] incoming in self?.merge(incoming); self?.persist() }, onError: { [weak self] message in self?.log(message, error: true) })
+        try startLAN()
         if update.sendsColor { try lan.control(device: device, command: .rgb(update.target.rgb)) }
         if update.sendsBrightness { try lan.control(device: device, command: .brightness(update.target.brightness)) }
+    }
+    /// Screen Sync's restore on Stop: LAN only, never cloud.
+    func restoreToLight(_ device: LightDevice, _ commands: [CapabilityCommand]) throws {
+        guard !shuttingDown, !device.isDemo else { return }
+        guard device.ip != nil else { throw LumaError.message("Restoring needs local (LAN) control for this light.") }
+        try startLAN()
+        for command in commands { try lan.control(device: device, command: command) }
+    }
+    private func startLAN() throws {
+        try lan.start(onDevice: { [weak self] incoming in self?.merge(incoming); self?.persist() }, onError: { [weak self] message in self?.log(message, error: true) })
     }
     func perform(_ command: CapabilityCommand, ids: [String]) {
         for id in ids {
@@ -403,6 +415,13 @@ struct ActivityEntry: Identifiable {
             confirmationTasks.removeValue(forKey: operation.key)?.cancel()
             log(message, error: true)
         } else { log(message) }
+    }
+    /// Empty, or the light's own name, clears the custom name.
+    func rename(_ name: String, id: String) {
+        guard let i = home.devices.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(64))
+        home.devices[i].customName = trimmed.isEmpty || trimmed == home.devices[i].name ? nil : trimmed
+        persist()
     }
     func assignRoom(_ room: String, id: String) {
         guard let i = home.devices.firstIndex(where: { $0.id == id }) else { return }

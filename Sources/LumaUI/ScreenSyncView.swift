@@ -19,6 +19,7 @@ struct ScreenSyncView: View {
                 sourceCard
                 if sync.phase == .idle { privacyCard }
                 if let colors = sync.regionPreview { colorMap(colors) }
+                if sync.isActive { statsRow }
                 lightsSection
                 tuningSection
             }.pagePadding().frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)
@@ -138,6 +139,28 @@ struct ScreenSyncView: View {
         Color(red: ScreenColorMath.srgb(c.r) / 255, green: ScreenColorMath.srgb(c.g) / 255, blue: ScreenColorMath.srgb(c.b) / 255)
     }
 
+    // MARK: Session stats
+
+    private var statsRow: some View {
+        let s = sync.stats
+        let items = [("Analyzed", s.analyzed), ("Skipped", s.skipped), ("Sent", s.sent), ("Superseded", s.superseded), ("Errors", s.errors)]
+        return VStack(alignment: .leading, spacing: 10) {
+            SectionHeader("Session", detail: "Frames and light updates")
+            Card {
+                HStack {
+                    ForEach(items, id: \.0) { title, value in
+                        VStack(spacing: 2) {
+                            Text("\(value)").font(.system(size: 15, weight: .semibold)).monospacedDigit().foregroundStyle(title == "Errors" && value > 0 ? Color.warning : .primary)
+                            Text(title).font(.system(size: 11)).foregroundStyle(.secondary)
+                        }.frame(maxWidth: .infinity)
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Session: \(items.map { "\($0.1) \($0.0.lowercased())" }.joined(separator: ", "))")
+            }
+        }
+    }
+
     // MARK: Lights
 
     private var lightsSection: some View {
@@ -159,7 +182,7 @@ struct ScreenSyncView: View {
                     }
                 }
             }
-            Text("Manual changes, scenes, schedules, and webhooks take over a light right away. Stopping leaves lights at their last synced color and brightness.")
+            Text("Manual changes, scenes, schedules, and webhooks take over a light right away. Stopping leaves lights at their last synced color and brightness unless you turn on Restore previous state.")
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -237,6 +260,14 @@ struct ScreenSyncView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Vivid colors").font(.system(size: 13, weight: .medium))
                             Text("Favors colorful parts of the picture over gray, white, and text, so lights stay colorful.")
+                                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .toggleStyle(.switch).controlSize(.small)
+                    Toggle(isOn: Binding(get: { sync.settings.restore }, set: { sync.settings.restore = $0 })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Restore previous state").font(.system(size: 13, weight: .medium))
+                            Text("When you press Stop, send each synced light back to the brightness and color it had before. Local network only. Lights you changed by hand are left alone, and automatic stops (sleep, lock, errors) don't restore.")
                                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
                     }

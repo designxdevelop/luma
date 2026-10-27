@@ -7,6 +7,7 @@ struct DeviceSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var tab = Tab.light
     @State private var room = ""
+    @State private var name = ""
     @State private var roomMessage: String?
     @State private var instance = ""
     @State private var json = "1"
@@ -52,7 +53,7 @@ struct DeviceSheet: View {
         .sheetFrame(width: 660, height: 720).background(Color.canvas)
         .onAppear {
             guard let device else { return }
-            room = device.room
+            room = device.room; name = device.name
             instance = features(device).first?.instance ?? ""; resetValue()
         }
         .onChange(of: instance) { _, _ in resetValue() }
@@ -168,6 +169,15 @@ struct DeviceSheet: View {
     @ViewBuilder private func detailsTab(_ device: LightDevice) -> some View {
         Card {
             VStack(alignment: .leading, spacing: 12) {
+                SectionHeader("Name")
+                HStack(spacing: 8) {
+                    TextField("Name", text: $name).textFieldStyle(.roundedBorder).onSubmit { saveName() }
+                        .onChange(of: name) { _, value in if value.count > 64 { name = String(value.prefix(64)) } }
+                    Button("Save") { saveName() }
+                    if let own = store.home.devices.first(where: { $0.id == deviceID }), own.customName != nil {
+                        Button("Reset") { store.rename("", id: deviceID); name = own.name }.help("Use the name \(own.name) from the light")
+                    }
+                }
                 SectionHeader("Room")
                 HStack(spacing: 8) {
                     TextField("Room", text: $room).textFieldStyle(.roundedBorder).onSubmit { saveRoom() }
@@ -209,6 +219,11 @@ struct DeviceSheet: View {
             }.help("Ask the light for its current state")
             Spacer()
         }
+    }
+
+    private func saveName() {
+        store.rename(name, id: deviceID)
+        name = device?.name ?? name
     }
 
     private func saveRoom() {
