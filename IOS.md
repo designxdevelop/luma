@@ -24,6 +24,12 @@ To run on a device, select your own team under **Signing & Capabilities**. No te
 
 Lights, rooms, search, power/brightness/color/white, model-specific effects and the advanced JSON editor, app scenes (create, edit, duplicate, import/export JSON through the Files picker), schedules, the authenticated webhook server, activity, appearance, demo mode, and Keychain-stored secrets. iPhone uses a tab bar; iPad keeps the Mac's sidebar with rooms.
 
+## Apple Watch
+
+The iOS app embeds a watchOS 10+ companion (target **LumaWatch**, built with the iOS app). It lists your lights and scenes, turns everything on or off, runs or stops a scene, and toggles or dims one light with taps or the Digital Crown.
+
+The watch never contacts lights or Govee itself: watchOS doesn't allow the UDP sockets LAN control needs, and your API key stays on the phone. Each tap is sent to the iPhone app over WatchConnectivity; iOS wakes Luma in the background to run it through the same controls as the phone, and the reply updates the watch. The iPhone must be nearby. Launch the watch app with `--demo` to try it with sample lights and no phone.
+
 ## What's different on iOS
 
 - **Screen Sync uses the camera.** iOS doesn't let apps read other apps' screens without a ReplayKit broadcast extension. Instead, choose **Use Camera** and point the back camera at a TV or monitor; frames go through the same region, smoothing, and LAN pipeline as on the Mac. Frames are reduced on the device to a coarse color grid and never saved or uploaded. Capture pauses when Luma leaves the foreground.
@@ -33,5 +39,5 @@ Lights, rooms, search, power/brightness/color/white, model-specific effects and 
 ## Not yet
 
 - ReplayKit broadcast extension for whole-screen sync.
-- Widgets, Shortcuts/App Intents, Live Activities.
+- Watch complications, widgets, Shortcuts/App Intents, Live Activities.
 - App Store or TestFlight distribution.

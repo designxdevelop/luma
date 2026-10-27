@@ -1,6 +1,6 @@
 # Luma
 
-An experimental app for controlling Govee lights on Mac, iPhone/iPad, Windows, and Linux, programming scenes, and connecting lighting to local automations.
+An experimental app for controlling Govee lights on Mac, iPhone/iPad, Apple Watch, Windows, and Linux, programming scenes, and connecting lighting to local automations.
 
 **An open-source project built by Design X Develop LLC.** Licensed under [MIT](LICENSE) and provided **as is, without warranty**. Luma is an independent project and is not affiliated with or endorsed by Govee.
 
@@ -15,7 +15,7 @@ Screen Sync processes frames locally, with explicit source selection, region map
 | Platform | Implementation | Source and instructions | Verification status |
 | --- | --- | --- | --- |
 | macOS 14+ | Native SwiftUI / Swift / ScreenCaptureKit | [Mac guide](MACOS.md), `Sources/`, `Tests/` | 113 automated tests and synthetic Screen Sync UI checks; basic cloud/LAN controls tested with hardware |
-| iOS / iPadOS 17+ | Native SwiftUI, shares the Mac app's code (`Sources/LumaUI`) | [iOS guide](IOS.md), `ios/` | Builds in CI; demo mode checked in the iOS Simulator; Screen Sync uses the camera; not yet tested with hardware |
+| iOS / iPadOS 17+, watchOS 10+ | Native SwiftUI, shares the Mac app's code (`Sources/LumaUI`); the watch relays through the iPhone | [iOS guide](IOS.md), `ios/` | Builds in CI; demo mode checked in the iOS Simulator; Screen Sync uses the camera; not yet tested with hardware |
 | Windows 11 x64 | Electron / TypeScript | [Desktop guide](desktop/README.md), `desktop/` | Unsigned installer built; 189 portable contracts pass; actual Windows runtime, installer, DPAPI, capture, and light response still need testing |
 | Linux x64 / arm64 | Electron / TypeScript | [Linux guide](desktop/docs/LINUX.md), `desktop/` | Archives built; 189 contracts on Linux and 19 synthetic arm64 app checks; real X11/Wayland capture and keyring integration still need testing |
 

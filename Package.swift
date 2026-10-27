@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Luma",
-    platforms: [.macOS(.v14), .iOS(.v17)],
+    platforms: [.macOS(.v14), .iOS(.v17), .watchOS(.v10)],
     products: [
         .executable(name: "Luma", targets: ["Luma"]),
         .library(name: "LumaCore", targets: ["LumaCore"]),
