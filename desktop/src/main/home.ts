@@ -1,4 +1,4 @@
-import { loadWebhookIdentity, type WebhookIdentity } from '../core/certificate';
+import { loadWebhookIdentity, webhookSans, type WebhookIdentity } from '../core/certificate';
 // Luma is an open-source project built by Design X Develop LLC.
 // Copyright (c) 2026 Design X Develop LLC. MIT License.
 //
@@ -180,6 +180,7 @@ export class Home {
         running: this.server.running,
         status: this.webhookStatus,
         fingerprint: this.webhookIdentity?.fingerprint,
+        spkiPin: this.webhookIdentity?.spkiPin,
         port: this.home.webhookPort,
         allowLAN: this.home.allowLAN,
         maskedToken: this.token ? `${this.token.slice(0, 3)}…${this.token.slice(-4)}` : this.demo ? undefined : this.hasSecret(WEBHOOK_TOKEN) ? 'lm_…saved' : undefined,
@@ -550,7 +551,7 @@ export class Home {
       if (!this.token) { this.token = newToken(); secrets.write(WEBHOOK_TOKEN, this.token); }
     }
     try {
-      const identity = loadWebhookIdentity(secrets);
+      const identity = loadWebhookIdentity(secrets, false, new Date(), webhookSans(this.home.allowLAN));
       const { port, host } = await this.server.start({ tls: identity, port: this.home.webhookPort, allowLAN: this.home.allowLAN, token: this.token, handler: createApiHandler(this.apiHost()) });
       this.webhookIdentity = identity;
       this.webhookStatus = `Listening on ${host === '0.0.0.0' ? 'all network interfaces (LAN)' : 'this PC only'} · port ${port}`;

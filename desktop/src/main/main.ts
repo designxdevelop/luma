@@ -217,7 +217,7 @@ function registerIPC(): void {
   handle('setSyncAssignments', (value) => home.setSyncAssignments(value));
   handle('clearActivity', () => home.clearActivity());
   handle('copyDeviceID', (id) => { const device = home.snapshot().devices.find(d => d.id === str(id)); if (!device) throw new LumaError('Device not found.'); clipboard.writeText(device.id); });
-  handle('exploreDemo', () => { if (demo) return; app.relaunch({ args: [...process.argv.slice(1), '--demo'] }); quitting = true; app.quit(); });
+  handle('exploreDemo', () => { if (demo) return; app.releaseSingleInstanceLock(); app.relaunch({ args: [...process.argv.slice(1), '--demo'] }); quitting = true; app.quit(); });
   handle('control', (id, command) => home.control(str(id), command as never));
   handle('refresh', (id) => home.refresh(str(id)));
   handle('connect', (key) => home.connect(str(key, 512)));
@@ -241,6 +241,7 @@ function registerIPC(): void {
   handle('rotateToken', () => home.rotateToken());
   handle('copyToken', () => home.copyToken());
   handle('copyFingerprint', () => { const fingerprint = home.snapshot().webhook.fingerprint; if (!fingerprint) throw new LumaError('Start the server first.'); clipboard.writeText(fingerprint); });
+  handle('copySpkiPin', () => { const pin = home.snapshot().webhook.spkiPin; if (!pin) throw new LumaError('Start the server first.'); clipboard.writeText(pin); });
   handle('exportCertificate', async () => { const cert = home.webhookCertificate(); const result = await dialog.showSaveDialog(window!, { defaultPath: 'luma.pem', filters: [{ name: 'PEM certificate', extensions: ['pem'] }] }); if (!result.canceled && result.filePath) writeFileSync(result.filePath, cert); });
   handle('dismissNotice', () => home.dismissNotice());
   handle('syncSources', () => capture.list());

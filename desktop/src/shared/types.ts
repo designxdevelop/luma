@@ -193,6 +193,7 @@ export interface AppSnapshot {
     running: boolean;
     status: string;
     fingerprint?: string;
+    spkiPin?: string;
     port: number;
     allowLAN: boolean;
     /** e.g. "lm_…a1b2"; never the full token. */
@@ -241,6 +242,7 @@ export interface LumaBridge {
   /** Copies the full token to the clipboard in main; the renderer never receives it. */
   copyToken(): Promise<void>;
   copyFingerprint(): Promise<void>;
+  copySpkiPin(): Promise<void>;
   exportCertificate(): Promise<void>;
   openExternal(url: 'repo' | 'issues' | 'apikey' | 'lan-guide'): Promise<void>;
   exportScene(sceneID: string): Promise<void>;
