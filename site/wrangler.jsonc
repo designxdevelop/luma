@@ -1,0 +1,6 @@
+{
+  "name": "luma-site",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./dist", "html_handling": "auto-trailing-slash" },
+  "routes": [{ "pattern": "luma.designxdevelop.com", "custom_domain": true }]
+}
