@@ -28,17 +28,18 @@ import LumaCore
 
     func send(_ request: WatchRequest) {
         if localDemo { snapshot?.apply(request); return }
-        // Show the result right away; the phone's reply replaces it.
-        snapshot?.apply(request)
         guard WCSession.default.isReachable, let message = try? request.encoded() else {
             problem = "Open Luma on your iPhone, then try again."; return
         }
+        // Show the result right away; the phone's reply replaces it, and a failure undoes it.
+        let before = snapshot
+        snapshot?.apply(request)
         // @Sendable: WatchConnectivity calls these on its own queue, not the main actor.
         WCSession.default.sendMessage(message, replyHandler: { @Sendable reply in
             let next = WatchSnapshot.decode(reply)
             Task { @MainActor in if let next { self.snapshot = next }; self.problem = nil }
         }, errorHandler: { @Sendable error in
-            Task { @MainActor in self.problem = error.localizedDescription }
+            Task { @MainActor in self.snapshot = before; self.problem = error.localizedDescription }
         })
     }
 

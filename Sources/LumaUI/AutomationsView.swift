@@ -206,14 +206,19 @@ struct AutomationsView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Address").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
             CodeBlock(text: baseURL, copyLabel: "Copy address")
-            if store.home.allowLAN { Text("Other devices can use this \(PlatformCopy.device)’s local IP address instead of localhost.").font(.system(size: 12)).foregroundStyle(.secondary) }
+            if store.home.allowLAN { Text("Other devices can use this \(PlatformCopy.device)’s LAN address or its .local name instead of 127.0.0.1. The certificate lists them and is replaced if they change, so export it again after a network change.").font(.system(size: 12)).foregroundStyle(.secondary) }
             Text("HTTPS certificate").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).padding(.top, 6)
             if let certificate = store.webhookCertificate {
-                CodeBlock(text: "SHA-256 " + certificate.fingerprint, copyLabel: "Copy fingerprint")
+                Text("SHA-256 fingerprint").font(.system(size: 11)).foregroundStyle(.secondary)
+                CodeBlock(text: certificate.fingerprint, copyLabel: "Copy fingerprint")
+                if !certificate.spkiPin.isEmpty {
+                    Text("Public key pin (curl --pinnedpubkey)").font(.system(size: 11)).foregroundStyle(.secondary)
+                    CodeBlock(text: certificate.spkiPin, copyLabel: "Copy public key pin")
+                }
                 ShareLink(item: CertificateFile(pem: certificate.pem), preview: SharePreview("Luma webhook certificate")) {
                     Label("Export Certificate…", systemImage: "square.and.arrow.up")
                 }.controlSize(.small)
-                Text("The server uses a self-signed certificate made on this \(PlatformCopy.device). Callers should trust it by importing the exported file (curl --cacert luma.pem) or pinning this fingerprint, not by turning off certificate checks.")
+                Text("The server uses a self-signed certificate made on this \(PlatformCopy.device). Callers should trust the exported file (curl --cacert luma.pem) or pin the public key, never turn off certificate checks. Apps that can only switch checks on or off, like Home Assistant’s rest_command or Shortcuts, should run on this \(PlatformCopy.device) against 127.0.0.1 or trust luma.pem at the system level.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else {
                 Text("A certificate is created the first time you start the server.").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -269,7 +274,8 @@ struct AutomationsView: View {
         }
     }
 
-    private var baseURL: String { "https://localhost:\(store.home.webhookPort)" }
+    // 127.0.0.1, not localhost: the listener is IPv4 and localhost often resolves to ::1 first.
+    private var baseURL: String { "https://127.0.0.1:\(store.home.webhookPort)" }
 
     private var examples: some View {
         let sceneID = store.home.scenes.first?.id.uuidString ?? "<scene-id>"

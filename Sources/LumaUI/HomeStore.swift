@@ -20,7 +20,7 @@ struct ActivityEntry: Identifiable {
     var webhookStatus = "Stopped"
     var webhookToken = ""
     /// SHA-256 fingerprint and PEM of the webhook server's certificate, once started.
-    var webhookCertificate: (fingerprint: String, pem: String)?
+    var webhookCertificate: (fingerprint: String, spkiPin: String, pem: String)?
     var runningSceneID: UUID?
     var runs: [AutomationRun] = []
     var demo: Bool
@@ -502,8 +502,8 @@ struct ActivityEntry: Identifiable {
                 else { webhookToken = try SecretStore.token(); try SecretStore.save(webhookToken, account: "webhook-token") }
             }
             // HTTPS only, on loopback and LAN alike; there is no plain-HTTP fallback.
-            let tls = try WebhookTLS.load(demo: demo)
-            webhookCertificate = (tls.fingerprint, tls.pem)
+            let tls = try WebhookTLS.load(demo: demo, extraNames: home.allowLAN ? LocalCertificate.lanNames() : [])
+            webhookCertificate = (tls.fingerprint, tls.spkiPin ?? "", tls.pem)
             try server.start(port: home.webhookPort, allowLAN: home.allowLAN, token: webhookToken, identity: tls.identity, handler: { [weak self] request in
                 guard let self else { return WebhookResponse(status: 503, json: .object(["error": .string("App shutting down")])) }
                 return await self.handle(request)

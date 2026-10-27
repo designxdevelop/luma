@@ -1,6 +1,7 @@
 import Foundation
 import Security
 import Network
+import CryptoKit
 import LumaCore
 
 struct SavedHome: Codable {
@@ -72,20 +73,27 @@ struct WebhookTLS {
     let identity: sec_identity_t
     let certificate: Data
     var fingerprint: String { LocalCertificate.fingerprint(certificate) }
+    var spkiPin: String? {
+        guard let cert = SecCertificateCreateWithData(nil, certificate as CFData), let key = SecCertificateCopyKey(cert),
+              let raw = SecKeyCopyExternalRepresentation(key, nil) as Data?, let publicKey = try? P256.Signing.PublicKey(x963Representation: raw) else { return nil }
+        return LocalCertificate.spkiPin(publicKey)
+    }
     var pem: String {
         "-----BEGIN CERTIFICATE-----\n\(certificate.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed]))\n-----END CERTIFICATE-----\n"
     }
 
     static func label(demo: Bool) -> String { demo ? "app.luma.webhook-tls.demo" : "app.luma.webhook-tls" }
 
-    static func load(demo: Bool, now: Date = .now) throws -> WebhookTLS {
+    /// `extraNames` (LAN addresses, hostname.local) must match the stored certificate's, or it is replaced.
+    static func load(demo: Bool, extraNames: [String] = [], now: Date = .now) throws -> WebhookTLS {
         let label = label(demo: demo)
+        let names = extraNames.joined(separator: ",")
         if !demo, let expires = try SecretStore.read(label + ".expires").flatMap({ ISO8601DateFormatter().date(from: $0) }),
-           expires > now.addingTimeInterval(7 * 86_400), let existing = try? find(label) {
+           expires > now.addingTimeInterval(7 * 86_400), (try SecretStore.read(label + ".names")) ?? "" == names, let existing = try? find(label) {
             return existing
         }
         try delete(demo: demo)
-        let cert = try LocalCertificate(now: now)
+        let cert = try LocalCertificate(now: now, extraNames: extraNames)
         let keyAttributes: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeyClass as String: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits as String: 256]
         var error: Unmanaged<CFError>?
         guard let key = SecKeyCreateWithData(cert.privateKey.x963Representation as CFData, keyAttributes as CFDictionary, &error) else {
@@ -97,7 +105,10 @@ struct WebhookTLS {
                               kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly] as CFDictionary, nil))
         try check(SecItemAdd([kSecClass as String: kSecClassCertificate, kSecValueRef as String: certificate, kSecAttrLabel as String: label,
                               kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly] as CFDictionary, nil))
-        if !demo { try SecretStore.save(ISO8601DateFormatter().string(from: cert.notAfter), account: label + ".expires") }
+        if !demo {
+            try SecretStore.save(ISO8601DateFormatter().string(from: cert.notAfter), account: label + ".expires")
+            try SecretStore.save(names, account: label + ".names")
+        }
         return try find(label)
     }
 
@@ -109,6 +120,7 @@ struct WebhookTLS {
             guard status == errSecSuccess || status == errSecItemNotFound else { throw SecretStore.error(status) }
         }
         try SecretStore.delete(label + ".expires")
+        try SecretStore.delete(label + ".names")
     }
 
     private static func find(_ label: String) throws -> WebhookTLS {

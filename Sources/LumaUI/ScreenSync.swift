@@ -170,9 +170,22 @@ protocol ScreenCaptureSession: AnyObject {
     func stop() {
         guard isActive || source != nil else { return }
         let wasActive = isActive
-        if wasActive, settings.restore { restoreLights() }
-        reset()
-        if wasActive { store?.log("Screen Sync stopped. Lights keep their last synced color and brightness.") }
+        let restored = wasActive && settings.restore ? restoreLights() : []
+        // An immediate readback could catch a light before it applies the restore
+        // and record the streamed color as confirmed; ask once it has settled.
+        reset(refreshLights: restored.isEmpty)
+        if !restored.isEmpty {
+            let generation = readbackGeneration
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1.5))
+                guard let self, self.readbackGeneration == generation else { return }
+                for device in restored { self.requestReadback(device) }
+            }
+        }
+        if wasActive {
+            store?.log(restored.isEmpty ? "Screen Sync stopped. Lights keep their last synced color and brightness."
+                                        : "Screen Sync stopped. Restored \(restored.count) \(restored.count == 1 ? "light" : "lights") to their earlier color and brightness.")
+        }
     }
 
     /// Remembers a light's last confirmed state; the first snapshot of a session wins,
@@ -183,14 +196,16 @@ protocol ScreenCaptureSession: AnyObject {
     }
 
     /// Only lights this session actually streamed to, and that nothing took over.
-    private func restoreLights() {
+    @discardableResult private func restoreLights() -> [LightDevice] {
+        var restored: [LightDevice] = []
         for (id, saved) in snapshots where regions[id] != nil && excluded[id] == nil && preview[id] != nil {
             guard let device = store?.home.devices.first(where: { $0.id == id }) else { continue }
             let commands = Self.restoreCommands(saved)
             guard !commands.isEmpty else { continue }
-            do { try restore(device, commands); requestReadback(device) }
+            do { try restore(device, commands); restored.append(device) }
             catch { store?.log("\(device.name) was not restored: \(error.localizedDescription)", error: true) }
         }
+        return restored
     }
 
     /// Brightness, then the previous color mode. Power is never changed: only lights that were on stream.

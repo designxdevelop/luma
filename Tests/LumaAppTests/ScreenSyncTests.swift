@@ -527,6 +527,20 @@ private final class ScreenSyncCloudProtocol: URLProtocol, @unchecked Sendable {
         #expect(box.calls.first?.1 == [.brightness(65), .rgb(0xFFB66A)])
     }
 
+    @Test func restoredLightsAreReadBackOnlyAfterTheyHadTimeToApplyIt() async throws {
+        let f = Fixture(); defer { f.finish() }
+        f.sync.settings.restore = true
+        f.sync.restore = { _, _ in }
+        var readbacks: [String] = []
+        f.sync.readback = { readbacks.append($0.id) }
+        await f.start(); f.session.onFrame?(red); f.sync.tick(now: 100)
+        f.sync.stop()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(readbacks.isEmpty, "An immediate readback could record the streamed color as confirmed")
+        try await Task.sleep(for: .seconds(1.8))
+        #expect(readbacks == ["demo-floor"])
+    }
+
     @Test func whiteModeRestoresKelvinAndSkipsOutOfRange() {
         func saved(_ k: Int) -> LightDevice { .init(id: "x", sku: "H1", name: "x", brightness: 40, rgb: 0x123456, colorTemperature: k) }
         #expect(ScreenSync.restoreCommands(saved(3000)) == [.brightness(40), .kelvin(3000)])

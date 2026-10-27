@@ -15,6 +15,8 @@ final class CameraScreenCapture: ScreenCaptureSession {
     private var session: AVCaptureSession?
     private var output: CameraFrameOutput?
     private var observers: [any NSObjectProtocol] = []
+    private var rotation: AVCaptureDevice.RotationCoordinator?
+    private var rotationObservation: NSKeyValueObservation?
 
     func start(onFrame: @escaping @MainActor (ScreenGrid, ContinuousClock.Instant) -> Void, onEnd: @escaping @MainActor (ScreenCaptureEnd) -> Void) async throws {
         guard await AVCaptureDevice.requestAccess(for: .video) else { throw ScreenCaptureEnd.permissionDenied }
@@ -32,8 +34,19 @@ final class CameraScreenCapture: ScreenCaptureSession {
         video.setSampleBufferDelegate(output, queue: output.queue)
         guard session.canAddInput(input), session.canAddOutput(video) else { throw ScreenCaptureEnd.failed("The camera couldn't be configured.") }
         session.addInput(input); session.addOutput(video)
-        // Camera frames arrive landscape; match the TV's orientation.
-        if let connection = video.connection(with: .video), connection.isVideoRotationAngleSupported(0) { connection.videoRotationAngle = 0 }
+        // Keep the frame upright however the phone is held, so left/right/top/bottom
+        // regions match the TV.
+        if let connection = video.connection(with: .video) {
+            let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+            let apply = { @Sendable (angle: CGFloat) in
+                output.queue.async { if connection.isVideoRotationAngleSupported(angle) { connection.videoRotationAngle = angle } }
+            }
+            apply(coordinator.videoRotationAngleForHorizonLevelCapture)
+            rotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelCapture, options: [.new]) { _, change in
+                if let angle = change.newValue { apply(angle) }
+            }
+            rotation = coordinator
+        }
         self.session = session; self.output = output
         // Runtime errors and interruptions (a call, another camera app) end the session.
         let center = NotificationCenter.default
@@ -54,6 +67,7 @@ final class CameraScreenCapture: ScreenCaptureSession {
         output?.cancel()
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
+        rotationObservation = nil; rotation = nil
         guard let session, let output else { return }
         self.session = nil; self.output = nil
         output.queue.async { session.stopRunning() }
