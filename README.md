@@ -14,10 +14,10 @@ Screen Sync processes frames locally, with explicit source selection, region map
 
 | Platform | Implementation | Source and instructions | Verification status |
 | --- | --- | --- | --- |
-| macOS 14+ | Native SwiftUI / Swift / ScreenCaptureKit | [Mac guide](MACOS.md), `Sources/`, `Tests/` | 131 automated tests and synthetic Screen Sync UI checks; basic cloud/LAN controls tested with hardware |
+| macOS 14+ | Native SwiftUI / Swift / ScreenCaptureKit | [Mac guide](MACOS.md), `Sources/`, `Tests/` | 133 automated tests and synthetic Screen Sync UI checks; basic cloud/LAN controls tested with hardware |
 | iOS / iPadOS 17+, watchOS 10+ | Native SwiftUI, shares the Mac app's code (`Sources/LumaUI`); the watch relays through the iPhone | [iOS guide](IOS.md), `ios/` | Builds in CI; demo mode checked in the iOS Simulator; Screen Sync uses the camera; not yet tested with hardware |
-| Windows 11 x64 | Electron / TypeScript | [Desktop guide](desktop/README.md), `desktop/` | Unsigned installer built; 201 portable contracts pass; actual Windows runtime, installer, DPAPI, capture, and light response still need testing |
-| Linux x64 / arm64 | Electron / TypeScript | [Linux guide](desktop/docs/LINUX.md), `desktop/` | Archives built; 201 contracts on Linux and 19 synthetic arm64 app checks; real X11/Wayland capture and keyring integration still need testing |
+| Windows 11 x64 | Electron / TypeScript | [Desktop guide](desktop/README.md), `desktop/` | Unsigned installer built; 204 portable contracts pass; actual Windows runtime, installer, DPAPI, capture, and light response still need testing |
+| Linux x64 / arm64 | Electron / TypeScript | [Linux guide](desktop/docs/LINUX.md), `desktop/` | Archives built; 204 contracts on Linux and 19 synthetic arm64 app checks; real X11/Wayland capture and keyring integration still need testing |
 
 The native Mac and Electron apps have different version numbers and some behavior differences. Real screen-capture-to-light response remains unverified on every platform. Linux capture is experimental and requires supported GNOME/KDE lock monitoring.
 
