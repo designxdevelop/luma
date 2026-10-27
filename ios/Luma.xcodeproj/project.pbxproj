@@ -49,9 +49,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A10000000000000000000006 /* Luma */ = {
+		A10000000000000000000006 /* LumaiOS */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = A10000000000000000000010 /* Build configuration list for PBXNativeTarget "Luma" */;
+			buildConfigurationList = A10000000000000000000010 /* Build configuration list for PBXNativeTarget "LumaiOS" */;
 			buildPhases = (
 				A10000000000000000000007 /* Sources */,
 				A10000000000000000000005 /* Frameworks */,
@@ -64,11 +64,11 @@
 			fileSystemSynchronizedGroups = (
 				A10000000000000000000004 /* Luma */,
 			);
-			name = Luma;
+			name = LumaiOS;
 			packageProductDependencies = (
 				A1000000000000000000000A /* LumaUI */,
 			);
-			productName = Luma;
+			productName = LumaiOS;
 			productReference = A10000000000000000000003 /* Luma.app */;
 			productType = "com.apple.product-type.application";
 		};
@@ -99,7 +99,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				A10000000000000000000006 /* Luma */,
+				A10000000000000000000006 /* LumaiOS */,
 			);
 		};
 /* End PBXProject section */
@@ -144,7 +144,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.designxdevelop.luma;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = Luma;
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_VERSION = 6.0;
@@ -171,7 +171,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.designxdevelop.luma;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = Luma;
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_VERSION = 6.0;
@@ -211,7 +211,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		A10000000000000000000010 /* Build configuration list for PBXNativeTarget "Luma" */ = {
+		A10000000000000000000010 /* Build configuration list for PBXNativeTarget "LumaiOS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A10000000000000000000011 /* Debug */,

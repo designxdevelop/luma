@@ -21,7 +21,7 @@ struct ScreenSyncView: View {
                 if let colors = sync.regionPreview { colorMap(colors) }
                 lightsSection
                 tuningSection
-            }.padding(28).frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)
+            }.pagePadding().frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)
         }
     }
 
@@ -169,7 +169,7 @@ struct ScreenSyncView: View {
         let region = sync.regions[device.id]
         let excluded = sync.excluded[device.id]
         let ownershipIssue = sync.ownershipIssue(for: device.id)
-        return HStack(spacing: 12) {
+        return HStack(spacing: compactSpacing(12, 8)) {
             LightOrb(device: device, size: 32)
             VStack(alignment: .leading, spacing: 2) {
                 Text(device.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
@@ -186,14 +186,18 @@ struct ScreenSyncView: View {
                         Section(group.rawValue) { ForEach(group.regions) { Text($0.title).tag($0) } }
                     }
                 }
-                .pickerStyle(.menu).labelsHidden().frame(width: 190).disabled(region == nil)
+                .pickerStyle(.menu).labelsHidden().frame(width: compactSpacing(190, 120)).disabled(region == nil)
                 .accessibilityLabel("Screen region for \(device.name)")
-                Toggle("Include", isOn: Binding(get: { region != nil }, set: { sync.setIncluded($0, for: device.id) }))
+                Toggle(isOn: Binding(get: { region != nil }, set: { sync.setIncluded($0, for: device.id) })) {
+                    #if os(macOS)
+                    Text("Include")
+                    #endif
+                }
                     .toggleStyle(.switch).controlSize(.small)
                     .accessibilityLabel("Include \(device.name) in Screen Sync")
             }
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
+        .padding(.horizontal, compactSpacing(16, 12)).padding(.vertical, 10)
         .opacity(issue == nil ? 1 : 0.55)
     }
 

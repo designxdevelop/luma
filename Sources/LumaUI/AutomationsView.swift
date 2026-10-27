@@ -19,7 +19,7 @@ struct AutomationsView: View {
                 webhooksSection
                 if !store.runs.isEmpty { runsSection }
             }
-            .padding(28)
+            .pagePadding()
             .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
@@ -36,7 +36,7 @@ struct AutomationsView: View {
                 newScheduleCard
             }
             ForEach(store.home.schedules) { scheduleRow($0) }
-            Text("Times use this Mac’s time zone. Luma must be running (the menu bar is fine) and your Mac awake. Missed times are skipped, and a scene that’s already running blocks another from starting.")
+            Text(PlatformCopy.scheduleNote)
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -164,7 +164,7 @@ struct AutomationsView: View {
             Card {
                 VStack(alignment: .leading, spacing: 16) {
                     serverStatusRow
-                    Text("A webhook server lets other apps on this Mac\(store.home.allowLAN ? " and your local network" : "") run scenes and control your lights. Every request needs the access token below.")
+                    Text("A webhook server lets other apps on this \(PlatformCopy.device)\(store.home.allowLAN ? " and your local network" : "") run scenes and control your lights. Every request needs the access token below.")
                         .font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     endpointBlock
                     tokenRow
@@ -205,7 +205,7 @@ struct AutomationsView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Address").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
             CodeBlock(text: baseURL, copyLabel: "Copy address")
-            if store.home.allowLAN { Text("Other devices can use this Mac’s local IP address instead of 127.0.0.1.").font(.system(size: 12)).foregroundStyle(.secondary) }
+            if store.home.allowLAN { Text("Other devices can use this \(PlatformCopy.device)’s local IP address instead of 127.0.0.1.").font(.system(size: 12)).foregroundStyle(.secondary) }
         }
     }
 

@@ -22,26 +22,59 @@ struct RootView: View {
     @Bindable var navigation: LumaNavigation
     @State private var connecting = CommandLine.arguments.contains("--connect")
     @AppStorage("appearance") private var appearance = Appearance.system
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    #endif
     var body: some View {
-        NavigationSplitView {
-            sidebar.frame(minWidth: 210, idealWidth: 224, maxWidth: 280)
-                .navigationSplitViewColumnWidth(min: 210, ideal: 224, max: 280)
-                .toolbar(removing: .sidebarToggle)
-        } detail: {
-            VStack(spacing: 0) {
-                if store.demo { demoBanner }
-                if let notice = store.notice { noticeBanner(notice) }
-                detail.frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .background(Color.canvas)
-            .animation(.easeOut(duration: 0.2), value: store.notice)
+        Group {
+            #if os(iOS)
+            if sizeClass == .compact { tabs } else { split }
+            #else
+            split
+            #endif
         }
         .sheet(isPresented: $connecting) { ConnectionSheet(store: store) }
         .onAppear { appearance.apply() }
     }
 
-    @ViewBuilder private var detail: some View {
-        switch navigation.selection ?? .page(.lights) {
+    #if os(iOS)
+    /// iPhone: a tab per page; iOS moves the last ones under More. Rooms are
+    /// grouped on the Lights tab instead of the sidebar.
+    private var tabs: some View {
+        TabView(selection: Binding(get: { if case .page(let page) = navigation.selection { page } else { .lights } },
+                                   set: { navigation.selection = .page($0) })) {
+            ForEach([Page.lights, .scenes, .automations, .screenSync, .activity, .settings], id: \.self) { page in
+                NavigationStack { pageContent(.page(page)) }
+                    .tabItem { Label(page.rawValue, systemImage: page.icon) }
+                    .badge(badge(for: page))
+                    .tag(page)
+            }
+        }
+    }
+    #endif
+
+    private func pageContent(_ item: SidebarItem) -> some View {
+        VStack(spacing: 0) {
+            if store.demo { demoBanner }
+            if let notice = store.notice { noticeBanner(notice) }
+            detail(item).frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(Color.canvas)
+        .animation(.easeOut(duration: 0.2), value: store.notice)
+    }
+
+    private var split: some View {
+        NavigationSplitView {
+            sidebar.frame(minWidth: 210, idealWidth: 224, maxWidth: 280)
+                .navigationSplitViewColumnWidth(min: 210, ideal: 224, max: 280)
+                .toolbar(removing: .sidebarToggle)
+        } detail: {
+            pageContent(navigation.selection ?? .page(.lights))
+        }
+    }
+
+    @ViewBuilder private func detail(_ item: SidebarItem) -> some View {
+        switch item {
         case .page(.lights): LightsView(store: store, room: nil, connecting: $connecting)
         case .room(let room): LightsView(store: store, room: room, connecting: $connecting).id(room)
         case .page(.scenes): ScenesView(store: store)
@@ -228,7 +261,7 @@ struct ActivityView: View {
                     }
                 }
                 Text("Luma keeps the latest 200 events in memory. They are cleared when you quit.").font(.system(size: 11)).foregroundStyle(.secondary)
-            }.padding(28)
+            }.pagePadding()
         }
     }
 }

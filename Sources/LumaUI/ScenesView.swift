@@ -94,8 +94,8 @@ struct ScenesView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 PageHeader(title: "Scenes", subtitle: scenes.isEmpty
-                           ? "Save your lighting as scenes you can run from the menu bar, schedules, and webhooks."
-                           : "\(scenes.count) \(scenes.count == 1 ? "scene" : "scenes") · Run them here, from the menu bar, on a schedule, or with a webhook.") {
+                           ? PlatformCopy.scenesEmpty
+                           : "\(scenes.count) \(scenes.count == 1 ? "scene" : "scenes") · \(PlatformCopy.scenesWhere)") {
                     Button("Import…", systemImage: "square.and.arrow.down") { importing = true }
                         .help("Import a scene from a JSON file")
                     Button("New Scene", systemImage: "plus") { showNew = true }
@@ -110,7 +110,7 @@ struct ScenesView: View {
                 Text("Scenes run their steps in order, with optional pauses in between. Stopping a scene skips the remaining steps, but it doesn't undo anything already sent to your lights.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            .padding(28)
+            .pagePadding()
         }
         .sheet(isPresented: $showNew) { NewSceneSheet(store: store) }
         .sheet(item: $editor) { SceneEditor(store: store, scene: $0) }
@@ -384,7 +384,7 @@ private struct NewSceneSheet: View {
                     .disabled(trimmedName.isEmpty || selected.isEmpty)
             }
         }
-        .padding(24).frame(width: 520).background(Color.canvas)
+        .padding(24).sheetFrame(width: 520).background(Color.canvas)
         .onAppear { nameFocused = true }
     }
 
@@ -469,7 +469,7 @@ struct SceneEditor: View {
                     .buttonStyle(.borderedProminent)
             }
         }
-        .padding(24).frame(width: 720, height: 620).background(Color.canvas)
+        .padding(24).sheetFrame(width: 720, height: 620).background(Color.canvas)
     }
 
     // MARK: Steps

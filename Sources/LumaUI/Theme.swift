@@ -155,13 +155,27 @@ struct PageHeader<Actions: View>: View {
     var subtitle: String?
     @ViewBuilder var actions: Actions
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(size: 26, weight: .bold)).tracking(-0.5).accessibilityAddTraits(.isHeader)
-                if let subtitle { Text(subtitle).font(.system(size: 13)).foregroundStyle(.secondary) }
+        // Actions drop below the title when the page is too narrow (iPhone).
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 16) {
+                titles
+                Spacer(minLength: 12)
+                HStack(spacing: 8) { actions }.controlSize(.regular)
             }
-            Spacer(minLength: 12)
-            HStack(spacing: 8) { actions }.controlSize(.regular)
+            VStack(alignment: .leading, spacing: 12) {
+                titles
+                HStack(spacing: 8) { actions }.controlSize(.regular)
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                titles
+                VStack(alignment: .leading, spacing: 8) { actions }.controlSize(.regular)
+            }
+        }
+    }
+    private var titles: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 26, weight: .bold)).tracking(-0.5).accessibilityAddTraits(.isHeader)
+            if let subtitle { Text(subtitle).font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
         }
     }
 }
@@ -361,4 +375,53 @@ extension View {
         self
         #endif
     }
+}
+
+extension View {
+    /// Page margin: roomy on the Mac, phone-sized on iOS.
+    func pagePadding() -> some View {
+        #if os(macOS)
+        padding(28)
+        #else
+        padding(16)
+        #endif
+    }
+
+    /// Fixed sheet size on the Mac; iOS sheets fill the presentation.
+    @ViewBuilder func sheetFrame(width: CGFloat, height: CGFloat? = nil) -> some View {
+        #if os(macOS)
+        frame(width: width, height: height)
+        #else
+        frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        #endif
+    }
+}
+
+/// Mac value, or the tighter iOS one.
+func compactSpacing(_ mac: CGFloat, _ iOS: CGFloat) -> CGFloat {
+    #if os(macOS)
+    mac
+    #else
+    iOS
+    #endif
+}
+
+/// Wording that differs between the Mac (menu bar, always running) and iOS
+/// (foreground only).
+enum PlatformCopy {
+    #if os(macOS)
+    static let device = "Mac"
+    static let tapVerb = "Click"
+    static let scheduleNote = "Times use this Mac’s time zone. Luma must be running (the menu bar is fine) and your Mac awake. Missed times are skipped, and a scene that’s already running blocks another from starting."
+    static let scenesEmpty = "Save your lighting as scenes you can run from the menu bar, schedules, and webhooks."
+    static let scenesWhere = "Run them here, from the menu bar, on a schedule, or with a webhook."
+    static let storageNote = "Closing the window keeps Luma in your menu bar so schedules and webhooks keep working. Quit Luma to stop them. Scenes and schedules are saved on this Mac; your API key and webhook token stay in the macOS Keychain. Activity is kept only until you quit."
+    #else
+    static var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
+    static let tapVerb = "Tap"
+    static var scheduleNote: String { "Times use this \(device)’s time zone. iOS pauses apps in the background, so schedules and webhooks run only while Luma is open. Missed times are skipped, and a scene that’s already running blocks another from starting." }
+    static let scenesEmpty = "Save your lighting as scenes you can run here, on a schedule, or with a webhook."
+    static let scenesWhere = "Run them here, on a schedule, or with a webhook."
+    static var storageNote: String { "Schedules and webhooks run only while Luma is open; iOS pauses them in the background. Scenes and schedules are saved on this \(device); your API key and webhook token stay in the iOS Keychain. Activity is kept only until Luma closes." }
+    #endif
 }
