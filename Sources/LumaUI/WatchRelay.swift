@@ -26,6 +26,8 @@ extension HomeStore {
             do { try runScene(scene) } catch { log("Watch: \(error.localizedDescription)", error: true) }
         case .stopScene:
             stopScene()
+        case .refresh:
+            break
         }
     }
 }
@@ -51,6 +53,9 @@ final class WatchRelay: NSObject, WCSessionDelegate {
     }
 
     nonisolated func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: (any Error)?) {
+        Task { @MainActor in if let store = self.store { self.publish(store.watchSnapshot) } }
+    }
+    nonisolated func sessionWatchStateDidChange(_ session: WCSession) {
         Task { @MainActor in if let store = self.store { self.publish(store.watchSnapshot) } }
     }
     nonisolated func sessionDidBecomeInactive(_ session: WCSession) {}

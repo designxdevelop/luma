@@ -34,6 +34,8 @@ public enum WatchRequest: Codable, Sendable, Equatable {
     case brightness(id: String, value: Int)
     case runScene(UUID)
     case stopScene
+    /// Only asks for the current home.
+    case refresh
 
     public static let key = "request"
     public static let snapshotKey = "snapshot"

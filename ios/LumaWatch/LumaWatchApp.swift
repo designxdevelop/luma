@@ -46,7 +46,12 @@ import LumaCore
         Task { @MainActor in
             if let context { self.snapshot = context }
             if let error { self.problem = error.localizedDescription }
+            // The phone may have nothing to send yet; ask instead of waiting.
+            if self.snapshot == nil, WCSession.default.isReachable { self.send(.refresh) }
         }
+    }
+    nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
+        Task { @MainActor in if self.snapshot == nil, WCSession.default.isReachable { self.send(.refresh) } }
     }
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
         let next = WatchSnapshot.decode(applicationContext)
@@ -62,6 +67,7 @@ extension WatchSnapshot {
         case .brightness(let id, let value): if let i = lights.firstIndex(where: { $0.id == id }) { lights[i].brightness = value }
         case .runScene(let id): runningSceneID = id
         case .stopScene: runningSceneID = nil
+        case .refresh: break
         }
     }
 
