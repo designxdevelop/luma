@@ -125,7 +125,7 @@ struct ScenesView: View {
             Text(count == 0 ? "This can't be undone." : "This also removes \(count) \(count == 1 ? "schedule" : "schedules") that \(count == 1 ? "runs" : "run") it. This can't be undone.")
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { importScene(from: $0) }
-        // A plain flag: a Binding(get:set:) here crashes the Swift 6.3 compiler (IRGen).
+        // ponytail: a plain flag instead of a computed Binding; one fewer closure for older compilers.
         .fileExporter(isPresented: $showExporter, document: exporting,
                       contentType: .json, defaultFilename: exporting?.name) { result in
             if case .failure(let error) = result { errorText = error.localizedDescription } else { errorText = nil }
@@ -459,7 +459,8 @@ struct SceneEditor: View {
             if let errorText { InlineMessage(text: errorText) }
             DisclosureGroup("Advanced") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Edit as JSON", isOn: Binding(get: { jsonMode }, set: setJSONMode(_:)))
+                    // A closure, not `setJSONMode(_:)`: that method reference crashes Swift 6.3 IRGen (Xcode 26).
+                    Toggle("Edit as JSON", isOn: Binding(get: { jsonMode }, set: { setJSONMode($0) }))
                     Text("For power users and effects the step editor doesn't cover. Switching back checks your changes.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }.padding(.top, 6)
