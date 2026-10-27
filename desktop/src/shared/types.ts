@@ -85,6 +85,9 @@ export interface SavedHome {
   schedules: SceneSchedule[];
   webhookPort: number;
   allowLAN: boolean;
+  appearance?: 'system' | 'light' | 'dark';
+  syncSettings?: SyncSettings;
+  syncAssignments?: SyncAssignment[];
 }
 
 export type ControlPhase = 'queued' | 'sending' | 'confirming';
@@ -135,6 +138,8 @@ export interface SyncSettings {
   /** On an explicit Stop: restore last confirmed state (true) or leave lights as they are (false). */
   restore: boolean;
 }
+
+export interface SyncAssignment { id: string; region: SyncRegion; included: boolean }
 
 export interface SyncSource { key: string; name: string; kind: 'screen' | 'window' }
 
@@ -196,11 +201,18 @@ export interface AppSnapshot {
   canSave: boolean;
   version: string;
   sync: SyncView;
+  appearance: 'system' | 'light' | 'dark';
+  syncAssignments: SyncAssignment[];
 }
 
 /** Request kinds from renderer to main. Every handler validates its input. */
 export interface LumaBridge {
   snapshot(): Promise<AppSnapshot>;
+  setAppearance(value: 'system' | 'light' | 'dark'): Promise<void>;
+  setSyncAssignments(value: SyncAssignment[]): Promise<void>;
+  clearActivity(): Promise<void>;
+  copyDeviceID(id: string): Promise<void>;
+  exploreDemo(): Promise<void>;
   onSnapshot(listener: (snapshot: AppSnapshot) => void): () => void;
   onNavigate(listener: (target: { deviceID?: string; tab?: string }) => void): () => void;
   /** Submits a control. `coalesce` is true for UI controls (sliders, toggles). */

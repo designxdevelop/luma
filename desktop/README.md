@@ -105,3 +105,9 @@ POST success returns HTTP 202 with `runID` and `statusURL`. Completion means com
 - [Sanitized protocol research](../docs/PROTOCOL-RESEARCH.md)
 
 No real lights, Mac runtime homes, installed Mac app, macOS Keychain entries, or OS/network settings are modified by this port's automated verification. The original native Mac implementation lives at the repository root; user inventory and credentials are not included.
+
+### Navigation and preferences
+
+Settings offers System, Light, and Dark appearance. The Lights page includes search; use Ctrl+F (Cmd+F on macOS) to focus it. Ctrl+1–6 opens Lights, Scenes, Automations, Activity, Settings, and Screen Sync. Ctrl+, opens Settings, Ctrl+Alt+Up/Down turns all lights on/off, and Ctrl+. stops a scene (use Cmd in place of Ctrl on macOS). Activity can be filtered to problems or cleared; its badge counts errors in the current session.
+
+Scenes can be duplicated, schedules offer day presets, and a light's Details tab shows available network and identification information. Screen Sync response settings and per-light inclusion and regions are saved for the next launch; the capture source must be chosen each time. On an empty home, **Explore Demo** restarts Luma with an isolated temporary demo profile. Exit and launch normally to return to your home.

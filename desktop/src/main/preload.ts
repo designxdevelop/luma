@@ -10,6 +10,11 @@ import type { AppSnapshot, LumaBridge } from '../shared/types';
 const call = (channel: string) => (...args: unknown[]) => ipcRenderer.invoke(`luma:${channel}`, ...args);
 
 const bridge: LumaBridge = {
+  setAppearance: call('setAppearance') as LumaBridge['setAppearance'],
+  setSyncAssignments: call('setSyncAssignments') as LumaBridge['setSyncAssignments'],
+  clearActivity: call('clearActivity') as LumaBridge['clearActivity'],
+  copyDeviceID: call('copyDeviceID') as LumaBridge['copyDeviceID'],
+  exploreDemo: call('exploreDemo') as LumaBridge['exploreDemo'],
   snapshot: call('snapshot') as LumaBridge['snapshot'],
   onSnapshot(listener) {
     const handler = (_event: unknown, snapshot: AppSnapshot) => listener(snapshot);
