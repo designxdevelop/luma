@@ -116,8 +116,10 @@ struct LightsView: View {
         }
     }
 
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
     private var onboarding: some View {
-        Card(padding: 32) {
+        Card(padding: sizeClass == .compact ? 20 : 32) {
             VStack(spacing: 28) {
                 VStack(spacing: 12) {
                     ZStack {
@@ -128,9 +130,10 @@ struct LightsView: View {
                     Text("Control your Govee lights from your \(PlatformCopy.device): quick power and brightness, color, scenes, schedules, and automations.")
                         .font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 440)
                 }
-                HStack(alignment: .top, spacing: 14) {
+                let layout = sizeClass == .compact ? AnyLayout(VStackLayout(spacing: 12)) : AnyLayout(HStackLayout(alignment: .top, spacing: 14))
+                layout {
                     step(1, icon: "cloud", title: "Connect your account", text: "Use a Govee API key to find every light on your account, including effects and segments.") {
-                        Button("Connect Account…") { connecting = true }.buttonStyle(.borderedProminent)
+                        Button("Connect Account…") { connecting = true }.buttonStyle(.borderedProminent).lineLimit(1)
                     }
                     step(2, icon: "wifi", title: "Add local control", text: "Turn on LAN Control for each light in the Govee Home app, then look for lights on this Wi-Fi.") {
                         Button(store.scanning ? "Looking…" : "Find Lights") { store.discover() }.disabled(store.scanning)
