@@ -1,0 +1,12 @@
+---
+import Layout from "../layouts/Layout.astro";
+---
+<Layout title="Luma Support">
+<h1>Support</h1>
+<p>Email <a href="mailto:austin@designxdevelop.com">austin@designxdevelop.com</a> or <a href="https://github.com/designxdevelop/luma/issues">open an issue on GitHub</a>.</p>
+<h2>Common questions</h2>
+<p><b>Where do I get an API key?</b> In the Govee Home app: Profile → Settings → Apply for API Key.</p>
+<p><b>Lights aren't found on Wi-Fi.</b> Turn on LAN Control for each light in Govee Home, allow Luma's Local Network permission, and keep the phone on the same network. Not every model supports LAN control, and cloud control works without it.</p>
+<p><b>Do schedules run in the background?</b> No. iOS suspends apps, so schedules, scenes, and the webhook server only run while Luma is open.</p>
+<p><b>Screen Sync isn't responding.</b> It uses the back camera pointed at the screen and pauses when Luma leaves the foreground.</p>
+</Layout>

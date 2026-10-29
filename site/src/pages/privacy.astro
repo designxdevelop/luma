@@ -1,0 +1,27 @@
+---
+import Layout from "../layouts/Layout.astro";
+---
+<Layout title="Luma Privacy Policy">
+<h1>Privacy Policy</h1>
+<p><small>Last updated: October 26, 2026</small></p>
+<p>Luma, by Design X Develop LLC, does not collect, sell, or share personal data. We run no servers for Luma, and the app has no analytics, advertising, or tracking.</p>
+<h2>What stays on your device</h2>
+<ul>
+<li><b>Govee API key:</b> stored in the iOS Keychain on your device. It is only sent to Govee to control your lights.</li>
+<li><b>Lights, rooms, scenes, schedules, activity log, and settings:</b> stored locally on your device.</li>
+<li><b>Camera (Screen Sync):</b> if you choose Use Camera, Luma reduces each frame on the device to a coarse grid of colors. Frames are never saved or uploaded.</li>
+</ul>
+<h2>Network use</h2>
+<ul>
+<li><b>Govee cloud:</b> when you connect with your API key, Luma sends control requests to Govee's service. Govee's own privacy policy governs what Govee does with them.</li>
+<li><b>Local network:</b> Luma talks directly to Govee lights on your Wi-Fi network (LAN Control). That traffic does not leave your network.</li>
+<li><b>Webhook server (optional):</b> if you turn it on, Luma accepts authenticated HTTPS requests from devices you choose on your network.</li>
+<li><b>Apple Watch:</b> the watch sends commands to your iPhone over Apple's WatchConnectivity. It never contacts lights or Govee itself.</li>
+</ul>
+<h2>Your choices</h2>
+<p>Deleting the app removes its local data. You can revoke camera and local network access in iOS Settings, and delete your API key from Luma's Settings or the Govee Home app.</p>
+<h2>Children</h2>
+<p>Luma does not knowingly collect data from anyone, including children.</p>
+<h2>Changes and contact</h2>
+<p>If this policy changes, the date above changes. Questions: <a href="mailto:austin@designxdevelop.com">austin@designxdevelop.com</a>.</p>
+</Layout>

@@ -155,10 +155,15 @@ struct ConnectionSheet: View {
                 }
             }
             VStack(alignment: .leading, spacing: 6) {
+                #if os(iOS)
+                TextField("Paste your API key", text: $key).textFieldStyle(.roundedBorder).textInputAutocapitalization(.never).autocorrectionDisabled().onSubmit { if !key.isEmpty { connect(saved: false) } }
+                PasteButton(payloadType: String.self) { key = ($0.first ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }.buttonBorderShape(.capsule).tint(Color.lumaAccent)
+                #else
                 SecureField("Paste your API key", text: $key).textFieldStyle(.roundedBorder).onSubmit { if !key.isEmpty { connect(saved: false) } }
+                #endif
                 Link("Get a key in the Govee Home app ↗", destination: URL(string: "https://developer.govee.com/reference/apply-you-govee-api-key")!).font(.system(size: 12)).tint(Color.lumaAccent)
             }
-            Label("Your key is stored in the macOS Keychain and sent only to Govee's official API.", systemImage: "lock.shield")
+            Label("Your key is stored in the \(PlatformCopy.keychain) and sent only to Govee's official API.", systemImage: "lock.shield")
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let failure { InlineMessage(text: failure) }
             HStack {

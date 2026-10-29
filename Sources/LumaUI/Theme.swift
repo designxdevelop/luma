@@ -412,6 +412,7 @@ func compactSpacing(_ mac: CGFloat, _ iOS: CGFloat) -> CGFloat {
 enum PlatformCopy {
     #if os(macOS)
     static let device = "Mac"
+    static let keychain = "macOS Keychain"
     static let tapVerb = "Click"
     static let scheduleNote = "Times use this Mac’s time zone. Luma must be running (the menu bar is fine) and your Mac awake. Missed times are skipped, and a scene that’s already running blocks another from starting."
     static let scenesEmpty = "Save your lighting as scenes you can run from the menu bar, schedules, and webhooks."
@@ -420,6 +421,7 @@ enum PlatformCopy {
     #else
     static var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
     static let tapVerb = "Tap"
+    static let keychain = "iOS Keychain"
     static var scheduleNote: String { "Times use this \(device)’s time zone. iOS pauses apps in the background, so schedules and webhooks run only while Luma is open. Missed times are skipped, and a scene that’s already running blocks another from starting." }
     static let scenesEmpty = "Save your lighting as scenes you can run here, on a schedule, or with a webhook."
     static let scenesWhere = "Run them here, on a schedule, or with a webhook."
