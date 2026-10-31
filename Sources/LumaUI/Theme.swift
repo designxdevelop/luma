@@ -417,7 +417,7 @@ enum PlatformCopy {
     static let scheduleNote = "Times use this Mac’s time zone. Luma must be running (the menu bar is fine) and your Mac awake. Missed times are skipped, and a scene that’s already running blocks another from starting."
     static let scenesEmpty = "Save your lighting as scenes you can run from the menu bar, schedules, and webhooks."
     static let scenesWhere = "Run them here, from the menu bar, on a schedule, or with a webhook."
-    static let storageNote = "Closing the window keeps Luma in your menu bar so schedules and webhooks keep working. Quit Luma to stop them. Scenes and schedules are saved on this Mac; your API key and webhook token stay in the macOS Keychain. Activity is kept only until you quit."
+    static let storageNote = "Closing the window keeps Luma in your menu bar so schedules and webhooks keep working. Quit Luma to stop them. Scenes and schedules are saved on this Mac; your API key and webhook token stay in the macOS Keychain. Activity is also saved locally in Luma’s activity.log for troubleshooting."
     #else
     static var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
     static let tapVerb = "Tap"
@@ -425,6 +425,6 @@ enum PlatformCopy {
     static var scheduleNote: String { "Times use this \(device)’s time zone. iOS pauses apps in the background, so schedules and webhooks run only while Luma is open. Missed times are skipped, and a scene that’s already running blocks another from starting." }
     static let scenesEmpty = "Save your lighting as scenes you can run here, on a schedule, or with a webhook."
     static let scenesWhere = "Run them here, on a schedule, or with a webhook."
-    static var storageNote: String { "Schedules and webhooks run only while Luma is open; iOS pauses them in the background. Scenes and schedules are saved on this \(device); your API key and webhook token stay in the iOS Keychain. Activity is kept only until Luma closes." }
+    static var storageNote: String { "Schedules and webhooks run only while Luma is open; iOS pauses them in the background. Scenes and schedules are saved on this \(device); your API key and webhook token stay in the iOS Keychain. Activity is also saved locally in Luma’s activity.log for troubleshooting." }
     #endif
 }
