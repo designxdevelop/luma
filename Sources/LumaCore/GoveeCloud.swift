@@ -1,6 +1,7 @@
 import Foundation
 
 /// Govee's current capability API. Requests are serialized and paced; commands are never retried automatically.
+/// Reads get one paced retry after a transient transport failure (e.g. a stalled pooled connection).
 public actor GoveeCloud {
     private let apiKey: String
     private let session: URLSession
@@ -92,7 +93,14 @@ public actor GoveeCloud {
         let operation = Task {
             await previous?.value
             try Task.checkCancellation()
-            return try await execute(path: path, device: device, command: command)
+            do { return try await execute(path: path, device: device, command: command) }
+            catch let error as URLError where command == nil && Self.transient.contains(error.code) {
+                // The retry still waits for the existing per-read, per-device, and account pacing.
+                try Task.checkCancellation()
+                do { return try await execute(path: path, device: device, command: command) }
+                catch let error as URLError { throw Self.describe(error, path: path, attempts: 2) }
+            }
+            catch let error as URLError { throw Self.describe(error, path: path, attempts: 1) }
         }
         tail = Task { _ = await operation.result }
         return try await withTaskCancellationHandler {
@@ -100,6 +108,32 @@ public actor GoveeCloud {
         } onCancel: {
             operation.cancel()
         }
+    }
+
+    static let transient: Set<URLError.Code> = [.timedOut, .networkConnectionLost, .cannotConnectToHost, .dnsLookupFailed, .cannotFindHost]
+
+    /// Names the step and URLError code only: never the key, payload, device ID, or device name.
+    static func describe(_ error: URLError, path: String, attempts: Int) -> Error {
+        if error.code == .cancelled { return CancellationError() }
+        let step = switch path {
+        case "user/devices": "listing devices"
+        case "device/state": "reading light state"
+        case "device/control": "sending a command"
+        default: "reading scenes"
+        }
+        let reason = switch error.code {
+        case .timedOut: "received no response for 20 seconds"
+        case .notConnectedToInternet: "found no internet connection"
+        case .dnsLookupFailed, .cannotFindHost: "could not resolve openapi.api.govee.com"
+        case .cannotConnectToHost: "could not connect to openapi.api.govee.com"
+        case .networkConnectionLost: "lost the network connection"
+        case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateNotYetValid, .serverCertificateHasUnknownRoot:
+            "could not establish a trusted TLS connection (check VPN, proxy, or network filters)"
+        default: "failed"
+        }
+        let tries = attempts > 1 ? " after \(attempts) attempts" : ""
+        let outcome = path == "device/control" ? " Govee may or may not have applied it; it was not retried." : ""
+        return LumaError.message("Govee cloud \(reason) while \(step)\(tries) (URLError \(error.code.rawValue)).\(outcome) LAN control is unaffected.")
     }
 
     private func execute(path: String, device: LightDevice?, command: CapabilityCommand?) async throws -> JSONValue {
