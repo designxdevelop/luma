@@ -41,3 +41,7 @@ The watch never contacts lights or Govee itself: watchOS doesn't allow the UDP s
 - ReplayKit broadcast extension for whole-screen sync.
 - Watch complications, widgets, Shortcuts/App Intents, Live Activities.
 - App Store or TestFlight distribution.
+
+## Local activity diagnostics
+
+Native apps persist non-demo Activity messages with ISO 8601 timestamps and INFO/ERROR severity in `activity.log` beside `home.json` in Application Support/Luma (or `LUMA_DATA_DIR` when overridden). On macOS this is `~/Library/Application Support/Luma/activity.log`; on iOS it is inside the app sandbox. At 1 MiB the file rotates to `activity.previous.log`, replacing the previous backup. Messages are limited to 8,192 characters. Clearing the visible session Activity does not delete these diagnostic files. Logs can contain light and scene names; review them before sharing. Credentials and screen/camera payloads must never be supplied to the activity logger.

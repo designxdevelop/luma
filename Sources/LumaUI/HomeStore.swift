@@ -102,9 +102,14 @@ struct ActivityEntry: Identifiable {
         screenSync.restore = { [weak self] device, commands in try self?.restoreToLight(device, commands) }
         screenSync.readback = { [weak self] device in await self?.refresh(device) }
         screenSync.observeSystem()
+        if !canSave, let notice { log(notice, error: true) }
     }
 
     func log(_ message: String, error: Bool = false) {
+        if !demo {
+            do { try ActivityLog.append(message, isError: error, folder: storage.folder) }
+            catch { notice = "Could not write the activity log: \(error.localizedDescription)" }
+        }
         activity.insert(.init(message: message, isError: error), at: 0)
         if activity.count > 200 { activity.removeLast(activity.count - 200) }
         if error { notice = message }
