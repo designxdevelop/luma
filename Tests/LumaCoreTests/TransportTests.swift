@@ -5,7 +5,9 @@ import Testing
 private struct MockResponse: Sendable {
     let status: Int
     let body: String
+    var error: URLError.Code?
     init(_ body: String, status: Int = 200) { self.body = body; self.status = status }
+    static func failure(_ code: URLError.Code) -> MockResponse { var response = MockResponse(""); response.error = code; return response }
 }
 
 /// URLProtocol callbacks are synchronous and may run on different session queues.
@@ -49,6 +51,7 @@ private final class MockGoveeProtocol: URLProtocol, @unchecked Sendable {
             captured.httpBody = body
         }
         let fixture = Self.registry.respond(to: captured)
+        if let code = fixture.error { client?.urlProtocol(self, didFailWithError: URLError(code)); return }
         guard let url = request.url, let response = HTTPURLResponse(url: url, statusCode: fixture.status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"]) else { return }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(fixture.body.utf8))
@@ -207,5 +210,64 @@ func lanRejectsUnsupportedValues(command: CapabilityCommand) {
     let queued = Task { try await cloud.control(device: device, command: .power(false)) }
     queued.cancel()
     await #expect(throws: CancellationError.self) { try await queued.value }
+    #expect(fixture.requests.count == 1)
+}
+
+@Test func cloudReadRetriesOnceAfterTimeoutWithPacing() async throws {
+    let body = #"{"code":200,"payload":{"capabilities":[{"instance":"online","state":{"value":true}}]}}"#
+    let fixture = CloudFixture([.failure(.timedOut), MockResponse(body)]); defer { fixture.finish() }
+    let updated = try await fixture.cloud.state(for: LightDevice(id: "lamp", sku: "H6008", name: "Desk"))
+    #expect(updated.online == true)
+    let requests = fixture.requests
+    #expect(requests.count == 2)
+    if requests.count == 2 { #expect(requests[0].1.duration(to: requests[1].1) >= .milliseconds(1990)) }
+}
+
+@Test func cloudReadTimeoutTwiceReportsActionableRedactedError() async throws {
+    let fixture = CloudFixture([.failure(.timedOut), .failure(.timedOut)]); defer { fixture.finish() }
+    do {
+        _ = try await fixture.cloud.devices()
+        Issue.record("Expected a timeout")
+    } catch {
+        let text = error.localizedDescription
+        #expect(text.contains("no response for 20 seconds while listing devices after 2 attempts"))
+        #expect(text.contains("URLError -1001"))
+        #expect(!text.contains("test-api-key"))
+    }
+    #expect(fixture.requests.count == 2)
+}
+
+@Test func cloudCommandTimeoutIsNeverRetried() async throws {
+    let fixture = CloudFixture([.failure(.timedOut), MockResponse(#"{"code":200}"#)]); defer { fixture.finish() }
+    let device = LightDevice(id: "secret-lamp-id", sku: "H6008", name: "Bedroom")
+    do {
+        try await fixture.cloud.control(device: device, command: .power(true))
+        Issue.record("Expected a timeout")
+    } catch {
+        let text = error.localizedDescription
+        #expect(text.contains("may or may not have applied it; it was not retried"))
+        #expect(!text.contains("secret-lamp-id") && !text.contains("Bedroom") && !text.contains("test-api-key"))
+    }
+    #expect(fixture.requests.count == 1)
+}
+
+@Test func cloudReadDoesNotRetryHTTPOrNonTransientFailures() async throws {
+    let fixture = CloudFixture([MockResponse("{}", status: 500), .failure(.badServerResponse), MockResponse(#"{"code":200,"data":[]}"#)]); defer { fixture.finish() }
+    let cloud = fixture.cloud
+    await #expect(throws: LumaError.self) { _ = try await cloud.devices() }
+    #expect(fixture.requests.count == 1)
+    await #expect(throws: LumaError.self) { _ = try await cloud.devices() }
+    #expect(fixture.requests.count == 2)
+}
+
+@Test func cancellingDuringReadRetryWaitSendsNoSecondRequest() async throws {
+    let fixture = CloudFixture([.failure(.timedOut), MockResponse(#"{"code":200,"data":[]}"#)]); defer { fixture.finish() }
+    let cloud = fixture.cloud
+    let read = Task { try await cloud.devices() }
+    for _ in 0..<200 where fixture.requests.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+    #expect(fixture.requests.count == 1)
+    read.cancel()
+    await #expect(throws: CancellationError.self) { _ = try await read.value }
+    try await Task.sleep(for: .milliseconds(2100))
     #expect(fixture.requests.count == 1)
 }
