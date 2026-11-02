@@ -21,13 +21,17 @@ public actor GoveeCloud {
             guard let id = row["device"]?.string, let sku = row["sku"]?.string else {
                 throw LumaError.message("Govee returned a device without an ID or model.")
             }
-            if let type = row["type"]?.string, type != "devices.types.light" { return nil }
+            // Appliances and sensors are listed with their type so bulk light actions can skip them.
+            let type = row["type"]?.string.flatMap { DeviceReadings.isLight(type: $0) || $0.count > 128 ? nil : $0 }
             let capabilities = try row["capabilities"].map(decodeCapabilities) ?? []
-            return LightDevice(id: id, sku: sku, name: row["deviceName"]?.string ?? sku, capabilities: capabilities)
+            return LightDevice(id: id, sku: sku, name: row["deviceName"]?.string ?? sku, capabilities: capabilities, deviceType: type)
         }
     }
 
-    public func state(for device: LightDevice) async throws -> LightDevice {
+    public func state(for device: LightDevice) async throws -> LightDevice { try await stateAndReadings(for: device).device }
+
+    /// State plus readable values with no dedicated control (sensor readings, appliance modes). None for offline devices.
+    public func stateAndReadings(for device: LightDevice) async throws -> (device: LightDevice, readings: [DeviceReadings.Reading]) {
         let root = try await request(path: "device/state", device: device)
         guard let payload = root["payload"], let capabilities = payload["capabilities"]?.array else {
             throw LumaError.message("Govee returned invalid device state.")
@@ -38,7 +42,7 @@ public actor GoveeCloud {
             updated.online = online
         }
         // Govee explicitly identifies offline state as historical; do not present it as fresh telemetry.
-        guard updated.online != false else { return updated }
+        guard updated.online != false else { return (updated, []) }
         for capability in capabilities {
             guard let instance = capability["instance"]?.string, let value = capability["state"]?["value"]?.number,
                   value.isFinite, value.rounded() == value, value >= 0, value <= Double(Int32.max) else { continue }
@@ -47,11 +51,12 @@ public actor GoveeCloud {
             case "brightness" where value <= 100: updated.brightness = Int(value)
             case "colorRgb" where value <= 0xFFFFFF: updated.rgb = Int(value)
             case "colorTemperatureK": updated.colorTemperature = Int(value)
+            case "dreamViewToggle" where value <= 1: updated.dreamView = value == 1
             default: break
             }
         }
         if updated.online == true { updated.lastSeen = Date() }
-        return updated
+        return (updated, DeviceReadings.parse(payload, capabilities: device.capabilities))
     }
 
     public func control(device: LightDevice, command: CapabilityCommand) async throws {

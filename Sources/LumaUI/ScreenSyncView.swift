@@ -15,15 +15,30 @@ struct ScreenSyncView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                PageHeader(title: "Screen Sync", subtitle: Copy.subtitle) { actions }
+                PageHeader(title: sync.mode == .audio ? "Audio Sync" : "Screen Sync", subtitle: audio ? Copy.audioSubtitle : Copy.subtitle) { actions }
+                modePicker
                 sourceCard
                 if sync.phase == .idle { privacyCard }
-                if let colors = sync.regionPreview { colorMap(colors) }
+                if audio && sync.isActive { AudioMeter(sync: sync) }
+                if !audio, let colors = sync.regionPreview { colorMap(colors) }
                 if sync.isActive { statsRow }
                 lightsSection
-                tuningSection
+                if audio { audioTuningSection } else { tuningSection }
             }.pagePadding().frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)
         }
+    }
+
+    private var audio: Bool { sync.mode == .audio }
+
+    private var modePicker: some View {
+        Picker("Follow", selection: Binding(get: { sync.mode }, set: { sync.setMode($0) })) {
+            Text("Screen").tag(ScreenSync.Mode.screen)
+            Text("Audio").tag(ScreenSync.Mode.audio)
+        }
+        .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 260)
+        .disabled(sync.isActive)
+        .accessibilityLabel("Follow screen or audio")
+        .help(sync.isActive ? "Stop first to switch between Screen and Audio." : "Choose whether lights follow the screen or audio.")
     }
 
     // MARK: Header actions
@@ -31,7 +46,7 @@ struct ScreenSyncView: View {
     @ViewBuilder private var actions: some View {
         switch sync.phase {
         case .idle where sync.source == nil:
-            Button(store.demo ? "Use Sample Video" : Copy.choose) { sync.chooseSource() }.buttonStyle(.borderedProminent)
+            Button(audio ? Copy.chooseAudio : store.demo ? "Use Sample Video" : Copy.choose) { sync.chooseSource() }.buttonStyle(.borderedProminent)
         case .idle:
             Button("Change…") { sync.chooseSource() }
             Button("Start") { Task { await sync.start() } }.buttonStyle(.borderedProminent)
@@ -57,12 +72,15 @@ struct ScreenSyncView: View {
                         .frame(width: 28, height: 28).background(Color.lumaAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(sync.source?.name ?? Copy.noSource).font(.system(size: 13, weight: .semibold)).lineLimit(2)
-                        Text(sync.source == nil ? "You pick what Luma follows. Nothing is captured until you start." : "Only the content you chose is used.")
-                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                        Text(sync.source?.name ?? (audio ? Copy.noAudioSource : Copy.noSource)).font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                        Text(sourceDetail).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 12)
                     statusPill
+                }
+                if audio && store.demo {
+                    Label("Demo home: the lights are simulated, but Audio Sync listens to real audio.", systemImage: "info.circle")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 if let reason = sync.pauseReason, sync.phase == .paused {
                     Label(reason, systemImage: "pause.circle").font(.system(size: 12)).foregroundStyle(Color.warning)
@@ -73,11 +91,13 @@ struct ScreenSyncView: View {
                 }
                 if sync.permissionDenied {
                     #if os(iOS)
-                    Text("Luma needs camera access to follow the colors on your TV or monitor. You can allow it in Settings › Luma › Camera, then start again.")
+                    Text(audio ? "Luma needs microphone access to follow music. You can allow it in Settings › Luma › Microphone, then start again."
+                               : "Luma needs camera access to follow the colors on your TV or monitor. You can allow it in Settings › Luma › Camera, then start again.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) }
                     #else
-                    Text("Luma needs your permission to read a display or window. You can allow it in System Settings under Privacy & Security › Screen & System Audio Recording, then start again.")
+                    Text(audio ? "Luma needs your permission to capture audio. You can allow it in System Settings under Privacy & Security › Screen & System Audio Recording, then start again."
+                               : "Luma needs your permission to read a display or window. You can allow it in System Settings under Privacy & Security › Screen & System Audio Recording, then start again.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button("Open Privacy Settings") { NSWorkspace.shared.open(Self.privacySettings) }
                     #endif
@@ -87,12 +107,24 @@ struct ScreenSyncView: View {
     }
 
     private var sourceIcon: String {
-        switch sync.source?.kind { case .display: "display"; case .window: "macwindow"; case .camera: "camera"; case .sample: "film"; case nil: "rectangle.dashed" }
+        switch sync.source?.kind {
+        case .display: "display"; case .window: "macwindow"; case .camera: "camera"; case .sample: "film"
+        case .systemAudio: "speaker.wave.2"; case .microphone: "mic"; case nil: audio ? "waveform" : "rectangle.dashed"
+        }
+    }
+
+    private var sourceDetail: String {
+        switch sync.source?.kind {
+        case nil: audio ? "You choose what Luma listens to. Nothing is captured until you start." : "You pick what Luma follows. Nothing is captured until you start."
+        case .systemAudio: "Sound apps play on this Mac, except Luma itself."
+        case .microphone: "Sound the microphone hears around you, including music from this device's speaker."
+        default: "Only the content you chose is used."
+        }
     }
 
     @ViewBuilder private var statusPill: some View {
         switch sync.phase {
-        case .running: StatusPill(text: "Capturing", icon: "record.circle.fill", tint: .danger)
+        case .running: StatusPill(text: audio ? "Listening" : "Capturing", icon: audio ? "waveform" : "record.circle.fill", tint: .danger)
         case .starting: StatusPill(text: "Starting…", tint: .secondary, busy: true)
         case .paused: StatusPill(text: "Paused", icon: "pause.circle.fill", tint: .warning)
         case .idle: sync.source == nil ? StatusPill(text: "Off", icon: "circle") : StatusPill(text: "Ready", icon: "checkmark.circle.fill", tint: .success)
@@ -103,7 +135,7 @@ struct ScreenSyncView: View {
         Card {
             VStack(alignment: .leading, spacing: 8) {
                 Label("Private by design", systemImage: "lock.shield").font(.system(size: 13, weight: .medium))
-                Text(Copy.privacy)
+                Text(audio ? Copy.audioPrivacy : Copy.privacy)
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -172,7 +204,7 @@ struct ScreenSyncView: View {
                 VStack(spacing: 0) {
                     if eligible.isEmpty {
                         EmptyState(icon: "wifi.slash", title: devices.isEmpty ? "No lights yet" : "No lights can sync right now",
-                                   message: "Screen Sync needs lights with LAN Control turned on in the Govee Home app, discovered on this Wi-Fi.") {
+                                   message: "\(sync.title) needs lights with LAN Control turned on in the Govee Home app, discovered on this Wi-Fi.") {
                             Button(store.scanning ? "Looking for Lights…" : "Find Lights on Wi-Fi") { store.discover() }.disabled(store.scanning || store.demo)
                         }
                     }
@@ -204,6 +236,11 @@ struct ScreenSyncView: View {
             if issue == nil {
                 if excluded != nil { Button("Include Again") { sync.includeAgain(device.id) }.disabled(ownershipIssue != nil) }
                 else if region != nil { previewDot(sync.preview[device.id]) }
+                if audio {
+                    if region != nil, let band = band(for: device.id) {
+                        Text(band).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).accessibilityLabel("Follows \(band.lowercased())")
+                    }
+                } else {
                 Picker("Screen region", selection: Binding(get: { region ?? .full }, set: { sync.setRegion($0, for: device.id) })) {
                     ForEach(ScreenRegion.Group.allCases) { group in
                         Section(group.rawValue) { ForEach(group.regions) { Text($0.title).tag($0) } }
@@ -211,17 +248,28 @@ struct ScreenSyncView: View {
                 }
                 .pickerStyle(.menu).labelsHidden().frame(width: compactSpacing(190, 120)).disabled(region == nil)
                 .accessibilityLabel("Screen region for \(device.name)")
+                }
                 Toggle(isOn: Binding(get: { region != nil }, set: { sync.setIncluded($0, for: device.id) })) {
                     #if os(macOS)
                     Text("Include")
                     #endif
                 }
                     .toggleStyle(.switch).controlSize(.small)
-                    .accessibilityLabel("Include \(device.name) in Screen Sync")
+                    .accessibilityLabel("Include \(device.name) in \(sync.title)")
             }
         }
         .padding(.horizontal, compactSpacing(16, 12)).padding(.vertical, 10)
         .opacity(issue == nil ? 1 : 0.55)
+    }
+
+    /// Spectrum spreads included lights bass → treble in name order (`ScreenSync.audioOrder`).
+    private func band(for id: String) -> String? {
+        guard sync.audioOptions.style == .spectrum else { return nil }
+        let order = sync.audioOrder
+        guard let i = order.firstIndex(of: id) else { return nil }
+        guard order.count > 1 else { return "All bands" }
+        let p = Double(i) / Double(order.count - 1)
+        return p < 1.0 / 3 ? "Bass" : p <= 2.0 / 3 ? "Mid" : "Treble"
     }
 
     @ViewBuilder private func previewDot(_ target: LightTarget?) -> some View {
@@ -264,17 +312,64 @@ struct ScreenSyncView: View {
                         }
                     }
                     .toggleStyle(.switch).controlSize(.small)
-                    Toggle(isOn: Binding(get: { sync.settings.restore }, set: { sync.settings.restore = $0 })) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Restore previous state").font(.system(size: 13, weight: .medium))
-                            Text("When you press Stop, send each synced light back to the brightness and color it had before. Local network only. Lights you changed by hand are left alone, and automatic stops (sleep, lock, errors) don't restore.")
-                                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .toggleStyle(.switch).controlSize(.small)
+                    restoreToggle
                     Text("Edge depth sets how far edges, corners, and half edges reach into the picture.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Text("Lights update a few times per second over your local network; hardware timing varies. Capture runs at up to \(ScreenSyncTiming.fps) frames per second; light updates are capped separately.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var restoreToggle: some View {
+        Toggle(isOn: Binding(get: { sync.settings.restore }, set: { sync.settings.restore = $0 })) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Restore previous state").font(.system(size: 13, weight: .medium))
+                Text("When you press Stop, send each synced light back to the brightness and color it had before. Local network only. Lights you changed by hand are left alone, and automatic stops (sleep, lock, errors) don't restore.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .toggleStyle(.switch).controlSize(.small)
+    }
+
+    // MARK: Audio tuning
+
+    private var audioTuningSection: some View {
+        let sensitivity = String(format: "%.1f×", sync.audioOptions.sensitivity)
+        let release = AudioReactive.releaseMinS + sync.settings.smoothing / ScreenSyncSettings.smoothingRange.upperBound * (AudioReactive.releaseMaxS - AudioReactive.releaseMinS)
+        let floor = AudioReactive.brightnessRange(cap: sync.settings.brightnessCap).lowerBound
+        return VStack(alignment: .leading, spacing: 10) {
+            SectionHeader("Tuning")
+            Card {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Picker("Style", selection: Binding(get: { sync.audioOptions.style }, set: { sync.audioOptions.style = $0 })) {
+                            Text("Pulse").tag(AudioSyncOptions.Style.pulse)
+                            Text("Spectrum").tag(AudioSyncOptions.Style.spectrum)
+                        }
+                        .pickerStyle(.segmented).frame(maxWidth: 260).accessibilityLabel("Audio Sync style")
+                        Text(sync.audioOptions.style == .pulse ? "Every light pulses with the loudness, colored by the balance of bass and treble."
+                                                               : "Lights spread from bass to treble in name order; each follows its band.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                    tuningRow("Sensitivity", low: "Less", high: "More", value: sensitivity,
+                              range: AudioSyncOptions.sensitivityRange, spoken: sensitivity,
+                              binding: Binding(get: { sync.audioOptions.sensitivity }, set: { sync.audioOptions.sensitivity = ($0 * 10).rounded() / 10 }))
+                    tuningRow("Release", low: "Snappy", high: "Smooth", value: String(format: "%.2f s", release),
+                              range: ScreenSyncSettings.smoothingRange, spoken: String(format: "%.2f seconds", release),
+                              binding: Binding(get: { sync.settings.smoothing }, set: { sync.settings.smoothing = ($0 * 100).rounded() / 100 }))
+                    tuningRow("Brightness cap", low: "Dimmer", high: "Brighter", value: "\(floor)–\(Int(sync.settings.brightnessCap.rounded()))%",
+                              range: ScreenSyncSettings.brightnessCapRange, spoken: "\(Int(sync.settings.brightnessCap.rounded())) percent, never below \(floor) percent",
+                              binding: Binding(get: { sync.settings.brightnessCap }, set: { sync.settings.brightnessCap = $0.rounded() }))
+                    tuningRow("Update rate", low: "Slower", high: "Faster", value: "\(rate) updates/s",
+                              range: ScreenSyncSettings.updateHzRange, spoken: "\(rate) updates per second per light",
+                              binding: Binding(get: { sync.settings.updateHz }, set: { sync.settings.updateHz = ($0 * 10).rounded() / 10 }))
+                    tuningRow("Change threshold", low: "Sensitive", high: "Only big changes", value: String(format: "%.1f%%", sync.settings.threshold * 100),
+                              range: ScreenSyncSettings.thresholdRange, spoken: String(format: "%.1f percent", sync.settings.threshold * 100),
+                              binding: Binding(get: { sync.settings.threshold }, set: { sync.settings.threshold = ($0 * 1000).rounded() / 1000 }))
+                    restoreToggle
+                    Text("Lights never drop below a fifth of the cap, so they don't black out between beats. Brightness rises in 50 ms and falls over the release time, which damps fast flashing. Lights update a few times per second over your local network, so this is rhythmic ambience, not beat-exact flashing.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -309,32 +404,74 @@ struct ScreenSyncIndicator: View {
 
     var body: some View {
         if sync.isActive {
-            let paused = sync.phase == .paused
+            let paused = sync.phase == .paused, listening = sync.source?.isAudio == true
             HStack(spacing: 8) {
                 Button(action: open) {
                     HStack(spacing: 8) {
                         Circle().fill(paused ? Color.warning : Color.danger).frame(width: 8, height: 8)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("Screen Sync").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary).textCase(.uppercase)
-                            Text(paused ? "Paused" : "Capturing · \(sync.source?.name ?? "Screen")").font(.system(size: 12, weight: .medium)).lineLimit(1)
+                            Text(sync.title).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary).textCase(.uppercase)
+                            Text(paused ? "Paused" : "\(listening ? "Listening" : "Capturing") · \(sync.source?.name ?? "Screen")").font(.system(size: 12, weight: .medium)).lineLimit(1)
                         }
                         Spacer(minLength: 0)
                     }.contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).help("Open Screen Sync")
-                .accessibilityLabel(paused ? "Screen Sync paused" : "Screen Sync capturing \(sync.source?.name ?? "your screen")").accessibilityHint("Opens Screen Sync")
+                .buttonStyle(.plain).help("Open \(sync.title)")
+                .accessibilityLabel(paused ? "\(sync.title) paused" : "\(sync.title) \(listening ? "listening to" : "capturing") \(sync.source?.name ?? "your screen")").accessibilityHint("Opens \(sync.title)")
                 if paused {
                     Button { Task { await sync.start() } } label: { Image(systemName: "play.fill") }
-                        .buttonStyle(.borderless).help("Resume Screen Sync").accessibilityLabel("Resume Screen Sync")
+                        .buttonStyle(.borderless).help("Resume \(sync.title)").accessibilityLabel("Resume \(sync.title)")
                 } else {
                     Button { sync.pause() } label: { Image(systemName: "pause.fill") }
-                        .buttonStyle(.borderless).help("Pause Screen Sync").accessibilityLabel("Pause Screen Sync")
+                        .buttonStyle(.borderless).help("Pause \(sync.title)").accessibilityLabel("Pause \(sync.title)")
                 }
                 Button { sync.stop() } label: { Image(systemName: "stop.fill") }
-                    .buttonStyle(.borderless).help("Stop Screen Sync").accessibilityLabel("Stop Screen Sync")
+                    .buttonStyle(.borderless).help("Stop \(sync.title)").accessibilityLabel("Stop \(sync.title)")
             }
             .padding(10).background((paused ? Color.warning : Color.danger).opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
+    }
+}
+
+/// Live loudness and 8 bands from the latest real analysis. Its own view so only it
+/// re-renders 20 times a second.
+private struct AudioMeter: View {
+    let sync: ScreenSync
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader("Audio", detail: "Levels, not a recording")
+            Card {
+                if let levels = sync.audioLevels {
+                    HStack(alignment: .bottom, spacing: 14) {
+                        VStack(spacing: 4) {
+                            HStack(alignment: .bottom, spacing: 4) { ForEach(Array(levels.bands.enumerated()), id: \.offset) { i, v in bar(v, hue: Double(i) / 7 * AudioReactive.hueSpan) } }
+                                .frame(height: 64)
+                            HStack { Text("Bass"); Spacer(); Text("Treble") }.font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        VStack(spacing: 4) {
+                            bar(levels.level, hue: nil).frame(width: 18, height: 64)
+                            Text("Level").font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityElement(children: .ignore).accessibilityLabel("Audio level")
+                    .accessibilityValue("\(Int((levels.level * 100).rounded())) percent loudness")
+                } else {
+                    Label("No signal yet. Play something, or check that the source is making sound.", systemImage: "waveform.slash")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private func bar(_ value: Double, hue: Double?) -> some View {
+        let color = hue.map { Color(rgb: AudioReactive.hueToRGB($0)) } ?? Color.lumaAccent
+        return VStack(spacing: 0) {
+            Spacer(minLength: 0)
+            RoundedRectangle(cornerRadius: 3, style: .continuous).fill(color).frame(height: max(2, 64 * value))
+        }
+        .frame(maxWidth: .infinity)
+        .background(Color.well, in: RoundedRectangle(cornerRadius: 3, style: .continuous))
     }
 }
 
@@ -344,10 +481,18 @@ private enum Copy {
     static let choose = "Use Camera"
     static let noSource = "Camera not started"
     static let privacy = "Luma reads only small color samples from the back camera, here on this device. Nothing is recorded, saved, or uploaded, and audio is never used. Capture stops when you pause, stop, or leave Luma."
+    static let audioSubtitle = "Make local lights follow music the microphone hears."
+    static let chooseAudio = "Use Microphone"
+    static let noAudioSource = "Microphone not started"
+    static let audioPrivacy = "iOS asks before Luma can use the microphone. Luma reduces what it hears to a loudness level and eight frequency bands about 20 times a second, here on this device. No audio is recorded, saved, or uploaded, and the camera is never used. Listening stops when you pause, stop, or leave Luma. iOS doesn't let apps hear what other apps play, so the microphone is the source."
     #else
     static let subtitle = "Match local lights to a display or window on this Mac."
     static let choose = "Choose Display or Window…"
     static let noSource = "No display or window chosen"
     static let privacy = "When you choose a display or window, macOS asks you to confirm. Luma reads only small color samples of what you choose, here on this Mac. Nothing is recorded, saved, or uploaded, and audio and camera are never used. Capture stops when you pause, stop, lock, or sleep your Mac."
+    static let audioSubtitle = "Make local lights follow the music this Mac plays."
+    static let chooseAudio = "Listen to Mac Audio…"
+    static let noAudioSource = "No audio source chosen"
+    static let audioPrivacy = "macOS asks you to pick a display and to allow audio capture, and shows that Luma is recording. Luma hears what apps on this Mac play, except itself, and reduces it to a loudness level and eight frequency bands about 20 times a second, here on this Mac. No audio is recorded, saved, or uploaded; the picture and microphone are never used. Listening stops when you pause, stop, lock, or sleep your Mac."
     #endif
 }

@@ -8,6 +8,9 @@
   "homepage": "https://github.com/designxdevelop/luma",
   "private": true,
   "main": "dist/main/main.js",
+  "bin": {
+    "luma-bridge": "dist/bridge/cli.js"
+  },
   "scripts": {
     "runtime:install": "node node_modules/electron/install.js",
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.renderer.json && node scripts/copy-static.mjs",
@@ -17,7 +20,9 @@
     "start": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "icons": "node scripts/make-icons.mjs",
-    "dist:linux": "npm run build && electron-builder --config electron-builder.linux.cjs --linux tar.gz --x64 --arm64"
+    "dist:linux": "npm run build && electron-builder --config electron-builder.linux.cjs --linux tar.gz --x64 --arm64",
+    "bridge": "node dist/bridge/cli.js",
+    "bridge:pack": "npm run build && node scripts/pack-bridge.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -8,8 +8,9 @@ public struct AutomationAction: Decodable, Sendable {
     public var kelvin: Int?
     public func deviceIDs(in devices: [LightDevice]) throws -> [String] {
         let selected: [LightDevice]
-        if target == "all" { selected = devices }
-        else if target.hasPrefix("room:") { selected = devices.filter { $0.room == String(target.dropFirst(5)) } }
+        // `all` and rooms mean lights: an appliance is only reachable by its own ID.
+        if target == "all" { selected = devices.filter { DeviceReadings.isLight(type: $0.deviceType) } }
+        else if target.hasPrefix("room:") { selected = devices.filter { DeviceReadings.isLight(type: $0.deviceType) && $0.room == String(target.dropFirst(5)) } }
         else { selected = devices.filter { $0.id == target } }
         guard !selected.isEmpty, selected.count <= 100 else { throw LumaError.message("Target must match 1–100 lights.") }
         return selected.map(\.id)

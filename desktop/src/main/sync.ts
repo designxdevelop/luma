@@ -1,14 +1,18 @@
 // Luma is an open-source project built by Design X Develop LLC.
 // Copyright (c) 2026 Design X Develop LLC. MIT License.
 //
-// Screen Sync session controller. Electron-free and platform-neutral: a capture
+// Screen and Audio Sync session controller. Electron-free and platform-neutral: a capture
 // adapter (src/main/capture.ts on Windows; synthetic in demo) supplies sources, and
-// the renderer supplies only bounded region averages per sampled frame. Stream values
+// the renderer supplies only bounded region averages per sampled frame (Screen Sync) or
+// 9 bounded audio levels per analysis frame (Audio Sync, mapped in shared/audio-math.ts).
+// One session at a time, of either kind, so scenes, manual control and restore share one
+// barrier. Stream values
 // go through a latest-only LAN sender and are never treated as confirmed state.
 // Privacy: no frame data, colors or source titles are written to the activity log.
 
 import { randomBytes } from 'node:crypto';
-import type { CapabilityCommand, LightDevice, SyncRegion, SyncSettings, SyncSource, SyncView } from '../shared/types';
+import type { AudioOptions, AudioSupport, CapabilityCommand, LightDevice, SyncKind, SyncRegion, SyncSettings, SyncSource, SyncView } from '../shared/types';
+import { AudioMapper, DEFAULT_AUDIO_OPTIONS, validateAudioOptions, validateLevels } from '../shared/audio-math';
 import { DEFAULT_SYNC_SETTINGS, REGIONS, exceedsThreshold, gridColor, smooth, toTarget, validateGrid, validateSettings, type LightTarget, type LinearRGB } from '../shared/sync-math';
 import { StreamSender, type StreamField } from '../core/stream';
 import { LumaError, brightness, kelvin, message, rgb, supports } from '../core/model';
@@ -40,6 +44,8 @@ export interface SyncOptions {
   startMs?: number;
   /** Bound on in-flight sends when stopping. */
   drainMs?: number;
+  /** Which audio capture paths this platform offers (Audio Sync). */
+  audioSupport?: AudioSupport;
 }
 
 interface Member {
@@ -62,6 +68,10 @@ export class SyncController {
   settings: SyncSettings = { ...DEFAULT_SYNC_SETTINGS };
   phase: SyncView['phase'] = 'idle';
   generation = 0;
+  /** What the current (or last) session follows. */
+  kind: SyncKind = 'screen';
+  audio: AudioOptions = { ...DEFAULT_AUDIO_OPTIONS };
+  private mapper?: AudioMapper;
   private token?: string;
   private members = new Map<string, Member>();
   private sourceName?: string;
@@ -101,7 +111,7 @@ export class SyncController {
 
   private ineligible(d: LightDevice): string | undefined {
     if (!d.isDemo) {
-      if (!d.ip) return 'Cloud-only light: Screen Sync needs LAN Control.';
+      if (!d.ip) return 'Cloud-only light: Screen and Audio Sync need LAN Control.';
       if (!this.host.lanReady(d)) return 'Not seen on your network yet. Choose Discover.';
     }
     if (!supports(d, 'colorRgb')) return 'No RGB color.';
@@ -111,16 +121,18 @@ export class SyncController {
     return undefined;
   }
 
-  /** Validates lights and starts a session in "starting": nothing is sent until the first valid frame. */
-  start(lights: unknown, sourceName: string): { token: string; generation: number } {
-    if (this.active) throw new LumaError('Screen Sync is already active. Stop it first.', 409);
-    if (this.host.sceneRunning()) throw new LumaError('A scene is running. Stop it before starting Screen Sync.', 409);
+  private get label(): string { return this.kind === 'audio' ? 'Audio Sync' : 'Screen Sync'; }
+
+  /** Validates lights and starts a session in "starting": nothing is sent until the first valid frame. Audio lights need no region. */
+  start(lights: unknown, sourceName: string, kind: SyncKind = 'screen'): { token: string; generation: number } {
+    if (this.active) throw new LumaError(`${this.label} is already active. Stop it first.`, 409);
+    if (this.host.sceneRunning()) throw new LumaError(`A scene is running. Stop it before starting ${kind === 'audio' ? 'Audio Sync' : 'Screen Sync'}.`, 409);
     if (!Array.isArray(lights) || lights.length === 0) throw new LumaError('Choose at least one light.');
     if (lights.length > MAX_LIGHTS) throw new LumaError(`Choose up to ${MAX_LIGHTS} lights.`);
     const devices = this.host.devices();
     const members = new Map<string, Member>();
     for (const item of lights) {
-      const id = (item as { id?: unknown } | null)?.id, region = (item as { region?: unknown } | null)?.region;
+      const id = (item as { id?: unknown } | null)?.id, region = kind === 'audio' ? 'full' : (item as { region?: unknown } | null)?.region;
       if (typeof id !== 'string' || members.has(id) || !REGIONS.includes(region as SyncRegion)) throw new LumaError('Invalid light selection.');
       const d = devices.find((x) => x.id === id);
       if (!d) throw new LumaError('Light not found.', 404);
@@ -129,6 +141,8 @@ export class SyncController {
       members.set(id, { id, name: d.name, region: region as SyncRegion, original: { brightness: d.brightness, rgb: d.rgb, colorTemperature: d.colorTemperature }, excluded: false });
     }
     this.generation++;
+    this.kind = kind;
+    this.mapper = kind === 'audio' ? new AudioMapper() : undefined;
     this.token = randomBytes(16).toString('hex');
     this.members = members;
     this.sourceName = sourceName.slice(0, 120);
@@ -144,7 +158,7 @@ export class SyncController {
     this.sender.setRate(this.settings.updateHz);
     this.phase = 'starting';
     this.arm(this.options.startMs ?? 15_000, 'Capture did not start.');
-    this.host.log(`Screen Sync started for ${members.size} light${members.size === 1 ? '' : 's'}.`);
+    this.host.log(`${this.label} started for ${members.size} light${members.size === 1 ? '' : 's'}.`);
     this.host.changed();
     return { token: this.token, generation: this.generation };
   }
@@ -155,32 +169,73 @@ export class SyncController {
   /** The current session is still waiting for its capture (used by the capture adapter). */
   awaitingCapture(generation: number): boolean { return this.phase === 'starting' && generation === this.generation; }
 
-  /** One sampled frame. Returns false when stale, malformed, too fast or not running. */
-  frame(token: unknown, generation: unknown, seq: unknown, input: unknown): boolean {
-    if (!this.token || token !== this.token || generation !== this.generation) return false;
-    if (this.phase !== 'running' && this.phase !== 'starting') return false;
+  /**
+   * Shared gate for screen frames and audio levels: live token and generation, matching kind,
+   * increasing seq, rate limit, valid payload. Returns the parsed payload and elapsed seconds.
+   */
+  private admit<T>(kind: SyncKind, token: unknown, generation: unknown, seq: unknown, parse: () => T): { value: T; dtS?: number } | undefined {
+    if (!this.token || token !== this.token || generation !== this.generation || kind !== this.kind) return undefined;
+    if (this.phase !== 'running' && this.phase !== 'starting') return undefined;
     const now = this.now();
-    if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq <= this.lastSeq || now - this.lastFrameAt < MIN_FRAME_MS) { this.stats.dropped++; return false; }
-    let grid;
-    try { grid = validateGrid(input); } catch { this.stats.dropped++; return false; }
+    if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq <= this.lastSeq || now - this.lastFrameAt < MIN_FRAME_MS) { this.stats.dropped++; return undefined; }
+    let value: T;
+    try { value = parse(); } catch { this.stats.dropped++; return undefined; }
     const dtS = this.lastFrameAt ? (now - this.lastFrameAt) / 1000 : undefined;
     this.lastSeq = seq;
     this.lastFrameAt = now;
     this.stats.frames++;
     if (this.phase === 'starting') { this.phase = 'running'; this.lastEmit = 0; }
-    this.arm(this.options.stallMs ?? 10_000, 'No frames arrived; capture stalled.');
+    this.arm(this.options.stallMs ?? 10_000, kind === 'audio' ? 'No audio analysis arrived; capture stalled.' : 'No frames arrived; capture stalled.');
+    return { value, dtS };
+  }
+
+  /** Sends a target unless it is within the change threshold of the last one. */
+  private offer(m: Member, target: LightTarget): void {
+    if (!exceedsThreshold(m.target, target, this.settings.threshold)) return;
+    m.target = target;
+    this.sender?.push(m.id, target);
+  }
+
+  private emitStats(): void {
+    const now = this.now();
+    if (now - this.lastEmit >= 1000) { this.lastEmit = now; this.host.changed(); } // stats at most 1 Hz
+  }
+
+  /** One sampled frame. Returns false when stale, malformed, too fast or not running. */
+  frame(token: unknown, generation: unknown, seq: unknown, input: unknown): boolean {
+    const admitted = this.admit('screen', token, generation, seq, () => validateGrid(input));
+    if (!admitted) return false;
+    const { value: grid, dtS } = admitted;
     for (const m of this.members.values()) {
       if (m.excluded) continue;
       // Region colors use the current settings, so depth and vivid apply from the next frame.
       const sample = gridColor(grid, m.region, this.settings.edgeDepth, this.settings.vivid);
       m.smoothed = smooth(m.smoothed, sample, this.settings.smoothing, dtS);
-      const target = toTarget(m.smoothed, this.settings.brightnessCap);
-      if (!exceedsThreshold(m.target, target, this.settings.threshold)) continue;
-      m.target = target;
-      this.sender?.push(m.id, target);
+      this.offer(m, toTarget(m.smoothed, this.settings.brightnessCap));
     }
-    if (now - this.lastEmit >= 1000) { this.lastEmit = now; this.host.changed(); } // stats at most 1 Hz
+    this.emitStats();
     return true;
+  }
+
+  /**
+   * One audio analysis frame (Audio Sync only): loudness and band levels from real captured
+   * audio. Lights keep their selection order, so excluding one never reshuffles the others.
+   */
+  levels(token: unknown, generation: unknown, seq: unknown, input: unknown): boolean {
+    const admitted = this.admit('audio', token, generation, seq, () => validateLevels(input));
+    if (!admitted || !this.mapper) return false;
+    const members = [...this.members.values()];
+    const targets = this.mapper.step(admitted.value, members.length, this.settings, this.audio, admitted.dtS);
+    members.forEach((m, i) => { if (!m.excluded) this.offer(m, targets[i]!); });
+    this.emitStats();
+    return true;
+  }
+
+  /** Merges Audio Sync options; they apply from the next analysis frame. */
+  setAudio(input: unknown): void {
+    try { this.audio = validateAudioOptions(input, this.audio); }
+    catch (error) { throw new LumaError(message(error)); }
+    this.host.changed();
   }
 
   pause(): void {
@@ -188,16 +243,17 @@ export class SyncController {
     this.phase = 'paused';
     this.disarm();
     for (const m of this.members.values()) { m.smoothed = undefined; m.target = undefined; void this.sender?.remove(m.id); }
-    this.host.log('Screen Sync paused.');
+    this.mapper?.reset();
+    this.host.log(`${this.label} paused.`);
     this.host.changed();
   }
 
   resume(token: unknown): void {
-    if (this.phase !== 'paused' || token !== this.token) throw new LumaError('Screen Sync is not paused.', 409);
+    if (this.phase !== 'paused' || token !== this.token) throw new LumaError(`${this.label} is not paused.`, 409);
     this.phase = 'running';
     this.lastFrameAt = 0;
     this.arm(this.options.stallMs ?? 10_000, 'No frames arrived; capture stalled.');
-    this.host.log('Screen Sync resumed.');
+    this.host.log(`${this.label} resumed.`);
     this.host.changed();
   }
 
@@ -228,7 +284,7 @@ export class SyncController {
     if (!m) return;
     if (!m.excluded) {
       m.excluded = true;
-      this.host.log(`${m.name} left Screen Sync for manual control.`);
+      this.host.log(`${m.name} left ${this.label} for manual control.`);
       this.host.changed();
     }
     // Every manual write waits for the same barrier, including a second rapid one.
@@ -266,7 +322,7 @@ export class SyncController {
       this.phase = 'idle';
       this.lastStop = reason;
       this.stopping = undefined;
-      this.host.log(`Screen Sync stopped. ${reason}`);
+      this.host.log(`${this.label} stopped. ${reason}`);
       this.host.changed();
     })();
     return this.stopping;
@@ -290,8 +346,11 @@ export class SyncController {
       phase: this.phase,
       generation: this.generation,
       sourceName: this.active ? this.sourceName : undefined,
-      synthetic: this.options.demo,
+      synthetic: this.options.demo && this.kind === 'screen',
       captureSupported: this.options.captureSupported,
+      kind: this.kind,
+      audio: { ...this.audio },
+      audioSupport: this.options.audioSupport ?? { system: false, systemExperimental: false, input: false },
       lights: [...this.members.values()].map((m) => ({
         id: m.id, name: m.name, region: m.region, status: m.excluded ? 'excluded' as const : 'streaming' as const,
         ...(m.target && !m.excluded ? { requestedRGB: m.target.rgb, requestedBrightness: m.target.brightness } : {}),

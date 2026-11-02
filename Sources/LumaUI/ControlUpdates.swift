@@ -24,6 +24,7 @@ struct QueuedControl {
     let command: CapabilityCommand
     let coalescible: Bool
     var completion: CheckedContinuation<Void, any Error>?
+    var resumeOnAccept = false
     var key: ControlKey { .init(deviceID: deviceID, instance: command.instance) }
 }
 
@@ -34,6 +35,7 @@ extension LightDevice {
         case "brightness": brightness.map { .number(Double($0)) }
         case "colorRgb": rgb.map { .number(Double($0)) }
         case "colorTemperatureK": colorTemperature.map { .number(Double($0)) }
+        case "dreamViewToggle": dreamView.map { .number($0 ? 1 : 0) }
         default: nil
         }
     }
@@ -44,6 +46,7 @@ extension LightDevice {
         case "brightness": brightness = Int(n)
         case "colorRgb": rgb = Int(n); colorTemperature = 0
         case "colorTemperatureK": colorTemperature = Int(n)
+        case "dreamViewToggle": dreamView = n == 1
         default: break
         }
     }

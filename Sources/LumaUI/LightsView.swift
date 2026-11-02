@@ -93,12 +93,33 @@ struct LightsView: View {
     }
 
     private func powerButtons(for lights: [LightDevice], label: String) -> some View {
+        let lights = lights.filter { DeviceReadings.isLight(type: $0.deviceType) } // room actions never switch appliances
         let ids = lights.filter { $0.supports("powerSwitch") }.map(\.id)
+        let dimmable = lights.filter { $0.supports("brightness") }.map(\.id)
+        let white = lights.filter { $0.supports("colorTemperatureK") }.map(\.id)
         return HStack(spacing: 6) {
             Button { store.perform(.power(true), ids: ids) } label: { Label("All On", systemImage: "lightbulb.max") }
                 .help("Turn on \(label)").accessibilityLabel("Turn on \(label)")
             Button { store.perform(.power(false), ids: ids) } label: { Label("All Off", systemImage: "lightbulb.slash") }
                 .help("Turn off \(label)").accessibilityLabel("Turn off \(label)")
+            if !dimmable.isEmpty || !white.isEmpty {
+                Menu {
+                    if !dimmable.isEmpty {
+                        Section("Brightness") {
+                            ForEach([10, 25, 50, 75, 100], id: \.self) { level in Button("\(level)%") { store.perform(.brightness(level), ids: dimmable) } }
+                        }
+                    }
+                    if !white.isEmpty {
+                        // Each light's own range limits the value, as in the light's controls.
+                        Section("White") {
+                            Button("Warm 2700 K") { store.performWhite(2700, ids: white) }
+                            Button("Neutral 4000 K") { store.performWhite(4000, ids: white) }
+                            Button("Daylight 6500 K") { store.performWhite(6500, ids: white) }
+                        }
+                    }
+                } label: { Label("Adjust", systemImage: "slider.horizontal.3") }
+                    .fixedSize().help("Brightness and white for \(label)").accessibilityLabel("Adjust \(label)")
+            }
         }
         .labelStyle(.titleAndIcon)
         .fixedSize()

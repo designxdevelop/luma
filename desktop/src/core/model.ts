@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { Capability, CapabilityCommand, JSONValue, LightDevice, LightScene, SceneStep } from '../shared/types';
+import { isLight } from '../shared/devices';
 
 export class LumaError extends Error {
   constructor(message: string, readonly status = 400) { super(message); this.name = 'LumaError'; }
@@ -244,7 +245,8 @@ export function parseAction(body: unknown, devices: LightDevice[]): { deviceIDs:
   for (const key of Object.keys(body)) if (!allowed.has(key)) throw new LumaError(`Unknown action field: ${key}.`);
   const target = body.target;
   if (typeof target !== 'string' || target === '') throw new LumaError('target is required: all, a device ID, or room:Name.');
-  const selected = target === 'all' ? devices : target.startsWith('room:') ? devices.filter((d) => d.room === target.slice(5)) : devices.filter((d) => d.id === target);
+  // `all` and rooms mean lights: a heater or socket is only reachable by its own device ID.
+  const selected = target === 'all' ? devices.filter(isLight) : target.startsWith('room:') ? devices.filter((d) => isLight(d) && d.room === target.slice(5)) : devices.filter((d) => d.id === target);
   if (selected.length === 0 || selected.length > 100) throw new LumaError('Target must match 1–100 lights.');
   const commands: CapabilityCommand[] = [];
   if (body.power !== undefined) {

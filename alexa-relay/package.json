@@ -1,0 +1,10 @@
+{
+  "name": "luma-alexa-relay",
+  "private": true,
+  "type": "module",
+  "description": "Your own relay from an Alexa routine scene to a running Luma app. See docs/DOORBELL-ALERT.md.",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "deploy": "wrangler deploy"
+  }
+}

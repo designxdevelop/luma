@@ -5,7 +5,11 @@ public enum CommandValidation {
         guard device.supports(command.instance) else { throw LumaError.message("\(device.name) does not advertise \(command.instance). Connect cloud to load all capabilities.") }
         if let cap = device.capabilities.first(where: { $0.instance == command.instance }) {
             guard cap.type == command.type else { throw LumaError.message("Capability type does not match this device.") }
-            try validateValue(command.value, parameters: cap.parameters)
+            do { try validateValue(command.value, parameters: cap.parameters) }
+            catch where GoveeSceneOption.Kind(rawValue: command.instance) != nil {
+                // A scene removed in Govee Home (or a list that has changed since this was saved).
+                throw LumaError.message("\(device.name) no longer lists this Govee scene. Reload its scenes, then choose it again.")
+            }
         } else {
             let expected: String
             switch command.instance {

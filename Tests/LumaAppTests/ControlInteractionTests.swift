@@ -3,7 +3,7 @@ import Testing
 import LumaCore
 @testable import LumaUI
 
-private struct InteractionReply: Sendable {
+struct InteractionReply: Sendable {
     var body = #"{"code":200}"#
     var status = 200
     var held = false
@@ -14,7 +14,7 @@ private struct InteractionReply: Sendable {
 
 /// Each test has its own session ID. Gates hold actual URLSession responses, so
 /// assertions run at known network boundaries rather than guessed sleep times.
-private final class InteractionScript: @unchecked Sendable {
+final class InteractionScript: @unchecked Sendable {
     private let lock = NSLock()
     private var replies: [InteractionReply]
     private var requests: [URLRequest] = []
@@ -44,6 +44,7 @@ private final class InteractionScript: @unchecked Sendable {
         }
     }
     func release(_ index: Int) { lock.withLock { heldResponses.removeValue(forKey: index) }?() }
+    var paths: [String] { lock.withLock { requests.map { $0.url?.path ?? "" } } }
     var commands: [JSONValue] {
         lock.withLock {
             requests.filter { $0.url?.path.hasSuffix("/control") == true }.compactMap {
@@ -92,7 +93,7 @@ private final class InteractionProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-@MainActor private struct InteractionFixture {
+@MainActor struct InteractionFixture {
     let id = UUID().uuidString
     let script: InteractionScript
     let session: URLSession
@@ -262,5 +263,51 @@ private final class InteractionProtocol: URLProtocol, @unchecked Sendable {
         await fixture.waitUntilSettled()
         #expect(fixture.store.devices.first?.brightness == 100)
         #expect(fixture.store.notice == nil)
+    }
+}
+
+@MainActor struct DreamViewInteractionTests {
+    private func addTV(_ fixture: InteractionFixture, reported: Bool?) {
+        fixture.store.home.devices[0].capabilities.append(.init(type: "devices.capabilities.toggle", instance: "dreamViewToggle"))
+        fixture.store.home.devices[0].dreamView = reported
+    }
+
+    @Test(.timeLimit(.minutes(1))) func unreportedDreamViewDoesNotWaitForConfirmation() async throws {
+        let fixture = InteractionFixture([.init()])
+        defer { fixture.finish() }
+        addTV(fixture, reported: nil)
+        try await fixture.store.send(DreamView.command(on: true, for: fixture.store.home.devices[0]), to: "interaction-lamp")
+        #expect(fixture.store.controlStatus(for: "interaction-lamp") == nil)
+        #expect(fixture.store.home.devices[0].dreamView == nil)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func reportedDreamViewIsConfirmedByReadback() async throws {
+        let on = InteractionReply(body: #"{"code":200,"payload":{"device":"interaction-lamp","sku":"H6008","capabilities":[{"instance":"online","state":{"value":true}},{"instance":"dreamViewToggle","state":{"value":1}}]}}"#)
+        let fixture = InteractionFixture([.init(), on])
+        defer { fixture.finish() }
+        addTV(fixture, reported: false)
+        try await fixture.store.send(DreamView.command(on: true, for: fixture.store.home.devices[0]), to: "interaction-lamp")
+        await fixture.waitUntilSettled()
+        #expect(fixture.store.home.devices[0].dreamView == true)
+        #expect(fixture.script.commands.first?["instance"]?.string == "dreamViewToggle")
+    }
+}
+
+@MainActor struct GoveeSceneLoadingTests {
+    @Test(.timeLimit(.minutes(1))) func loadAllScenesFillsEachLightAndSkipsFailures() async throws {
+        let scenes = InteractionReply(body: #"{"code":200,"payload":{"device":"interaction-lamp","sku":"H6008","capabilities":[{"type":"devices.capabilities.dynamic_scene","instance":"lightScene","parameters":{"dataType":"ENUM","options":[{"name":"Sunrise","value":{"paramId":1,"id":2}},{"name":"Aurora","value":{"paramId":3,"id":4}}]}}]}}"#)
+        let fixture = InteractionFixture([scenes, .init(status: 500)])
+        defer { fixture.finish() }
+        let empty = JSONValue.object(["dataType": .string("ENUM"), "options": .array([])])
+        fixture.store.home.devices[0].capabilities.append(.init(type: "devices.capabilities.dynamic_scene", instance: "lightScene", parameters: empty))
+        fixture.store.home.devices.append(.init(id: "other", sku: "H6008", name: "Other", capabilities: [.init(type: "devices.capabilities.dynamic_scene", instance: "diyScene", parameters: empty)]))
+        fixture.store.home.devices.append(.init(id: "plain", sku: "H6008", name: "No scenes"))
+        #expect(fixture.store.sceneCapableLights.map(\.id) == ["interaction-lamp", "other"])
+        await fixture.store.loadAllDeviceScenes(spacing: .zero)
+        #expect(fixture.store.loadedSceneCount == 2)
+        #expect(fixture.store.sceneLoadProgress == nil)
+        let paths = fixture.script.paths
+        #expect(paths.count == 2 && paths[0].hasSuffix("/device/scenes") && paths[1].hasSuffix("/device/diy-scenes"))
+        #expect(fixture.store.activity.first?.message.contains("1 of 2 lights") == true && fixture.store.activity.first?.message.contains("Other") == true)
     }
 }

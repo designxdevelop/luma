@@ -335,25 +335,38 @@ public struct ScreenSyncMixer: Sendable {
         var next = target
         for region in ScreenRegion.allCases { next[region] = ScreenColorMath.smooth(smoothed?[region], target[region], smoothing: settings.smoothing, dt: dt) }
         smoothed = next
-        var updates: [StreamUpdate] = []
-        for (id, region) in lights.sorted(by: { $0.key < $1.key }) {
-            let wanted = ScreenColorMath.target(next[region], brightnessCap: settings.brightnessCap)
-            let lane = lanes[id]
-            if let lane, now < lane.nextAt {
-                if ScreenColorMath.exceedsThreshold(lane.sent, wanted, threshold: settings.threshold) {
-                    if let pending = lane.pending, pending != wanted { superseded += 1 }
-                    lanes[id]?.pending = wanted
-                }
-                continue
-            }
-            // A lowered cap is a hard limit, even when the adjustment is
-            // smaller than the color-change dead band. Keep the rate limit.
-            let exceedsCap = lane.map { $0.sent.brightness > Int(settings.brightnessCap.rounded()) } ?? false
-            guard exceedsCap || ScreenColorMath.exceedsThreshold(lane?.sent, wanted, threshold: settings.threshold) else { continue }
-            updates.append(.init(deviceID: id, target: wanted, sendsColor: lane?.sent.rgb != wanted.rgb, sendsBrightness: lane?.sent.brightness != wanted.brightness))
-            lanes[id] = (wanted, now + 1 / settings.updateHz, nil)
+        return lights.sorted(by: { $0.key < $1.key }).compactMap { id, region in
+            route(id, ScreenColorMath.target(next[region], brightnessCap: settings.brightnessCap), now: now)
         }
-        return updates
+    }
+
+    /// Audio Sync: ready-made targets per light (already smoothed and capped by `AudioMapper`),
+    /// through the same lanes: rate cap, dead band, lowered-cap override, latest-only.
+    public mutating func tick(now: Double, targets: [String: LightTarget]) -> [StreamUpdate] {
+        lastTick = now
+        let cap = max(1, Int(settings.brightnessCap.rounded()))
+        return targets.sorted(by: { $0.key < $1.key }).compactMap { id, target in
+            var wanted = target
+            wanted.brightness = max(1, min(cap, wanted.brightness))
+            return route(id, wanted, now: now)
+        }
+    }
+
+    private mutating func route(_ id: String, _ wanted: LightTarget, now: Double) -> StreamUpdate? {
+        let lane = lanes[id]
+        if let lane, now < lane.nextAt {
+            if ScreenColorMath.exceedsThreshold(lane.sent, wanted, threshold: settings.threshold) {
+                if let pending = lane.pending, pending != wanted { superseded += 1 }
+                lanes[id]?.pending = wanted
+            }
+            return nil
+        }
+        // A lowered cap is a hard limit, even when the adjustment is
+        // smaller than the color-change dead band. Keep the rate limit.
+        let exceedsCap = lane.map { $0.sent.brightness > Int(settings.brightnessCap.rounded()) } ?? false
+        guard exceedsCap || ScreenColorMath.exceedsThreshold(lane?.sent, wanted, threshold: settings.threshold) else { return nil }
+        lanes[id] = (wanted, now + 1 / settings.updateHz, nil)
+        return .init(deviceID: id, target: wanted, sendsColor: lane?.sent.rgb != wanted.rgb, sendsBrightness: lane?.sent.brightness != wanted.brightness)
     }
 
     /// Drop a light's lane so nothing further is computed for it until it returns.
@@ -366,6 +379,7 @@ extension LightDevice {
     /// Only lights with local (LAN) control that are online and on qualify;
     /// Screen Sync never powers a light on or off.
     public var screenSyncIssue: String? {
+        if !DeviceReadings.isLight(type: deviceType) { return "Not a light" }
         if isDemo { return nil }
         if ip == nil { return "Not found on Wi-Fi. Screen Sync needs local (LAN) control." }
         if online == false { return "Offline" }

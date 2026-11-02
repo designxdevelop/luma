@@ -49,11 +49,14 @@ final class ScreenSourcePicker: NSObject, SCContentSharingPickerObserver {
     static let shared = ScreenSourcePicker()
     private var completion: ((Result) -> Void)?
     private var observing = false
+    private var audio = false
 
-    func present(_ completion: @escaping (Result) -> Void) {
+    /// `audio` picks a display for Audio Sync: a display filter includes every app's sound.
+    func present(audio: Bool = false, _ completion: @escaping (Result) -> Void) {
         let picker = SCContentSharingPicker.shared
         var configuration = SCContentSharingPickerConfiguration()
-        configuration.allowedPickerModes = [.singleDisplay, .singleWindow]
+        configuration.allowedPickerModes = audio ? [.singleDisplay] : [.singleDisplay, .singleWindow]
+        self.audio = audio
         configuration.allowsChangingSelectedContent = false
         if let id = Bundle.main.bundleIdentifier { configuration.excludedBundleIDs = [id] }
         picker.defaultConfiguration = configuration
@@ -82,7 +85,7 @@ final class ScreenSourcePicker: NSObject, SCContentSharingPickerObserver {
     }
     nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didUpdateWith filter: SCContentFilter, for stream: SCStream?) {
         nonisolated(unsafe) let filter = filter
-        Task { @MainActor in self.finish(.picked(.system(filter))) }
+        Task { @MainActor in self.finish(.picked(self.audio ? .systemAudio(filter) : .system(filter))) }
     }
     nonisolated func contentSharingPickerStartDidFailWithError(_ error: any Error) {
         let text = error.localizedDescription

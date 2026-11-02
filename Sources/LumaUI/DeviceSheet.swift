@@ -13,7 +13,6 @@ struct DeviceSheet: View {
     @State private var json = "1"
     @State private var effectMessage: (text: String, isError: Bool)?
     @State private var loadingScenes = false
-    @State private var loadingDIY = false
     @State private var sending = false
     @State private var refreshing = false
     @State private var showAdvanced = false
@@ -25,7 +24,10 @@ struct DeviceSheet: View {
 
     var device: LightDevice? { store.devices.first { $0.id == deviceID } }
     /// Features beyond the four basic controls, which live on the Light tab.
-    private func features(_ device: LightDevice) -> [Capability] { device.capabilities.filter { !basicInstances.contains($0.instance) } }
+    /// Scene lists have their own browser above, so they aren't repeated here.
+    private func features(_ device: LightDevice) -> [Capability] {
+        device.capabilities.filter { !basicInstances.contains($0.instance) && GoveeSceneOption.Kind(rawValue: $0.instance) == nil }
+    }
     private var cap: Capability? { device.flatMap { features($0).first { $0.instance == instance } } }
 
     var body: some View {
@@ -89,6 +91,8 @@ struct DeviceSheet: View {
     // MARK: Light tab
 
     @ViewBuilder private func lightTab(_ device: LightDevice) -> some View {
+        DeviceReadingsCard(readings: store.readings[device.id]?.list ?? [], readAt: store.readings[device.id]?.at)
+        if DreamView.capability(of: device) != nil { DreamViewCard(store: store, device: device) }
         Card { BrightnessSlider(store: store, device: device) }
         ColorCard(store: store, device: device)
         WhiteCard(store: store, device: device)
@@ -97,22 +101,21 @@ struct DeviceSheet: View {
     // MARK: Effects tab
 
     @ViewBuilder private func effectsTab(_ device: LightDevice) -> some View {
-        Card {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionHeader("Effect lists")
-                Text("Download the scenes and DIY scenes available for this light from your Govee account.").font(.system(size: 12)).foregroundStyle(.secondary)
-                HStack(spacing: 8) {
-                    loadButton("Load Scenes", loading: loadingScenes) { loadingScenes = true; await store.loadDeviceScenes(device, diy: false); loadingScenes = false }
-                    loadButton("Load DIY Scenes", loading: loadingDIY) { loadingDIY = true; await store.loadDeviceScenes(device, diy: true); loadingDIY = false }
-                    Spacer()
+        if GoveeSceneLibrary.advertisesScenes(device) {
+            // Built-in, DIY, and snapshot scenes: searchable, one tap applies.
+            Card { GoveeSceneList(store: store, lights: [device], target: device.name) }
+                // Built-in scenes download once on first visit when the model has them but none are loaded.
+                .task(id: device.id) {
+                    let empty = device.capabilities.first { $0.instance == "lightScene" }?.parameters?["options"]?.array?.isEmpty ?? true
+                    guard store.cloudConnected, !device.isDemo, device.supports("lightScene"), empty, !loadingScenes else { return }
+                    loadingScenes = true; await store.loadDeviceScenes(device, diy: false); loadingScenes = false
                 }
-                if !store.cloudConnected { Text("Connect your Govee account in Settings to load effect lists.").font(.system(size: 11)).foregroundStyle(.secondary) }
-            }
         }
+        SegmentPainterCard(store: store, device: device)
         let list = features(device)
         if list.isEmpty {
             Card {
-                EmptyState(icon: "wand.and.stars", title: "No effects available yet",
+                EmptyState(icon: "wand.and.stars", title: GoveeSceneLibrary.advertisesScenes(device) ? "No other effects" : "No effects available yet",
                            message: "Effects, music modes, and segments come from your Govee account — connect it in Settings. Some models only support basic control on your local network.")
             }
         } else {
@@ -154,14 +157,6 @@ struct DeviceSheet: View {
         }
         Text("Only features this model reports are shown. Some Govee app features aren't available through Govee's API.")
             .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func loadButton(_ title: String, loading: Bool, action: @escaping () async -> Void) -> some View {
-        Button { Task { await action() } } label: {
-            HStack(spacing: 6) { if loading { ProgressView().controlSize(.small) }; Text(title) }
-        }
-        .disabled(!store.cloudConnected)
-        .help(store.cloudConnected ? "Download from your Govee account" : "Connect your Govee account in Settings first")
     }
 
     // MARK: Details tab
@@ -218,6 +213,8 @@ struct DeviceSheet: View {
                 HStack(spacing: 6) { if refreshing { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.clockwise") }; Text("Refresh State") }
             }.help("Ask the light for its current state")
             Spacer()
+            if !device.isDemo { Button("Copy Compatibility Report") { copyToPasteboard(CompatibilityReport.text(for: [device], app: "Luma \(Links.version)")) }
+                .help("Copy this model's features for an issue report. No device ID, name, or network address is included.") }
         }
     }
 
@@ -281,7 +278,192 @@ struct DeviceSheet: View {
 
 // MARK: - Color
 
-private let basicInstances = ["powerSwitch", "brightness", "colorRgb", "colorTemperatureK"]
+/// DreamView has its own card on the Light tab, so it is not repeated as a generic feature.
+private let basicInstances = ["powerSwitch", "brightness", "colorRgb", "colorTemperatureK", DreamView.instance]
+
+// MARK: - DreamView
+
+/// Starts or stops the DreamView group set up in Govee Home through Govee's
+/// documented cloud toggle. Members and video settings stay in Govee Home:
+/// the cloud API cannot read or change them.
+private struct DreamViewCard: View {
+    let store: HomeStore
+    let device: LightDevice
+    @State private var sending: Bool?
+    @State private var message: (text: String, isError: Bool)?
+
+    private var available: Bool { device.isDemo || store.cloudConnected }
+    private var stateText: String {
+device.dreamView.map { $0 ? "On" : "Off" } ?? "Not reported"
+    }
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 12) {
+                SectionHeader(title: "DreamView TV sync", detail: nil) {
+                    Text(stateText).font(.system(size: 12)).foregroundStyle(.secondary)
+                        .accessibilityLabel("DreamView sync state: \(stateText)")
+                }
+                Text("Starts or stops the DreamView group you set up in Govee Home, so its lights follow this backlight's camera.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    syncButton(on: true).buttonStyle(.borderedProminent)
+                    syncButton(on: false)
+                    Spacer()
+                }.disabled(!available || sending != nil)
+                Button("Save Movie Scene") { saveMovieScene() }
+                    .disabled(!available)
+                    .help("Save a scene that turns this light on, then starts DreamView sync")
+                if let message { InlineMessage(text: message.text, isError: message.isError) }
+                if !available {
+                    Text("Connect your Govee account in Settings. DreamView is only available through Govee's cloud.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                DreamViewPartners(store: store, device: device)
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Set up in Govee Home", systemImage: "info.circle").font(.system(size: 11, weight: .medium))
+                    Text("Movie or Game, All or Part, and saturation are set in Govee Home. Govee accepting a command doesn't confirm the lights are syncing.")
+                    if device.supports("movieMode") {
+                        Text("Movie mode under Effects is this light's own video effect, not DreamView, and choosing it may stop a running group.")
+                    }
+                }
+                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.well, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+    }
+
+    private func syncButton(on: Bool) -> some View {
+        Button { send(on: on) } label: {
+            HStack(spacing: 6) { if sending == on { ProgressView().controlSize(.small) }; Text(on ? "Start Sync" : "Stop Sync") }
+        }.help(on ? "Start the DreamView group set up in Govee Home" : "Stop DreamView sync")
+    }
+
+    private func send(on: Bool) {
+        sending = on
+        Task {
+            do {
+                try await store.send(try DreamView.command(on: on, for: device), to: device.id)
+                let verb = on ? "Start Sync" : "Stop Sync"
+                message = (device.isDemo ? "Sample light updated: \(verb)" : "Govee accepted \(verb)", false)
+            } catch { message = (error.localizedDescription, true) }
+            sending = nil
+        }
+    }
+
+    private func saveMovieScene() {
+        do { try store.saveScene(try DreamView.movieScene(for: device)); message = ("Saved to Scenes", false) }
+        catch { message = (error.localizedDescription, true) }
+    }
+}
+
+/// Partner lights, kept in two clearly separate parts: what Govee Home reports
+/// for the group (name and light count; members aren't shared) and a local Luma
+/// draft that is never sent. Apply stays disabled with the reason.
+private struct DreamViewPartners: View {
+    let store: HomeStore
+    let device: LightDevice
+    @State private var draft = DreamViewDraft()
+    @State private var checking = false
+    @State private var checkError: String?
+
+    private var candidates: [LightDevice] { store.devices.filter { $0.id != device.id && $0.isDemo == device.isDemo } }
+    private var limit: Int? { DreamViewDraft.memberLimit(sku: device.sku) }
+    private var group: GoveeHomeImport.HomeGroup? { store.dreamViewGroup(for: device.id) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Label("On your lights", systemImage: "checkmark.seal").font(.system(size: 12, weight: .medium))
+                if let group {
+                    Text(group.name).font(.system(size: 12, weight: .semibold))
+                    Text(groupText(group)).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(store.accountGroups.isEmpty
+                         ? (store.accountSignedIn ? "Check Govee Home to show the DreamView group set up for this light." : "Sign in to Govee Home in Settings to show the DreamView group set up for this light.")
+                         : "No imported DreamView group lists this light as its main light.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if store.accountSignedIn && !device.isDemo {
+                    Button { check() } label: {
+                        HStack(spacing: 6) { if checking { ProgressView().controlSize(.small) }; Text(store.accountGroups.isEmpty ? "Check Govee Home" : "Check Again") }
+                    }.controlSize(.small).disabled(checking)
+                }
+                if let checkError { InlineMessage(text: checkError) }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("Luma draft", systemImage: "pencil.and.list.clipboard").font(.system(size: 12, weight: .medium))
+                    Text("Not sent to lights").font(.system(size: 10, weight: .semibold)).padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.18), in: Capsule()).foregroundStyle(.orange)
+                    Spacer()
+                    Text("\(draft.members.count)/\(limit.map(String.init) ?? "?") members").font(.system(size: 11)).foregroundStyle(.secondary)
+                        .help(limit == nil ? "This model's member limit isn't known" : "Member limit for \(device.sku)")
+                }
+                if candidates.isEmpty { Text("No other lights in Luma yet.").font(.system(size: 11)).foregroundStyle(.secondary) }
+                ForEach(candidates) { light in memberRow(light) }
+                Button("Apply to Lights") {}.disabled(true).help(DreamViewDraft.applyBlocker)
+                Text(DreamViewDraft.applyBlocker).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.orange.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+        }
+        .onAppear { draft = store.dreamViewDraft(for: device.id) }
+    }
+
+    private func groupText(_ group: GoveeHomeImport.HomeGroup) -> String {
+        let count = group.reportedLightCount.map { "Govee Home reports \($0) light\($0 == 1 ? "" : "s") in this group" } ?? "Light count not reported"
+        return count + (group.enabled ? "" : " · turned off in Govee Home") + ". Luma can't read which lights are in it, or their screen areas, yet."
+    }
+    private func check() {
+        checking = true; checkError = nil
+        Task {
+            do { try await store.refreshAccountGroups() } catch { checkError = error.localizedDescription }
+            checking = false
+        }
+    }
+
+    @ViewBuilder private func memberRow(_ light: LightDevice) -> some View {
+        let index = draft.members.firstIndex { $0.deviceID == light.id }
+        let entry = store.accountEntries[light.id]
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: Binding(get: { index != nil }, set: { toggle(light, on: $0) })) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(light.name).font(.system(size: 12, weight: .medium))
+                    Text(entry == nil ? "\(light.sku) · Bluetooth identity unknown" : (entry?.bleName ?? entry?.bleAddress) != nil ? "\(light.sku) · Bluetooth identity from Govee Home" : "\(light.sku) · no Bluetooth identity in Govee Home")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            }
+            .disabled(index == nil && limit.map { draft.members.count >= $0 } == true)
+            if let index {
+                HStack(spacing: 3) {
+                    ForEach(Array(DreamViewDraft.areas), id: \.self) { area in
+                        let on = draft.members[index].areas.contains(area)
+                        Button("\(area)") { setArea(area, on: !on, at: index) }
+                            .buttonStyle(.plain).font(.system(size: 10, weight: .medium, design: .rounded))
+                            .frame(width: 22, height: 20)
+                            .background(on ? Color.lumaAccent : Color.well, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                            .foregroundStyle(on ? Color.white : Color.primary)
+                            .accessibilityLabel("Screen area \(area) for \(light.name)").accessibilityValue(on ? "On" : "Off")
+                    }
+                }.padding(.leading, 20)
+                .help("Screen areas 1–10 use ha-govee-led-ble's numbering; their positions on screen aren't verified")
+            }
+        }
+    }
+
+    private func toggle(_ light: LightDevice, on: Bool) {
+        if on { draft.members.append(.init(deviceID: light.id, areas: [1])) } else { draft.members.removeAll { $0.deviceID == light.id } }
+        store.saveDreamViewDraft(draft, for: device.id)
+    }
+    private func setArea(_ area: Int, on: Bool, at index: Int) {
+        var areas = Set(draft.members[index].areas)
+        if on { areas.insert(area) } else if areas.count > 1 { areas.remove(area) }
+        draft.members[index].areas = areas.sorted()
+        store.saveDreamViewDraft(draft, for: device.id)
+    }
+}
 
 private struct ColorCard: View {
     let store: HomeStore

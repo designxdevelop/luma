@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import type { CapabilityCommand, LightDevice } from '../shared/types';
+import type { Capability, CapabilityCommand, LightDevice } from '../shared/types';
 import type { FetchLike, HttpLike } from '../core/cloud';
 import { GoveeLan, type UdpSocketLike } from '../core/lan';
 import { LumaError, brightness, kelvin, power, rgb } from '../core/model';
@@ -98,6 +98,9 @@ class FakeGovee {
   ]);
   /** Set by a test to hold the device list (a slow connect/reconnect). */
   devicesGate?: Promise<void>;
+  /** Extra device-list rows (appliances, sensors) and their raw state capabilities. */
+  extra: any[] = [];
+  extraState = new Map<string, any[]>();
   private gate?: Promise<void>;
   private open?: () => void;
 
@@ -118,10 +121,13 @@ class FakeGovee {
       return reply({ code: 200, message: 'success', data: [
         { device: A, sku: 'H6008', deviceName: 'Desk lamp', type: 'devices.types.light', capabilities: capsFor([1000, 10000]) },
         { device: B, sku: 'H6159', deviceName: 'Shelf strip', type: 'devices.types.light', capabilities: capsFor([2000, 9000]) },
+        ...this.extra,
       ] });
     }
     const id: string = body?.payload?.device;
     const sku: string = body?.payload?.sku;
+    if (path === 'device/state' && this.extraState.has(id)) return reply({ code: 200, payload: { sku, device: id, capabilities: this.extraState.get(id) } });
+    if (path === 'device/control' && this.extraState.has(id)) return reply({ code: 200, msg: 'success' });
     const st = this.state.get(id);
     if (!st) return reply({ code: 400, message: 'unknown device' });
     if (path === 'device/state') {
@@ -212,7 +218,9 @@ test('demo: sample lights, every real-world feature rejects, controls confirm im
   t.after(() => home.shutdown());
   const snap = home.snapshot();
   assert.equal(snap.demo, true);
-  assert.equal(snap.devices.length, 5);
+  assert.equal(snap.devices.length, 7);
+  assert.equal(snap.devices.filter((d) => d.deviceType === undefined).length, 6, 'one demo device is a sensor, not a light');
+  assert.ok(snap.readings['demo-thermo']?.length);
   assert.ok(snap.scenes.length >= 1);
   assert.equal(snap.webhook.available, false);
   assert.equal(snap.canSave, false);
@@ -837,3 +845,230 @@ for (const [name, content] of [['garbage', '\u0000not json {{{ ' + KEY.slice(0, 
     assert.deepEqual(readdirSync(f.dir), ['home.json'], 'no temp files left behind');
   });
 }
+
+// ---------- parity: rename, backup, restore-before-scene, rooms, segments, non-lights ----------
+
+test('a Luma rename survives a cloud reconnect and is saved as customName', async (t) => {
+  const f = await connected(t);
+  f.home.renameDevice(A, 'Reading lamp');
+  await f.home.reconnect();
+  assert.equal(confirmed(f, A).name, 'Reading lamp');
+  assert.equal(saved(f).devices.find((d: LightDevice) => d.id === A).customName, 'Reading lamp');
+  const reloaded = f.build();
+  assert.equal(reloaded.confirmedDevices().find((d) => d.id === A)?.name, 'Reading lamp');
+});
+
+test('backup exports the native format without addresses or secrets; restore saves a safety copy first', async (t) => {
+  const f = await connected(t);
+  await discoverLan(f, A, A_IP);
+  f.home.assignRoom(A, 'Office');
+  f.home.saveScene(sceneInput('legacy-id', [{ id: 's1', deviceID: A, command: power(true) }]));
+  f.home.saveSchedule({ id: 'sch-1', sceneID: 'legacy-id', hour: 7, minute: 30, weekdays: [2, 3], enabled: true });
+  const json = f.home.exportBackup();
+  const backup = JSON.parse(json);
+  assert.equal(backup.format, 'luma-home-backup');
+  assert.match(backup.exportedAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/, 'no fractional seconds for Swift .iso8601');
+  assert.match(backup.scenes[0].id, UUID, 'legacy IDs are remapped to UUIDs');
+  assert.equal(backup.schedules[0].sceneID, backup.scenes[0].id, 'schedules follow the remapped scene');
+  assert.equal(backup.scenes[0].symbol, 'sun.max');
+  assert.ok(!json.includes(A_IP) && !json.includes(KEY) && !json.includes('webhook'));
+
+  f.home.deleteScene('legacy-id');
+  f.home.assignRoom(A, 'Garage');
+  f.home.persistNow();
+  const result = f.home.restoreBackup(json);
+  assert.deepEqual(result, { scenes: 1, schedules: 1, lightsUpdated: 2, lightsNotFound: 0, scenesWithMissingLights: 0 });
+  assert.equal(confirmed(f, A).room, 'Office');
+  assert.equal(f.home.scenes()[0]!.icon, 'sun');
+  const safety = JSON.parse(readFileSync(join(f.dir, 'home-before-restore.json'), 'utf8'));
+  assert.equal(safety.devices.find((d: LightDevice) => d.id === A).room, 'Garage');
+  assert.equal(saved(f).scenes.length, 1);
+});
+
+test('restore keeps scenes for lights not connected yet, rejects foreign files, and refuses during a scene', async (t) => {
+  const f = await connected(t);
+  const native = JSON.stringify({ format: 'luma-home-backup', version: 1, exportedAt: '2026-11-02T10:00:00Z',
+    scenes: [{ id: 'C1D2E3F4-0000-4000-8000-000000000001', name: 'Night', symbol: 'moon.stars', steps: [
+      { id: 'C1D2E3F4-0000-4000-8000-000000000002', deviceID: 'NOT-HERE', command: { type: T.onOff, instance: 'powerSwitch', value: 0 }, delayMilliseconds: 0 }] }],
+    schedules: [{ id: 'C1D2E3F4-0000-4000-8000-000000000003', sceneID: 'C1D2E3F4-0000-4000-8000-000000000001', hour: 22, minute: 0, weekdays: [1, 2, 3, 4, 5, 6, 7], enabled: true },
+      { id: 'C1D2E3F4-0000-4000-8000-000000000004', sceneID: 'GONE', hour: 1, minute: 0, weekdays: [1], enabled: true }],
+    lights: [{ id: A, sku: 'h6008', customName: 'Bedside', room: 'Bedroom' }, { id: 'X', sku: 'H1', room: 'Attic' }],
+    dreamViewDrafts: {} });
+  const result = f.home.restoreBackup(native);
+  assert.deepEqual(result, { scenes: 1, schedules: 1, lightsUpdated: 1, lightsNotFound: 1, scenesWithMissingLights: 1 });
+  assert.equal(confirmed(f, A).name, 'Bedside');
+  assert.equal(f.home.scenes()[0]!.icon, 'moon');
+  for (const bad of ['{}', 'nope', JSON.stringify({ format: 'luma-home-backup', version: 2, scenes: [], schedules: [], lights: [] })]) {
+    assert.throws(() => f.home.restoreBackup(bad), LumaError);
+  }
+  assert.equal(f.home.scenes().length, 1, 'a rejected file changes nothing');
+  f.govee.hold();
+  f.home.saveScene(quickScene('run'));
+  f.home.runSavedScene('run');
+  assert.throws(() => f.home.restoreBackup(native), /Stop the running scene/);
+});
+
+test('restore lights puts the last scene\'s lights back to their confirmed state, one level', async (t) => {
+  const f = await connected(t);
+  assert.equal(f.home.snapshot().restorePoint, undefined);
+  f.home.saveScene(sceneInput('dim', [{ id: 's1', deviceID: A, command: brightness(5) }, { id: 's2', deviceID: A, command: rgb(0xff0000) }]));
+  f.home.runSavedScene('dim');
+  assert.equal(f.home.snapshot().restorePoint, 'Before Scene dim');
+  await until(() => f.govee.state.get(A)!.rgb === 0xff0000, 'scene applied');
+  await until(() => !f.home.snapshot().runningSceneID, 'scene finished');
+  f.home.restoreBeforeScene();
+  assert.equal(f.home.snapshot().restorePoint, undefined, 'restoring does not save a new point');
+  await until(() => f.govee.state.get(A)!.brightness === 40 && f.govee.state.get(A)!.rgb === 0x112233, 'lights restored');
+  assert.throws(() => f.home.restoreBeforeScene(), /nothing to restore/);
+});
+
+test('room white and brightness clamp to each light, skip appliances, and never touch other rooms', async (t) => {
+  const f = fixture(t);
+  f.govee.extra = [{ device: 'HEAT-1', sku: 'H7130', deviceName: 'Heater', type: 'devices.types.heater', capabilities: [
+    { type: T.onOff, instance: 'powerSwitch' }, { type: T.range, instance: 'brightness', parameters: { dataType: 'INTEGER', range: { min: 1, max: 100 } } }] }];
+  f.govee.extraState.set('HEAT-1', [{ type: 'devices.capabilities.online', instance: 'online', state: { value: true } }]);
+  await f.home.connect(KEY);
+  for (const id of [A, B, 'HEAT-1']) f.home.assignRoom(id, 'Den');
+  await f.home.roomAction('Den', { kelvin: 1500 });
+  await until(() => f.govee.controls().length === 2, 'two white writes');
+  assert.deepEqual(f.govee.controls().map((c) => [c.id, c.value]).sort(), [[A, 1500], [B, 2000]]);
+  await f.home.roomAction('Den', { brightness: 30 });
+  await until(() => f.govee.controls().length === 4, 'two brightness writes');
+  assert.ok(!f.govee.controls().some((c) => c.id === 'HEAT-1'), 'the heater is never part of a room action');
+  assert.deepEqual(f.home.roomDeviceIDs().sort(), [A, B].sort(), 'tray All on/off skips appliances');
+  await assert.rejects(f.home.roomAction('Den', { brightness: 0 }), LumaError);
+  await assert.rejects(f.home.roomAction('Den', { brightness: 30, kelvin: 3000 }), LumaError);
+  await assert.rejects(f.home.roomAction('Nowhere', { brightness: 30 }), /No lights in Nowhere/);
+});
+
+test('sensor readings come from cloud state, stay in memory, and the device is persisted with its type', async (t) => {
+  const f = fixture(t);
+  f.govee.extra = [{ device: 'TH-1', sku: 'H5179', deviceName: 'Nursery', type: 'devices.types.thermometer', capabilities: [
+    { type: 'devices.capabilities.property', instance: 'sensorTemperature', parameters: { dataType: 'INTEGER', unit: 'unit.temperature.celsius' } },
+    { type: 'devices.capabilities.property', instance: 'sensorHumidity', parameters: { dataType: 'INTEGER', unit: 'unit.percent' } }] }];
+  f.govee.extraState.set('TH-1', [
+    { type: 'devices.capabilities.online', instance: 'online', state: { value: true } },
+    { type: 'devices.capabilities.property', instance: 'sensorTemperature', state: { value: 21.46 } },
+    { type: 'devices.capabilities.property', instance: 'sensorHumidity', state: { value: 48 } }]);
+  await f.home.connect(KEY);
+  await until(() => (f.home.snapshot().readings['TH-1'] ?? []).length === 2, 'readings');
+  assert.deepEqual(f.home.snapshot().readings['TH-1']!.map((r) => `${r.label}: ${r.text}`), ['Temperature: 21.46 °C', 'Humidity: 48%']);
+  const file = saved(f);
+  assert.equal(file.devices.find((d: LightDevice) => d.id === 'TH-1').deviceType, 'devices.types.thermometer');
+  assert.ok(!JSON.stringify(file).includes('21.46'), 'readings are never persisted');
+  f.govee.extraState.set('TH-1', [{ type: 'devices.capabilities.online', instance: 'online', state: { value: false } }]);
+  await f.home.refresh('TH-1');
+  assert.equal(f.home.snapshot().readings['TH-1'], undefined, 'offline values are historical, so they are dropped');
+});
+
+test('controlBatch sends each segment group in order, uncoalesced, after validating all of them', async (t) => {
+  const f = await connected(t);
+  const segCap: Capability = { type: "devices.capabilities.segment_color_setting", instance: "segmentedColorRgb", parameters: { dataType: "STRUCT", fields: [
+    { fieldName: 'segment', dataType: 'Array', elementType: 'INTEGER', elementRange: { min: 0, max: 9 }, size: { min: 1, max: 10 }, required: true },
+    { fieldName: 'rgb', dataType: 'INTEGER', range: { min: 0, max: 16777215 }, required: true }] } };
+  (f.home as unknown as { home: { devices: LightDevice[] } }).home.devices.find((d) => d.id === A)!.capabilities.push(segCap);
+  const cmd = (segment: number[], value: number): CapabilityCommand => ({ type: segCap.type, instance: segCap.instance, value: { segment, rgb: value } });
+  await assert.rejects(f.home.controlBatch(A, [cmd([0], 1), cmd([10], 2)]), LumaError);
+  assert.equal(f.govee.controls().length, 0, 'one invalid command sends nothing');
+  await f.home.controlBatch(A, [cmd([0, 1], 0xff0000), cmd([2, 3], 0x00ff00), cmd([4], 0x0000ff)]);
+  await until(() => f.govee.controls().length === 3, 'three sends');
+  assert.deepEqual(f.govee.controls().map((c) => (c.value as { rgb: number }).rgb), [0xff0000, 0x00ff00, 0x0000ff]);
+  await assert.rejects(f.home.controlBatch(A, []), LumaError);
+});
+
+test('compatibility report lists models and features, never names, IDs, rooms or addresses', async (t) => {
+  const f = await connected(t);
+  await discoverLan(f, A, A_IP);
+  f.home.renameDevice(A, 'Secret Name');
+  const text = f.home.compatibilityReport();
+  assert.match(text, /H6008 · cloud \+ LAN/);
+  for (const leak of [A, B, A_IP, 'Secret Name', 'Desk lamp', 'Unassigned']) assert.ok(!text.includes(leak), leak);
+});
+
+// ---------- Govee Home account (read-only) ----------
+
+function fakeAccount(opts: { expire?: boolean; failGroups?: boolean } = {}) {
+  const calls: Array<{ url: string; method: string; headers: Record<string, string>; body?: any; redirect?: string }> = [];
+  const fetch: FetchLike = async (url, init) => {
+    calls.push({ url, method: init.method, headers: init.headers, body: init.body ? JSON.parse(init.body) : undefined, redirect: init.redirect });
+    const path = url.replace('https://app2.govee.com/', '');
+    const json = (body: unknown, status = 200) => reply(body, status);
+    if (path === 'account/rest/account/v2/login') {
+      const body = JSON.parse(init.body!);
+      return body.code === '123456' ? json({ status: 200, client: { token: 'home-token-xyz', refreshToken: 'r', tokenExpireCycle: 1 } }) : json({ status: 454, message: 'need code' });
+    }
+    if (path === 'account/rest/account/v1/verification') return json({ status: 200 });
+    if (opts.expire) return json({}, 401);
+    if (path === 'bff-app/v1/device/list') return json({ status: 200, data: { groups: [{ groupId: 7, groupName: 'Living Room' }], devices: [
+      { device: A.toLowerCase(), sku: 'H6008', deviceName: 'Desk lamp', groupId: 7, secretCode: 'never-read', versionSoft: '1.02.03' },
+      { device: B, sku: 'H6159', deviceName: 'Shelf strip' },
+      { device: 'ZZ', sku: 'H6097', deviceName: 'TV', groupId: 7 }] } });
+    if (path.startsWith('bff-app/v1/general-control/list')) return opts.failGroups ? json({}, 500) : json({ status: 200, data: { list: [
+      { groupId: 99, name: 'Bedroom Dream View', type: 10, sceneFeastId: 5, enable: 1, deviceCount: 3, mainDevice: { device: 'ZZ', sku: 'H6097' } }] } });
+    if (path === 'bff-app/v1/ecology/resource/automations') return json({ status: 200, data: { autoExecs: [
+      { groupId: 1, name: 'Wake up', enable: 1, schedule: { times: [{ hour: 7, minute: 0 }], repeat: [1, 2, 3, 4, 5, 6, 7], skus: [{ sku: 'H6008', deviceName: 'Desk lamp', isFeast: 0 }] } },
+      { groupId: 2, name: 'Off', enable: 0, schedule: { times: [{ hour: 7, minute: 0 }], skus: [{ sku: 'H6008', deviceName: 'Desk lamp' }] } }] } });
+    return json({}, 404);
+  };
+  return { fetch, calls };
+}
+
+test('Govee Home sign-in: code step, encrypted token only, room plan, groups, automations and schedule conflicts', async (t) => {
+  const account = fakeAccount();
+  const f = fixture(t);
+  const home = new Home({ demo: false, version: 't', storage: new HomeStorage(f.dir), secrets: f.secrets,
+    cloudOptions: { fetch: f.govee.fetch, sleep: async () => {}, now: Date.now }, accountFetch: account.fetch });
+  t.after(() => home.shutdown());
+  await home.connect(KEY);
+  home.renameDevice(A, 'Reading lamp'); // conflicts still match by the Govee name
+  home.saveScene(quickScene('wake'));
+  home.saveSchedule({ id: 'sch-wake', sceneID: 'wake', hour: 7, minute: 0, weekdays: [2], enabled: true });
+
+  assert.equal(await home.goveeSignIn('me@example.com', 'pa55word'), 'needsCode');
+  assert.equal(home.snapshot().goveeHome.awaitingCode, true);
+  assert.equal(home.snapshot().goveeHome.signedIn, false);
+  assert.equal(await home.goveeSignIn('me@example.com', 'pa55word', '123456'), 'signedIn');
+  const g = home.snapshot().goveeHome;
+  assert.equal(g.signedIn, true);
+  assert.deepEqual(g.plan?.changes.map((c) => [c.deviceID, c.currentRoom, c.goveeRoom]), [[A, 'Unassigned', 'Living Room']]);
+  assert.equal(g.plan?.notInLuma, 1);
+  assert.equal(g.plan?.withoutRoom, 1);
+  assert.deepEqual(g.groups, [{ id: 99, name: 'Bedroom Dream View', enabled: true, isDreamView: true, reportedLightCount: 3, mainDevice: 'ZZ', mainSKU: 'H6097' }]);
+  assert.deepEqual(g.conflicts, [{ automation: 'Wake up', scheduleID: 'sch-wake', light: 'Reading lamp' }], 'disabled automations never conflict');
+  assert.deepEqual(g.firmware, { [A]: '1.02.03' });
+
+  // Every request carried the app headers and refused redirects; the password reached only the login call.
+  assert.ok(account.calls.every((c) => c.redirect === 'error' && c.headers.clientType === '1' && c.headers.clientId === f.secrets.map.get('govee-client-id')));
+  assert.ok(account.calls.filter((c) => c.method === 'GET').every((c) => c.headers.Authorization === 'Bearer home-token-xyz'));
+  assert.equal(account.calls.filter((c) => JSON.stringify(c.body ?? '').includes('pa55word')).length, 2);
+  assert.equal(f.secrets.map.get('govee-home-token'), 'home-token-xyz');
+  home.persistNow();
+  const stored = JSON.stringify([...f.secrets.map.values(), readFileSync(join(f.dir, 'home.json'), 'utf8'), home.snapshot()]);
+  assert.ok(!stored.includes('pa55word') && !stored.includes('never-read'), 'no password or secretCode anywhere');
+  assert.ok(!readFileSync(join(f.dir, 'home.json'), 'utf8').includes('home-token-xyz'), 'the token is only in the encrypted store');
+  assert.ok(!JSON.stringify(home.snapshot()).includes('home-token-xyz'), 'the token never reaches the renderer');
+
+  home.goveeApplyRooms([A, 'not-in-plan']);
+  assert.equal(home.confirmedDevices().find((d) => d.id === A)?.room, 'Living Room');
+  assert.equal(home.snapshot().goveeHome.plan?.changes.length, 0);
+  home.goveeSignOut();
+  assert.equal(f.secrets.map.has('govee-home-token'), false);
+  assert.equal(home.snapshot().goveeHome.signedIn, false);
+});
+
+test('Govee Home: an expired session removes the saved token; a failed extra read keeps the room import', async (t) => {
+  const f = fixture(t);
+  const ok = fakeAccount({ failGroups: true });
+  const home = new Home({ demo: false, version: 't', storage: new HomeStorage(f.dir), secrets: f.secrets, accountFetch: ok.fetch });
+  t.after(() => home.shutdown());
+  await home.goveeSignIn('me@example.com', 'pw', '123456');
+  assert.deepEqual(home.snapshot().goveeHome.unavailable, ['control groups']);
+  assert.ok(home.snapshot().goveeHome.plan);
+  const expired = new Home({ demo: false, version: 't', storage: new HomeStorage(f.dir), secrets: f.secrets, accountFetch: fakeAccount({ expire: true }).fetch });
+  t.after(() => expired.shutdown());
+  await assert.rejects(expired.goveeImport(), /expired/);
+  assert.equal(f.secrets.map.has('govee-home-token'), false);
+  await assert.rejects(expired.goveeImport(), /Sign in to Govee Home first/);
+  await assert.rejects(new Home({ demo: true, version: 't' }).goveeSignIn('a@b.c', 'x'), /Demo mode/);
+  await assert.rejects(home.goveeSignIn('not-an-email', 'x'), LumaError);
+});

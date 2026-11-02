@@ -10,6 +10,38 @@ struct SavedHome: Codable {
     var schedules: [SceneSchedule] = []
     var webhookPort: UInt16 = 8787
     var allowLAN: Bool = false
+    /// Optional so homes saved before drafts existed still decode. Keyed by the TV light's ID.
+    var dreamViewDrafts: [String: DreamViewDraft]?
+    /// Last signed-in Govee Home import (names, counts, times; no secrets), so the
+    /// DreamView card and schedule conflicts survive a relaunch. Optional for old homes.
+    var goveeHomeGroups: [GoveeHomeImport.HomeGroup]?
+    var goveeHomeAutomations: [GoveeHomeImport.Automation]?
+}
+
+/// A portable home backup. Versioned so later formats can refuse or migrate older files.
+struct HomeBackup: Codable, Equatable {
+    static let formatName = "luma-home-backup"
+    static let currentVersion = 1
+    struct Light: Codable, Equatable { var id: String; var sku: String; var customName: String?; var room: String }
+    struct Result: Equatable { var scenes = 0, schedules = 0, lightsUpdated = 0, lightsNotFound = 0, scenesWithMissingLights = 0 }
+    var format = formatName
+    var version = currentVersion
+    var exportedAt: Date
+    var scenes: [LightScene]
+    var schedules: [SceneSchedule]
+    var lights: [Light]
+    var dreamViewDrafts: [String: DreamViewDraft]?
+
+    static func decode(_ data: Data) throws -> HomeBackup {
+        guard data.count <= 8 * 1024 * 1024 else { throw LumaError.message("That backup is too large.") }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        do { return try decoder.decode(HomeBackup.self, from: data) }
+        catch { throw LumaError.message("That file isn't a Luma home backup.") }
+    }
+    func encoded() throws -> Data {
+        let encoder = JSONEncoder.pretty; encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(self)
+    }
 }
 
 struct HomeStorage {
@@ -28,6 +60,13 @@ struct HomeStorage {
         let file = folder.appending(path: "home.json")
         // Until first unlock, like the Keychain items: a watch request can launch
         // Luma in the background while the iPhone is locked.
+        try JSONEncoder.pretty.encode(home).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+    /// A safety copy beside home.json (for example before a restore), replaced each time.
+    func saveCopy(_ home: SavedHome, named name: String) throws {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let file = folder.appending(path: name)
         try JSONEncoder.pretty.encode(home).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
@@ -85,14 +124,15 @@ struct WebhookTLS {
     static func label(demo: Bool) -> String { demo ? "app.luma.webhook-tls.demo" : "app.luma.webhook-tls" }
 
     /// `extraNames` (LAN addresses, hostname.local) must match the stored certificate's, or it is replaced.
-    static func load(demo: Bool, extraNames: [String] = [], now: Date = .now) throws -> WebhookTLS {
-        let label = label(demo: demo)
+    /// `label` gives another server (schedule sync) its own identity, so webhook certificate changes never break pairing.
+    static func load(demo: Bool, extraNames: [String] = [], now: Date = .now, label custom: String? = nil) throws -> WebhookTLS {
+        let label = custom ?? label(demo: demo)
         let names = extraNames.joined(separator: ",")
         if !demo, let expires = try SecretStore.read(label + ".expires").flatMap({ ISO8601DateFormatter().date(from: $0) }),
            expires > now.addingTimeInterval(7 * 86_400), (try SecretStore.read(label + ".names")) ?? "" == names, let existing = try? find(label) {
             return existing
         }
-        try delete(demo: demo)
+        try delete(demo: demo, label: custom)
         let cert = try LocalCertificate(now: now, extraNames: extraNames)
         let keyAttributes: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeyClass as String: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits as String: 256]
         var error: Unmanaged<CFError>?
@@ -112,8 +152,8 @@ struct WebhookTLS {
         return try find(label)
     }
 
-    static func delete(demo: Bool) throws {
-        let label = label(demo: demo)
+    static func delete(demo: Bool, label custom: String? = nil) throws {
+        let label = custom ?? label(demo: demo)
         for query in [[kSecClass as String: kSecClassKey, kSecAttrApplicationTag as String: Data(label.utf8)],
                       [kSecClass as String: kSecClassCertificate, kSecAttrLabel as String: label]] as [[String: Any]] {
             let status = SecItemDelete(query as CFDictionary)

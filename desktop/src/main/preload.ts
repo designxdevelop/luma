@@ -16,6 +16,7 @@ const bridge: LumaBridge = {
   copyDeviceID: call('copyDeviceID') as LumaBridge['copyDeviceID'],
   exploreDemo: call('exploreDemo') as LumaBridge['exploreDemo'],
   snapshot: call('snapshot') as LumaBridge['snapshot'],
+  scheduleSync: call('scheduleSync') as LumaBridge['scheduleSync'],
   onSnapshot(listener) {
     const handler = (_event: unknown, snapshot: AppSnapshot) => listener(snapshot);
     ipcRenderer.on('luma:snapshot-changed', handler);
@@ -63,6 +64,20 @@ const bridge: LumaBridge = {
   syncStop: call('syncStop') as LumaBridge['syncStop'],
   syncEnded: call('syncEnded') as LumaBridge['syncEnded'],
   syncSettings: call('syncSettings') as LumaBridge['syncSettings'],
+  audioStart: call('audioStart') as LumaBridge['audioStart'],
+  audioLevels: call('audioLevels') as LumaBridge['audioLevels'],
+  audioOptions: call('audioOptions') as LumaBridge['audioOptions'],
+  roomAction: call('roomAction') as LumaBridge['roomAction'],
+  controlBatch: call('controlBatch') as LumaBridge['controlBatch'],
+  restoreBeforeScene: call('restoreBeforeScene') as LumaBridge['restoreBeforeScene'],
+  doorbell: call('doorbell') as LumaBridge['doorbell'],
+  exportBackup: call('exportBackup') as LumaBridge['exportBackup'],
+  importBackup: call('importBackup') as LumaBridge['importBackup'],
+  copyCompatibilityReport: call('copyCompatibilityReport') as LumaBridge['copyCompatibilityReport'],
+  goveeSignIn: call('goveeSignIn') as LumaBridge['goveeSignIn'],
+  goveeImport: call('goveeImport') as LumaBridge['goveeImport'],
+  goveeApplyRooms: call('goveeApplyRooms') as LumaBridge['goveeApplyRooms'],
+  goveeSignOut: call('goveeSignOut') as LumaBridge['goveeSignOut'],
 };
 
 contextBridge.exposeInMainWorld('luma', bridge);

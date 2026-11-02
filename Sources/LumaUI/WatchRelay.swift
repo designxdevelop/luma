@@ -16,7 +16,7 @@ extension HomeStore {
     func handleWatch(_ request: WatchRequest) {
         switch request {
         case .power(let ids, let on):
-            let known = devices.filter { $0.supports("powerSwitch") && (ids.isEmpty || ids.contains($0.id)) }.map(\.id)
+            let known = devices.filter { $0.supports("powerSwitch") && (ids.isEmpty ? DeviceReadings.isLight(type: $0.deviceType) : ids.contains($0.id)) }.map(\.id)
             perform(.power(on), ids: known)
         case .brightness(let id, let value):
             guard devices.contains(where: { $0.id == id && $0.supports("brightness") }) else { return }

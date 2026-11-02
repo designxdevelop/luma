@@ -17,6 +17,7 @@ struct AutomationsView: View {
             VStack(alignment: .leading, spacing: 28) {
                 PageHeader(title: "Automations", subtitle: "Run scenes on a schedule, or let Shortcuts, Home Assistant, and scripts control your lights.")
                 schedulesSection
+                DoorbellAlertSection(store: store)
                 webhooksSection
                 if !store.runs.isEmpty { runsSection }
             }
@@ -31,13 +32,14 @@ struct AutomationsView: View {
     private var schedulesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             SectionHeader("Schedules", detail: store.home.schedules.isEmpty ? nil : "\(store.home.schedules.count)")
+            ScheduleSyncCard(store: store)
             if store.home.scenes.isEmpty {
                 Card { EmptyState(icon: "clock.badge.questionmark", title: "Create a scene first", message: "A schedule runs a scene at a set time. Save a scene on the Scenes page, then come back to schedule it.") }
             } else {
                 newScheduleCard
             }
             ForEach(store.home.schedules) { scheduleRow($0) }
-            Text(PlatformCopy.scheduleNote)
+            Text(store.scheduleSync.role == .paired ? "Schedules run on \(store.scheduleSync.client?.runner?.name ?? "the paired computer"), even while Luma is closed here. Missed times are skipped." : PlatformCopy.scheduleNote)
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -89,7 +91,9 @@ struct AutomationsView: View {
     private func scheduleRow(_ schedule: SceneSchedule) -> some View {
         let scene = store.home.scenes.first { $0.id == schedule.sceneID }
         let timeText = Self.timeText(hour: schedule.hour, minute: schedule.minute)
+        let conflict = store.scheduleConflicts.first { $0.scheduleID == schedule.id }
         return Card(padding: 16) {
+          VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 14) {
                 Toggle("Enable \(scene?.name ?? "schedule") at \(timeText)", isOn: Binding(
                     get: { store.home.schedules.first { $0.id == schedule.id }?.enabled ?? false },
@@ -108,13 +112,37 @@ struct AutomationsView: View {
                 Spacer(minLength: 12)
                 VStack(alignment: .trailing, spacing: 3) {
                     Text(timeText).font(.system(size: 17, weight: .semibold)).monospacedDigit()
-                    Text(schedule.enabled ? "Next run: \(nextRunText(schedule))" : "Paused").font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(statusText(schedule))
+                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 .opacity(schedule.enabled ? 1 : 0.55)
+                Menu {
+                    Button("Pause Until Tomorrow") { setPause(schedule, Calendar.current.startOfDay(for: .now.addingTimeInterval(86_400)).addingTimeInterval(12 * 3600)) }
+                    Button("Pause for a Week") { setPause(schedule, .now.addingTimeInterval(7 * 86_400)) }
+                    if (schedule.pausedUntil ?? .distantPast) > .now { Button("Resume") { setPause(schedule, nil) } }
+                } label: { Image(systemName: "pause.circle") }
+                    .menuStyle(.borderlessButton).fixedSize().help("Pause schedule").accessibilityLabel("Pause schedule")
                 Button { store.home.schedules.removeAll { $0.id == schedule.id }; store.persist() } label: { Image(systemName: "trash") }
                     .buttonStyle(.borderless).help("Delete schedule").accessibilityLabel("Delete schedule")
             }
+            ScheduleRunLine(store: store, schedule: schedule)
+            if let conflict {
+                Label("Govee Home automation “\(conflict.automation)” also changes \(conflict.light) at this time. Whichever runs last wins; Govee's days weren't compared.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11)).foregroundStyle(Color.warning).fixedSize(horizontal: false, vertical: true)
+            }
+          }
         }
+    }
+
+    private func statusText(_ schedule: SceneSchedule) -> String {
+        if !schedule.enabled { return "Off" }
+        if let until = schedule.pausedUntil, until > .now { return "Paused until \(until.formatted(date: .abbreviated, time: .shortened))" }
+        return "Next run: \(nextRunText(schedule))"
+    }
+
+    private func setPause(_ schedule: SceneSchedule, _ until: Date?) {
+        guard let i = store.home.schedules.firstIndex(where: { $0.id == schedule.id }) else { return }
+        store.home.schedules[i].pausedUntil = until; store.persist()
     }
 
     private var orderedWeekdays: [Int] { (0..<7).map { (Calendar.current.firstWeekday - 1 + $0) % 7 + 1 } }

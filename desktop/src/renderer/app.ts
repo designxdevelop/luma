@@ -8,7 +8,11 @@ import type { AppSnapshot, Capability, CapabilityCommand, JSONValue, LightDevice
 import { DAY_PRESETS, duplicateScene, filterLights } from './preferences.js';
 import { morph } from './morph.js';
 import { FramePump } from './screen-sync.js';
+import { audioBanner, audioSyncView, commitAudioSetting, followAudio, initAudioSync, modeSwitch, paintAudio, syncMode } from './audio-view.js';
 import { ToggleIntents } from './toggles.js';
+import { scheduleSyncBlock, scheduleSyncLine, scheduleSyncSubtitle } from './schedule-sync-view.js';
+import { doorbellView, initDoorbell } from './doorbell-view.js';
+import { isLight, paintCommands, segmentSchema, SEGMENT_INSTANCES, type SegmentSchema } from '../shared/devices.js';
 import {
   BASIC, SCENE_ICONS, WEEKDAYS, basicCommand, brightnessRange, capOf, describeCommand, effectCapabilities, esc, friendly, fromHex, hex, icon,
   isObj, kelvinToHex, nextOccurrence, orbColor, rangeOf, relativeTime, supports, uuid, whiteRange,
@@ -42,7 +46,13 @@ const state = {
   syncRegions: new Map<string, SyncRegion>(),
   search: '',
   problemsOnly: false,
+  /** Segment painter drafts keyed by `${deviceID}|${instance}`. Local until Apply. */
+  paint: new Map<string, Painter>(),
+  painterInstance: new Map<string, string>(),
+  /** Govee Home room changes the person chose, keyed by the import time they belong to. */
+  goveeRooms: undefined as { importedAt: number; ids: Set<string> } | undefined,
 };
+type Painter = { values: Map<number, number>; selected: Set<number>; color: number; level: number };
 const pump = new FramePump(luma);
 
 const RGB_PRESETS: Array<[string, number]> = [
@@ -70,6 +80,7 @@ function render(): void {
   morph(app, shell(s), { protect });
   renderModal();
   paintVars(document.body);
+  paintAudio(document.body);
 }
 
 /** CSP forbids inline style attributes, so colors/fills are applied through CSSOM. */
@@ -84,7 +95,7 @@ function fill(el: HTMLInputElement): void {
 }
 
 function shell(s: AppSnapshot): string {
-  const nav: Array<[View, string, string]> = [['lights', 'Lights', 'bulb'], ['scenes', 'Scenes', 'scenes'], ['sync', 'Screen Sync', 'screen'], ['automations', 'Automations', 'clock'], ['activity', 'Activity', 'clock'], ['settings', 'Settings', 'gear'], ['about', 'About', 'info']];
+  const nav: Array<[View, string, string]> = [['lights', 'Lights', 'bulb'], ['scenes', 'Scenes', 'scenes'], ['sync', 'Sync', 'screen'], ['automations', 'Automations', 'clock'], ['activity', 'Activity', 'clock'], ['settings', 'Settings', 'gear'], ['about', 'About', 'info']];
   return `
   <nav class="sidebar" aria-label="Sections">
     <div class="brand"><span class="orb small" data-color="#ffb347"></span><span>Luma</span>${s.demo ? '<span class="badge">Demo</span>' : ''}</div>
@@ -95,7 +106,7 @@ function shell(s: AppSnapshot): string {
     ${s.notice ? `<div class="notice" role="alert"><span>${esc(s.notice)}</span><button class="ghost" data-action="dismiss-notice" aria-label="Dismiss message">${icon('close')}</button></div>` : ''}
     ${syncBanner(s)}
     ${state.status ? `<div class="status ${state.status.error ? 'error' : ''}">${esc(state.status.text)}</div>` : ''}
-    ${state.view === 'lights' ? lightsView(s) : state.view === 'scenes' ? scenesView(s) : state.view === 'sync' ? syncView(s) : state.view === 'automations' ? automationsView(s) : state.view === 'settings' ? settingsView(s) : state.view === 'activity' ? activityView(s) : aboutView(s)}
+    ${state.view === 'lights' ? lightsView(s) : state.view === 'scenes' ? scenesView(s) : state.view === 'sync' ? (syncMode(s) === 'audio' ? audioSyncView(s) : syncView(s)) : state.view === 'automations' ? automationsView(s) : state.view === 'settings' ? settingsView(s) : state.view === 'activity' ? activityView(s) : aboutView(s)}
   </main>`;
 }
 
@@ -108,13 +119,14 @@ function pendingLabel(s: AppSnapshot, id: string): string {
 function lightsView(s: AppSnapshot): string {
   const filtered = filterLights(s.devices, state.search);
   const rooms = [...new Set(filtered.map((d) => d.room))].sort((a, b) => (a === 'Unassigned' ? 1 : b === 'Unassigned' ? -1 : a.localeCompare(b)));
-  const on = s.devices.filter((d) => d.power === true).length;
+  const lights = s.devices.filter(isLight);
+  const on = lights.filter((d) => d.power === true).length;
   const selected = s.devices.find((d) => d.id === state.selected);
   return `
   <div class="lights-layout ${selected ? 'has-inspector' : ''}">
     <section class="pane" aria-labelledby="lights-title">
       <header class="toolbar">
-        <div><h1 id="lights-title">Lights</h1><p class="sub">${s.devices.length ? `${on} of ${s.devices.length} on` : 'No lights yet'}</p></div>
+        <div><h1 id="lights-title">Lights</h1><p class="sub">${s.devices.length ? `${on} of ${lights.length} light${lights.length === 1 ? '' : 's'} on${lights.length < s.devices.length ? ` · ${s.devices.length - lights.length} other device${s.devices.length - lights.length === 1 ? '' : 's'}` : ''}` : 'No lights yet'}</p></div>
         <div class="actions">
           <button data-action="all" data-on="1" ${s.devices.length ? '' : 'disabled'}>All on</button>
           <button data-action="all" data-on="0" ${s.devices.length ? '' : 'disabled'}>All off</button>
@@ -127,6 +139,7 @@ function lightsView(s: AppSnapshot): string {
         const devices = filtered.filter((d) => d.room === room);
         return `<section class="room" aria-label="${esc(room)}">
           <div class="room-head"><h2>${esc(room)}</h2><div class="room-actions"><button class="ghost" data-action="room" data-room="${esc(room)}" data-on="1">On</button><button class="ghost" data-action="room" data-room="${esc(room)}" data-on="0">Off</button></div></div>
+          ${roomAdjust(s, room)}
           <div class="cards">${devices.map((d) => card(s, d)).join('')}</div>
         </section>`;
       }).join('')}
@@ -135,9 +148,123 @@ function lightsView(s: AppSnapshot): string {
   </div>`;
 }
 
+/** Room brightness and white, clamped per light in main. Lights only; hidden when no light in the room supports either. */
+function roomAdjust(s: AppSnapshot, room: string): string {
+  const lights = s.devices.filter((d) => isLight(d) && d.room === room);
+  const dimmable = lights.filter((d) => supports(d, 'brightness')), white = lights.filter((d) => supports(d, 'colorTemperatureK'));
+  if (dimmable.length + white.length === 0) return '';
+  const known = dimmable.map((d) => d.brightness).filter((b): b is number => typeof b === 'number' && b > 0);
+  const level = known.length ? Math.round(known.reduce((a, b) => a + b, 0) / known.length) : 50;
+  return `<details class="room-adjust"><summary>Adjust ${esc(room)}</summary>
+    ${dimmable.length ? slider(`room|${room}|brightness`, 'Room brightness', level, [1, 100], '%') : ''}
+    ${white.length ? `<div class="presets" aria-label="${esc(room)} white">${WHITE_PRESETS.map(([name, k]) => `<button class="chip" data-action="room-white" data-room="${esc(room)}" data-value="${k}"><span class="orb tiny" data-color="${kelvinToHex(k)}"></span>${name}</button>`).join('')}</div>` : ''}
+    <p class="hint">Each light is clamped to its own range. Appliances and sensors are never included.</p>
+  </details>`;
+}
+
+function goveeHomeSection(s: AppSnapshot): string {
+  const g = s.goveeHome;
+  const head = `<section class="card-block" aria-labelledby="gh-title"><h2 id="gh-title">Govee Home account <span class="optional">(optional, read-only)</span></h2>
+    <p class="sub">Reads your Govee Home rooms, DreamView groups and automations. Luma never changes anything in your Govee account.</p>`;
+  if (!g.available) return `${head}<p class="hint">${s.demo ? 'Disabled in demo mode.' : 'Needs secure storage (Windows DPAPI or a Linux keyring) to keep the session.'}</p></section>`;
+  if (!g.signedIn) {
+    return `${head}<form class="stack" data-form="govee-signin">
+        <div class="row"><label for="gh-email">Email</label><input id="gh-email" name="email" type="email" autocomplete="username" maxlength="254" ${g.busy ? 'disabled' : ''}></div>
+        <div class="row"><label for="gh-password">Password</label><input id="gh-password" name="password" type="password" autocomplete="current-password" maxlength="256" ${g.busy ? 'disabled' : ''}></div>
+        ${g.awaitingCode ? `<div class="row"><label for="gh-code">Code from Govee’s email</label><input id="gh-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="10" ${g.busy ? 'disabled' : ''}></div>` : ''}
+        <button class="primary" type="submit" ${g.busy ? 'disabled' : ''}>${g.busy ? 'Signing in…' : g.awaitingCode ? 'Finish sign-in' : 'Sign in'}</button>
+      </form>
+      <p class="hint">Your password goes only to app2.govee.com and is never saved; the session is stored encrypted. Govee may email a code the first time.</p></section>`;
+  }
+  const plan = g.plan;
+  if (plan && g.importedAt && state.goveeRooms?.importedAt !== g.importedAt) {
+    state.goveeRooms = { importedAt: g.importedAt, ids: new Set(plan.changes.filter((c) => c.currentRoom === 'Unassigned').map((c) => c.deviceID)) };
+  }
+  const nameOf = (id?: string) => s.devices.find((d) => d.id.toLowerCase() === id?.toLowerCase())?.name;
+  const time = (t: { hour: number; minute: number }) => `${String(t.hour).padStart(2, '0')}:${String(t.minute).padStart(2, '0')}`;
+  return `${head}
+    <div class="actions"><button data-action="gh-import" ${g.busy ? 'disabled' : ''}>${g.busy ? 'Reading…' : g.importedAt ? 'Read again' : 'Read Govee Home'}</button><button class="ghost danger" data-action="gh-signout">Sign out</button></div>
+    ${g.importedAt ? `<p class="hint">Read ${relativeTime(g.importedAt)}.${g.unavailable.length ? ` Couldn’t read ${esc(g.unavailable.join(' or '))}.` : ''}</p>` : ''}
+    ${plan ? `<h3>Rooms</h3>${plan.changes.length ? `<ul class="plain">${plan.changes.map((c) => `<li><label><input type="checkbox" data-action="gh-room" data-id="${esc(c.deviceID)}" ${state.goveeRooms?.ids.has(c.deviceID) ? 'checked' : ''}> ${esc(c.name)}: ${esc(c.currentRoom)} → <strong>${esc(c.goveeRoom)}</strong></label></li>`).join('')}</ul>
+      <button data-action="gh-apply" ${state.goveeRooms?.ids.size ? '' : 'disabled'}>Apply selected rooms</button>` : '<p class="sub">Rooms already match Govee Home.</p>'}
+      <p class="hint">${plan.unchanged} unchanged · ${plan.withoutRoom} without a room · ${plan.notInLuma} not connected to Luma. Lights you moved in Luma aren’t preselected.</p>` : ''}
+    ${g.groups.length ? `<h3>Groups</h3><ul class="plain">${g.groups.map((gr) => `<li><strong>${esc(gr.name)}</strong>${gr.isDreamView ? ' <span class="badge">DreamView</span>' : ''} · ${gr.enabled ? 'enabled' : 'disabled'}${gr.reportedLightCount !== undefined ? ` · Govee reports ${gr.reportedLightCount} light${gr.reportedLightCount === 1 ? '' : 's'}` : ''}${gr.mainDevice ? ` · main light ${esc(nameOf(gr.mainDevice) ?? gr.mainSKU ?? 'not in Luma')}` : ''}</li>`).join('')}</ul>
+      <p class="hint">Member lights and screen areas aren’t in any readable Govee API yet, so they can’t be shown or edited here.</p>` : ''}
+    ${g.automations.length ? `<h3>Automations</h3><ul class="plain">${g.automations.map((a) => `<li><strong>${esc(a.name)}</strong> · ${a.enabled ? 'enabled' : 'disabled'}${a.times.length ? ` · ${a.times.map(time).join(', ')}${a.repeatDays.length === 7 ? ' every day' : ''}` : ''}${a.targets.length ? ` · ${esc(a.targets.map((t) => t.name).join(', '))}` : ''}</li>`).join('')}</ul>
+      <p class="hint">Read-only. ${g.conflicts.length ? `${g.conflicts.length} possible conflict${g.conflicts.length === 1 ? '' : 's'} with your Luma schedules (shown under Automations).` : 'No conflicts with your Luma schedules.'}</p>` : ''}
+  </section>`;
+}
+
+function readingsList(s: AppSnapshot, d: LightDevice): string {
+  const list = s.readings[d.id] ?? [];
+  if (!list.length) return '';
+  return `<dl class="facts readings" aria-label="Readings">${list.map((r) => `<dt>${esc(r.label)}</dt><dd>${esc(r.text)}</dd>`).join('')}</dl><p class="hint">Read ${relativeTime(list[0]!.readAt)} from Govee cloud. Use Refresh state to read again.</p>`;
+}
+
+function dreamViewBlock(s: AppSnapshot, d: LightDevice): string {
+  const cap = capOf(d, 'dreamViewToggle');
+  if (!cap) return '';
+  const status = d.dreamView === undefined ? 'State unknown (refresh to read it)' : d.dreamView ? 'Running' : 'Off';
+  const ready = s.cloudConnected || d.isDemo;
+  return `<section class="effect" aria-label="DreamView"><h3>DreamView</h3>
+    <p class="sub">TV sync with the group you set up in Govee Home · ${esc(status)}</p>
+    <div class="actions"><button class="primary" data-action="dreamview" data-id="${esc(d.id)}" data-on="1" ${ready ? '' : 'disabled'}>Start</button><button data-action="dreamview" data-id="${esc(d.id)}" data-on="0" ${ready ? '' : 'disabled'}>Stop</button></div>
+    <p class="hint">${ready ? 'Group members and Movie/Game settings are managed in Govee Home; the cloud API only starts and stops sync.' : 'Connect Govee cloud to start or stop DreamView.'}</p>
+  </section>`;
+}
+
+function dreamViewValue(d: LightDevice, on: boolean): JSONValue {
+  const named = enumOptions(capOf(d, 'dreamViewToggle')?.parameters).find((o) => o.name.toLowerCase() === (on ? 'on' : 'off'));
+  return named?.value ?? (on ? 1 : 0);
+}
+
+function painters(d: LightDevice): SegmentSchema[] {
+  return SEGMENT_INSTANCES.map((i) => segmentSchema(capOf(d, i))).filter((x): x is SegmentSchema => !!x);
+}
+
+function painter(d: LightDevice, schema: SegmentSchema): Painter {
+  const key = `${d.id}|${schema.instance}`;
+  let p = state.paint.get(key);
+  if (!p) { p = { values: new Map(), selected: new Set(), color: 0xffb347, level: Math.min(schema.valueRange[1], Math.max(schema.valueRange[0], 60)) }; state.paint.set(key, p); }
+  return p;
+}
+
+function painterView(d: LightDevice): string {
+  const schemas = painters(d);
+  if (!schemas.length) return '';
+  const schema = schemas.find((x) => x.instance === state.painterInstance.get(d.id)) ?? schemas[0]!;
+  const p = painter(d, schema), isColor = schema.valueField === 'rgb';
+  let commands = 0, problem = '';
+  try { commands = paintCommands(schema, p.values).length; } catch (error) { problem = error instanceof Error ? error.message : String(error); }
+  const shade = (v: number) => (isColor ? hex(v) : hex(((Math.round(0xff * v / Math.max(1, schema.valueRange[1])) & 0xff) * 0x010100) | 0x30));
+  return `<section class="effect painter" aria-label="Segment painter"><h3>Segment painter</h3>
+    ${schemas.length > 1 ? `<div class="segmented" role="radiogroup" aria-label="Paint">${schemas.map((x) => `<button role="radio" aria-checked="${x.instance === schema.instance}" data-action="paint-mode" data-id="${esc(d.id)}" data-instance="${esc(x.instance)}">${x.valueField === 'rgb' ? 'Color' : 'Brightness'}</button>`).join('')}</div>` : ''}
+    <div class="segment-grid painter-grid">${schema.indexes.map((i) => { const v = p.values.get(i); return `<button class="seg paint ${v === undefined ? '' : 'painted'}" aria-pressed="${p.selected.has(i)}" data-action="paint-seg" data-id="${esc(d.id)}" data-instance="${esc(schema.instance)}" data-index="${i}" ${v === undefined ? '' : `data-color="${shade(v)}"`} aria-label="Segment ${i + 1}${v === undefined ? '' : isColor ? `, ${hex(v)}` : `, ${v}%`}">${i + 1}</button>`; }).join('')}</div>
+    <div class="actions wrap">
+      <button class="ghost" data-action="paint-select" data-id="${esc(d.id)}" data-instance="${esc(schema.instance)}" data-which="all">Select all</button>
+      <button class="ghost" data-action="paint-select" data-id="${esc(d.id)}" data-instance="${esc(schema.instance)}" data-which="none">Select none</button>
+      <button class="ghost" data-action="paint-select" data-id="${esc(d.id)}" data-instance="${esc(schema.instance)}" data-which="alternate">Every other</button>
+    </div>
+    <div class="row">${isColor
+      ? `<label for="paint-color-${esc(d.id)}">Paint color</label><input id="paint-color-${esc(d.id)}" type="color" data-action="paint-color" data-id="${esc(d.id)}" data-instance="${esc(schema.instance)}" value="${hex(p.color)}">`
+      : `<label for="paint-level-${esc(d.id)}">Segment brightness</label><input id="paint-level-${esc(d.id)}" type="number" min="${schema.valueRange[0]}" max="${schema.valueRange[1]}" step="1" data-action="paint-level" data-id="${esc(d.id)}" data-instance="${esc(schema.instance)}" value="${p.level}">`}
+      <button data-action="paint-fill" data-id="${esc(d.id)}" data-instance="${esc(schema.instance)}" ${p.selected.size ? '' : 'disabled'}>Paint selected</button>
+      ${isColor ? `<button class="ghost" data-action="paint-gradient" data-id="${esc(d.id)}" data-instance="${esc(schema.instance)}" ${p.selected.size > 1 ? '' : 'disabled'}>Rainbow</button>` : ''}
+    </div>
+    <p class="sub">${p.values.size} of ${schema.indexes.length} segments painted · ${problem ? esc(problem) : `${commands} command${commands === 1 ? '' : 's'}`}</p>
+    <div class="actions wrap">
+      <button class="primary" data-action="paint-apply" data-id="${esc(d.id)}" data-instance="${esc(schema.instance)}" ${p.values.size && !problem ? '' : 'disabled'}>Apply to light</button>
+      <button data-action="paint-scene" data-id="${esc(d.id)}" data-instance="${esc(schema.instance)}" ${p.values.size && !problem ? '' : 'disabled'}>Save as scene…</button>
+      <button class="ghost" data-action="paint-clear" data-id="${esc(d.id)}" data-instance="${esc(schema.instance)}" ${p.values.size ? '' : 'disabled'}>Clear</button>
+    </div>
+    <p class="hint">Segments sharing a value are sent as one command, in segment order. Unpainted segments are left as they are.</p>
+  </section>`;
+}
+
 function card(s: AppSnapshot, d: LightDevice): string {
   const pending = pendingLabel(s, d.id);
-  const meta = d.online === false ? 'Offline' : d.power === undefined ? 'State unknown' : d.power ? `${d.brightness ?? '–'}%` : 'Off';
+  const readings = s.readings[d.id] ?? [];
+  const meta = d.online === false ? 'Offline' : !isLight(d) && readings.length ? readings.slice(0, 2).map((r) => r.text).join(' · ') : d.power === undefined ? (isLight(d) ? 'State unknown' : 'No readings yet') : d.power ? (supports(d, 'brightness') ? `${d.brightness ?? '–'}%` : 'On') : 'Off';
   const route = d.isDemo ? 'Demo' : d.ip ? 'LAN' : 'Cloud';
   return `<article class="card ${state.selected === d.id ? 'selected' : ''} ${d.online === false ? 'offline' : ''}" data-key="${esc(d.id)}">
     <button class="card-main" data-action="select" data-id="${esc(d.id)}" aria-pressed="${state.selected === d.id}" aria-label="${esc(d.name)}, ${esc(meta)}${pending ? `, ${pending}` : ''}">
@@ -177,6 +304,8 @@ function lightTab(d: LightDevice): string {
   const [wlo, whi] = whiteRange(d);
   const offline = d.online === false ? '<p class="hint warn">This light reports offline. Values shown are its last known state.</p>' : '';
   return `${offline}
+    ${readingsList(state.snap!, d)}
+    ${dreamViewBlock(state.snap!, d)}
     ${supports(d, 'powerSwitch') ? `<div class="row"><label for="pw-${esc(d.id)}">Power</label><input id="pw-${esc(d.id)}" type="checkbox" role="switch" class="switch" data-action="power" data-id="${esc(d.id)}" ${d.power ? 'checked' : ''}></div>` : ''}
     ${supports(d, 'brightness') ? slider(`${d.id}|brightness`, 'Brightness', d.brightness ?? 50, brightnessRange(d), '%') : ''}
     ${hasColor || hasWhite ? `<div class="segmented" role="radiogroup" aria-label="Color mode">
@@ -208,7 +337,7 @@ function effectsTab(s: AppSnapshot, d: LightDevice): string {
   const all = d.capabilities.filter((c) => !c.type.endsWith('.online') && !c.type.endsWith('.event'));
   const adv = state.advanced.get(d.id) ?? { instance: all[0]?.instance ?? '', text: '' };
   return `${caps.length === 0 ? `<p class="hint">${d.ip && !s.cloudConnected ? 'LAN lights support power, brightness, color and white. Connect Govee cloud to load model effects.' : 'This light advertises no extra effects. Try Load effects.'}</p>` : ''}
-    ${loaders}${forms}
+    ${loaders}${painterView(d)}${forms}
     <details class="advanced"><summary>Advanced</summary>
       <p class="hint">Send a raw JSON value for any capability this light advertises. Values are validated against its schema before sending.</p>
       <div class="row"><label for="adv-inst">Capability</label><select id="adv-inst" data-action="adv-instance" data-id="${esc(d.id)}">${all.map((c) => `<option value="${esc(c.instance)}" ${c.instance === adv.instance ? 'selected' : ''}>${esc(friendly(c.instance))} (${esc(c.instance)})</option>`).join('')}</select></div>
@@ -303,6 +432,9 @@ function detailsTab(s: AppSnapshot, d: LightDevice): string {
     </form>
     <dl class="facts">
       <dt>Model</dt><dd>${esc(d.sku)}</dd>
+      ${isLight(d) ? '' : `<dt>Type</dt><dd>${esc(friendly((d.deviceType ?? '').replace('devices.types.', '')))} · excluded from All on/off, rooms, webhooks and Screen Sync</dd>`}
+      ${s.goveeHome.firmware[d.id] ? `<dt>Firmware</dt><dd>${esc(s.goveeHome.firmware[d.id])} (from Govee Home; updates happen in Govee Home)</dd>` : ''}
+      ${d.customName ? `<dt>Govee name</dt><dd>Renamed in Luma; the name survives cloud refreshes</dd>` : ''}
       <dt>Device ID</dt><dd class="code">${esc(d.id)} <button data-action="copy-device-id" data-id="${esc(d.id)}">Copy</button></dd>
       ${d.ip ? `<dt>Network address</dt><dd>${esc(d.ip)}</dd>` : ''}
       ${d.lastSeen ? `<dt>Last seen</dt><dd>${esc(new Date(d.lastSeen).toLocaleString())}</dd>` : ''}
@@ -310,6 +442,7 @@ function detailsTab(s: AppSnapshot, d: LightDevice): string {
       <dt>Status</dt><dd>${d.online === false ? 'Offline' : d.online ? 'Online' : 'Unknown'}${d.lastSeen ? ` · seen ${relativeTime(d.lastSeen)}` : ''}</dd>
       <dt>Capabilities</dt><dd>${d.capabilities.length ? d.capabilities.map((c) => esc(friendly(c.instance))).join(', ') : 'Basic LAN controls'}</dd>
     </dl>
+    ${readingsList(s, d)}
     <button data-action="refresh" data-id="${esc(d.id)}">${icon('refresh')}Refresh state</button>`;
 }
 
@@ -319,6 +452,7 @@ function scenesView(s: AppSnapshot): string {
       <div><h1 id="scenes-title">Scenes</h1><p class="sub">Ordered steps across your lights. One scene runs at a time.</p></div>
       <div class="actions">
         ${s.runningSceneID ? `<button data-action="stop-scene">${icon('stop')}Stop</button>` : ''}
+        ${s.restorePoint ? `<button data-action="restore-before" ${s.runningSceneID ? 'disabled' : ''} title="${esc(s.restorePoint)}">Restore lights</button>` : ''}
         <button data-action="import-scene">Import…</button>
         <button data-action="new-scene" ${s.devices.length ? '' : 'disabled'}>${icon('plus')}New scene</button>
         <button class="primary" data-action="capture" ${s.devices.length ? '' : 'disabled'}>Capture current lights</button>
@@ -336,7 +470,7 @@ function scenesView(s: AppSnapshot): string {
         <button class="ghost danger" data-action="delete-scene" data-id="${esc(scene.id)}" aria-label="Delete ${esc(scene.name)}">${icon('trash')}</button>
       </div>
     </article>`).join('')}</div>
-    <p class="hint">Stopping a scene does not undo commands it already sent.</p>
+    <p class="hint">Stopping a scene does not undo commands it already sent. Restore lights puts power, brightness, color and white back to how they were before the last scene ran (effects and segments aren't undone).</p>
   </section>`;
 }
 
@@ -344,10 +478,13 @@ function automationsView(s: AppSnapshot): string {
   const w = s.webhook;
   const disabled = !w.available;
   return `<section class="pane" aria-labelledby="auto-title">
-    <header class="toolbar"><div><h1 id="auto-title">Automations</h1><p class="sub">Schedules run while Luma is open (including in the tray) and the PC is awake. Missed times are skipped.</p></div>
+    <header class="toolbar"><div><h1 id="auto-title">Automations</h1><p class="sub">${esc(scheduleSyncSubtitle(s.scheduleSync))}</p></div>
       <div class="actions"><button class="primary" data-action="add-schedule" ${s.scenes.length ? '' : 'disabled'}>${icon('plus')}Add schedule</button></div></header>
     ${s.schedules.length === 0 ? `<p class="hint">${s.scenes.length ? 'No schedules yet.' : 'Save a scene first, then schedule it.'}</p>` : ''}
     <ul class="schedules">${s.schedules.map((sch) => scheduleRow(s, sch)).join('')}</ul>
+    ${scheduleSyncBlock(s.scheduleSync)}
+
+    ${doorbellView(s)}
 
     <section class="card-block" aria-labelledby="hook-title">
       <h2 id="hook-title">Webhook server</h2>
@@ -393,6 +530,8 @@ function scheduleRow(s: AppSnapshot, sch: SceneSchedule): string {
     <div class="weekdays" role="group" aria-label="Days">${WEEKDAYS.map((day, i) => `<button class="day" aria-pressed="${sch.weekdays.includes(i + 1)}" data-action="sch-day" data-id="${esc(sch.id)}" data-day="${i + 1}">${day}</button>`).join('')}</div>
     <input type="checkbox" role="switch" class="switch" aria-label="Enabled" data-action="sch-enabled" data-id="${esc(sch.id)}" ${sch.enabled ? 'checked' : ''}>
     <span class="next">${next ? `Next: ${next.toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : 'Not scheduled'}</span>
+    ${s.goveeHome.conflicts.filter((c) => c.scheduleID === sch.id).map((c) => `<span class="hint warn">Possible conflict: Govee Home automation “${esc(c.automation)}” also changes ${esc(c.light)} at this time.</span>`).join('')}
+    ${scheduleSyncLine(s.scheduleSync, sch)}
     <button class="ghost danger" data-action="sch-delete" data-id="${esc(sch.id)}" aria-label="Delete schedule">${icon('trash')}</button>
   </li>`;
 }
@@ -416,6 +555,17 @@ function settingsView(s: AppSnapshot): string {
         <button class="ghost" data-action="link" data-link="apikey">How to get an API key</button>
       </div>
       <p class="hint">Your key is sent only to openapi.api.govee.com and stored with Windows DPAPI or your Linux keyring, never in plain text. Use your existing key: generating a new one disables older keys used by other apps.</p>
+    </section>
+    ${goveeHomeSection(s)}
+    <section class="card-block" aria-labelledby="backup-title"><h2 id="backup-title">Backup and restore</h2>
+      <p class="sub">Scenes, schedules, light names and rooms in one file. It opens in Luma on Mac, iPhone and iPad too.</p>
+      <div class="actions"><button data-action="backup-export" ${s.demo ? 'disabled' : ''}>Export backup…</button><button data-action="backup-import" ${s.demo || !s.canSave ? 'disabled' : ''}>Restore from backup…</button></div>
+      <p class="hint">Never includes API keys, tokens, network addresses or webhook settings. Restoring replaces your scenes and schedules; names and rooms apply only to lights already connected here. Your current home is saved as home-before-restore.json first.</p>
+    </section>
+    <section class="card-block" aria-labelledby="compat-title"><h2 id="compat-title">Compatibility report</h2>
+      <p class="sub">Copies what Luma can do with each of your models, for an issue report.</p>
+      <button data-action="compat-copy">Copy compatibility report</button>
+      <p class="hint">Lists models, feature names and connection paths only: no light names, rooms, device IDs or addresses.</p>
     </section>
     <section class="card-block" aria-labelledby="lan-title"><h2 id="lan-title">Local network (LAN)</h2>
       <p class="sub">Compatible lights with LAN Control enabled can be controlled directly for power, brightness, color and white (2000–9000 K).</p>
@@ -472,6 +622,7 @@ const SYNC_SLIDERS: Array<{ key: keyof SyncSettings; label: string; unit: string
 function syncBanner(s: AppSnapshot): string {
   const y = s.sync;
   if (y.phase === 'idle') return '';
+  if (y.kind === 'audio') return audioBanner(s, state.view === 'sync');
   const live = y.phase === 'running' || y.phase === 'starting';
   const what = y.synthetic ? 'synthetic demo frames' : `“${esc(y.sourceName ?? 'your screen')}”`;
   const text = y.phase === 'stopping' ? 'Screen Sync is stopping…' : y.phase === 'paused' ? `Screen Sync is paused · ${what}` : y.phase === 'starting' ? `Screen Sync is starting · ${what}` : `Screen Sync is live · sampling ${what} on this PC`;
@@ -506,6 +657,7 @@ function syncView(s: AppSnapshot): string {
     <header class="toolbar">
       <div><h1 id="sync-title">Screen Sync</h1><p class="sub">Match LAN lights to a screen or window you choose.</p></div>
       <div class="actions">
+        ${modeSwitch(s)}
         ${idle ? `<button class="primary" data-action="sync-start" ${canStart ? '' : 'disabled'}>${icon('play')}Start</button>` : ''}
       </div>
     </header>
@@ -741,6 +893,8 @@ const device = (id: string | undefined) => state.snap?.devices.find((d) => d.id 
 function commitSlider(el: HTMLInputElement): void {
   const [id, instance] = (el.dataset.key ?? '').split('|');
   if (id === 'sync' && instance) { commitSyncSetting(instance, Number(el.value)); return; }
+  if (id === 'audio' && instance) { commitAudioSetting(instance, Number(el.value)); return; }
+  if (id === 'room') { const parts = el.dataset.key!.split('|'); parts.pop(); const room = parts.slice(1).join('|'); void act(() => luma.roomAction(room, { brightness: Math.round(Number(el.value)) })); return; }
   const d = device(id);
   if (!d || !instance) return;
   const value = Math.round(Number(el.value));
@@ -856,6 +1010,25 @@ document.addEventListener('click', (event) => {
   const m = editor();
   switch (a) {
     case 'explore-demo': void act(() => luma.exploreDemo()); break;
+    case 'ss': {
+      const op = target.dataset.op!;
+      const sch = state.snap?.schedules.find((x) => x.id === id);
+      if (op === 'pause' && sch) {
+        const until = new Date(); until.setDate(until.getDate() + Number(target.dataset.days)); if (target.dataset.days === '1') until.setHours(12, 0, 0, 0);
+        void act(() => luma.saveSchedule({ ...sch, pausedUntil: until.getTime() }));
+      } else if (op === 'resume' && sch) { const { pausedUntil: _, ...rest } = sch; void act(() => luma.saveSchedule(rest)); }
+      else if (op === 'pair') void act(() => luma.scheduleSync('pair', (document.getElementById('ss-code') as HTMLInputElement | null)?.value ?? ''), 'Paired.');
+      else if (op === 'copyCode') void act(() => luma.scheduleSync('copyCode', target.dataset.code), 'Pairing code copied.');
+      else if (op === 'off') { if (confirm(state.snap?.scheduleSync.role === 'runner' && state.snap.scheduleSync.mayExecute ? 'Stop sharing? Paired devices will no longer see or change these schedules.' : 'Stop sharing? Schedules here are turned off so they don\'t also run on the other computer.')) void act(() => luma.scheduleSync('off')); }
+      else if (op === 'takeOver') void act(async () => {
+        try { await luma.scheduleSync('takeOver'); } catch (error) {
+          if (!confirm(`${error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : String(error)}\n\nRun schedules here anyway? This computer keeps asking the old one to stop and runs nothing until it agrees, so no schedule runs twice.`)) return;
+          await luma.scheduleSync('forceTakeOver');
+        }
+      });
+      else void act(() => luma.scheduleSync(op as Parameters<LumaBridge['scheduleSync']>[0]));
+      break;
+    }
     case 'copy-device-id': void act(() => luma.copyDeviceID(id!), 'Device ID copied.'); break;
     case 'clear-activity': void act(() => luma.clearActivity()); break;
     case 'activity-filter': state.problemsOnly = target.dataset.problems === '1'; render(); break;
@@ -866,8 +1039,41 @@ document.addEventListener('click', (event) => {
     case 'select': selectDevice(state.selected === id ? undefined : id); break;
     case 'deselect': selectDevice(undefined); break;
     case 'tab': state.tab = target.dataset.tab as Tab; render(); document.querySelector<HTMLElement>(`#tab-${state.tab}`)?.focus(); break;
-    case 'all': for (const d of state.snap?.devices ?? []) if (supports(d, 'powerSwitch')) control(d.id, basicCommand(d, 'powerSwitch', target.dataset.on === '1' ? 1 : 0)); break;
-    case 'room': for (const d of state.snap?.devices ?? []) if (d.room === target.dataset.room && supports(d, 'powerSwitch')) control(d.id, basicCommand(d, 'powerSwitch', target.dataset.on === '1' ? 1 : 0)); break;
+    case 'all': for (const d of state.snap?.devices ?? []) if (isLight(d) && supports(d, 'powerSwitch')) control(d.id, basicCommand(d, 'powerSwitch', target.dataset.on === '1' ? 1 : 0)); break;
+    case 'room-white': void act(() => luma.roomAction(target.dataset.room!, { kelvin: Number(target.dataset.value) })); break;
+    case 'dreamview': { const d = device(id), cap = d && capOf(d, 'dreamViewToggle'); if (d && cap) void act(() => luma.control(d.id, { type: cap.type, instance: cap.instance, value: dreamViewValue(d, target.dataset.on === '1') }), target.dataset.on === '1' ? 'DreamView start sent.' : 'DreamView stop sent.'); break; }
+    case 'restore-before': void act(() => luma.restoreBeforeScene(), 'Restoring lights.'); break;
+    case 'backup-export': void act(() => luma.exportBackup()); break;
+    case 'backup-import': if (confirm('Restore from a backup? Your scenes and schedules are replaced; your current home is saved as home-before-restore.json first.')) void act(async () => {
+      const r = await luma.importBackup();
+      if (r) flash(`Restored ${r.scenes} scene${r.scenes === 1 ? '' : 's'}, ${r.schedules} schedule${r.schedules === 1 ? '' : 's'} and ${r.lightsUpdated} light name${r.lightsUpdated === 1 ? '' : 's'}${r.lightsNotFound ? `; ${r.lightsNotFound} light${r.lightsNotFound === 1 ? ' isn’t' : 's aren’t'} connected here` : ''}${r.scenesWithMissingLights ? `; ${r.scenesWithMissingLights} scene${r.scenesWithMissingLights === 1 ? ' uses' : 's use'} missing lights` : ''}.`);
+    }); break;
+    case 'gh-import': void act(() => luma.goveeImport()); break;
+    case 'gh-signout': if (confirm('Sign out of Govee Home and remove the saved session from this PC?')) void act(() => luma.goveeSignOut()); break;
+    case 'gh-apply': if (state.goveeRooms) { const ids = [...state.goveeRooms.ids]; void act(() => luma.goveeApplyRooms(ids), 'Rooms imported.'); } break;
+    case 'compat-copy': void act(() => luma.copyCompatibilityReport(), 'Compatibility report copied.'); break;
+    case 'paint-mode': state.painterInstance.set(id!, target.dataset.instance!); render(); break;
+    case 'paint-seg': case 'paint-select': case 'paint-fill': case 'paint-gradient': case 'paint-clear': case 'paint-apply': case 'paint-scene': {
+      const d = device(id), schema = d && segmentSchema(capOf(d, target.dataset.instance!));
+      if (!d || !schema) break;
+      const p = painter(d, schema);
+      if (a === 'paint-seg') { const i = Number(target.dataset.index); if (p.selected.has(i)) p.selected.delete(i); else p.selected.add(i); }
+      if (a === 'paint-select') p.selected = new Set(target.dataset.which === 'all' ? schema.indexes : target.dataset.which === 'alternate' ? schema.indexes.filter((_, n) => n % 2 === 0) : []);
+      if (a === 'paint-fill') for (const i of p.selected) p.values.set(i, schema.valueField === 'rgb' ? p.color : p.level);
+      if (a === 'paint-gradient' && schema.valueField === 'rgb') { const picked = schema.indexes.filter((i) => p.selected.has(i)); picked.forEach((i, n) => p.values.set(i, hueToRGB(n / picked.length))); }
+      if (a === 'paint-clear') { p.values.clear(); p.selected.clear(); }
+      if (a === 'paint-apply' || a === 'paint-scene') {
+        let commands: CapabilityCommand[];
+        try { commands = paintCommands(schema, p.values); } catch (error) { flash(error instanceof Error ? error.message : String(error), true); break; }
+        if (a === 'paint-apply') { void act(() => luma.controlBatch(d.id, commands), `Sent ${commands.length} segment command${commands.length === 1 ? '' : 's'}.`); break; }
+        const steps: SceneStep[] = [...(supports(d, 'powerSwitch') ? [{ id: uuid(), deviceID: d.id, command: basicCommand(d, 'powerSwitch', 1), delayMilliseconds: 0 }] : []),
+          ...commands.map((command) => ({ id: uuid(), deviceID: d.id, command, delayMilliseconds: 0 }))];
+        state.modal = { kind: 'editor', draft: { id: uuid(), name: `${d.name} segments`.slice(0, 80), icon: 'sparkles', steps }, json: false, jsonText: '', isNew: true };
+      }
+      render();
+      break;
+    }
+    case 'room': for (const d of state.snap?.devices ?? []) if (isLight(d) && d.room === target.dataset.room && supports(d, 'powerSwitch')) control(d.id, basicCommand(d, 'powerSwitch', target.dataset.on === '1' ? 1 : 0)); break;
     case 'discover': void act(() => luma.discover()); break;
     case 'mode': state.colorMode.set(id!, target.dataset.mode as 'color' | 'white'); render(); break;
     case 'preset': { const d = device(id); if (d) control(d.id, basicCommand(d, target.dataset.instance!, Number(target.dataset.value))); break; }
@@ -914,7 +1120,7 @@ document.addEventListener('click', (event) => {
     case 'export-scene': void act(() => luma.exportScene(id!)); break;
     case 'import-scene': void act(async () => { const sc = await luma.importScene(); if (sc) flash(`Imported ${sc.name}.`); }); break;
     case 'delete-scene': { const sc = state.snap?.scenes.find((x) => x.id === id); if (sc && confirm(`Delete the scene “${sc.name}” and its schedules?`)) void act(() => luma.deleteScene(sc.id)); break; }
-    case 'capture': state.modal = { kind: 'capture', name: '', icon: 'sparkles', ids: (state.snap?.devices ?? []).filter((d) => d.online !== false).map((d) => d.id) }; render(); break;
+    case 'capture': state.modal = { kind: 'capture', name: '', icon: 'sparkles', ids: (state.snap?.devices ?? []).filter((d) => isLight(d) && d.online !== false).map((d) => d.id) }; render(); break;
     case 'modal-close': state.modal = undefined; render(); break;
     case 'add-schedule': { const sc = state.snap?.scenes[0]; if (sc) void act(() => luma.saveSchedule({ id: uuid(), sceneID: sc.id, hour: 19, minute: 0, weekdays: [1, 2, 3, 4, 5, 6, 7], enabled: true })); break; }
     case 'sch-day': {
@@ -993,6 +1199,7 @@ document.addEventListener('input', (event) => {
     case 'ed-json': if (m) m.jsonText = el.value; break;
     case 'port': state.portDraft = el.value; break;
     case 'field-int': updateDraft(el.dataset.key!, (draft) => { const n = Number(el.value); if (el.value === '') delete draft[fieldName(el.dataset.key!)]; else draft[fieldName(el.dataset.key!)] = Number.isSafeInteger(n) ? n : el.value; }); break;
+    case 'paint-level': { const d = device(el.dataset.id), schema = d && segmentSchema(capOf(d, el.dataset.instance!)); const n = Number(el.value); if (d && schema && Number.isSafeInteger(n)) painter(d, schema).level = Math.min(schema.valueRange[1], Math.max(schema.valueRange[0], n)); break; }
     case 'field-json': updateDraft(el.dataset.key!, (draft) => { try { draft[fieldName(el.dataset.key!)] = JSON.parse(el.value) as JSONValue; } catch { delete draft[fieldName(el.dataset.key!)]; } }); break;
   }
 });
@@ -1031,7 +1238,9 @@ document.addEventListener('change', (event) => {
       break;
     }
     case 'field-color': updateDraft(el.dataset.key!, (draft) => { draft[fieldName(el.dataset.key!)] = fromHex(el.value); }); break;
+    case 'paint-color': { const d = device(id), schema = d && segmentSchema(capOf(d, el.dataset.instance!)); if (d && schema) painter(d, schema).color = fromHex(el.value); break; }
     case 'adv-instance': state.advanced.set(id!, { instance: el.value, text: '' }); render(); break;
+    case 'ss-awake': void act(() => luma.scheduleSync('keepAwake', el.checked)); break;
     case 'lan': void act(() => luma.setWebhookConfig(Number(state.portDraft ?? state.snap!.webhook.port), el.checked)); break;
     case 'port': void act(async () => { await luma.setWebhookConfig(Number(el.value), state.snap!.webhook.allowLAN); state.portDraft = undefined; }); break;
     case 'sch-scene': case 'sch-time': case 'sch-enabled': {
@@ -1043,6 +1252,7 @@ document.addEventListener('change', (event) => {
       void act(() => luma.saveSchedule(next));
       break;
     }
+    case 'gh-room': if (state.goveeRooms) { if (el.checked) state.goveeRooms.ids.add(id!); else state.goveeRooms.ids.delete(id!); render(); } break;
     case 'cap-icon': if (state.modal?.kind === 'capture') state.modal.icon = el.value; break;
     case 'cap-device': if (state.modal?.kind === 'capture') { const ids = new Set(state.modal.ids); if (el.checked) ids.add(id!); else ids.delete(id!); state.modal.ids = [...ids]; } break;
     case 'ed-icon': if (m) m.draft.icon = el.value; break;
@@ -1073,7 +1283,7 @@ document.addEventListener('keydown', (event) => {
     if (!event.altKey && event.key === ',') { state.view = 'settings'; render(); event.preventDefault(); return; }
     if (!event.altKey && event.key.toLowerCase() === 'f') { state.view = 'lights'; render(); document.getElementById('light-search')?.focus(); event.preventDefault(); return; }
     if (!event.altKey && event.key === '.') { void act(() => luma.stopScene()); event.preventDefault(); return; }
-    if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) { for (const d of state.snap?.devices ?? []) if (supports(d, 'powerSwitch')) control(d.id, basicCommand(d, 'powerSwitch', event.key === 'ArrowUp' ? 1 : 0)); event.preventDefault(); return; }
+    if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) { for (const d of state.snap?.devices ?? []) if (isLight(d) && supports(d, 'powerSwitch')) control(d.id, basicCommand(d, 'powerSwitch', event.key === 'ArrowUp' ? 1 : 0)); event.preventDefault(); return; }
   }
   if (el instanceof HTMLInputElement && el.type === 'range') {
     const v = sliderStep(el, event.key);
@@ -1112,6 +1322,20 @@ document.addEventListener('submit', (event) => {
       void act(() => luma.connect(key), 'Connected.');
       break;
     }
+    case 'govee-signin': {
+      const email = (form.elements.namedItem('email') as HTMLInputElement).value;
+      const pass = form.elements.namedItem('password') as HTMLInputElement;
+      const codeInput = form.elements.namedItem('code') as HTMLInputElement | null;
+      const password = pass.value, code = codeInput?.value.trim() || undefined;
+      // The password stays in the field only until the code step finishes; main never stores it.
+      void act(async () => {
+        let result: 'needsCode' | 'signedIn';
+        try { result = await luma.goveeSignIn(email, password, code); } catch (error) { pass.value = ''; throw error; }
+        if (result === 'signedIn') { pass.value = ''; flash('Signed in to Govee Home.'); }
+        else flash('Govee emailed you a code. Enter it, then choose Finish sign-in.');
+      });
+      break;
+    }
     case 'details': {
       const id = form.dataset.id!;
       const name = (form.elements.namedItem('name') as HTMLInputElement).value;
@@ -1132,7 +1356,15 @@ document.addEventListener('submit', (event) => {
 
 modalHost.addEventListener('cancel', (event) => { event.preventDefault(); state.modal = undefined; render(); });
 
-luma.onSnapshot((snap) => { state.snap = snap; followSync(snap); render(); });
+initAudioSync({ luma, snap: () => state.snap, render, act, flash, errorText, slider: syncSlider });
+initDoorbell({ luma, snap: () => state.snap, act });
+luma.onSnapshot((snap) => { state.snap = snap; followSync(snap); followAudio(snap); render(); });
 luma.onNavigate((target) => { if (target.deviceID) selectDevice(target.deviceID, 'light'); else if (target.tab) { state.view = target.tab as View; render(); } });
 void luma.snapshot().then((snap) => { state.snap = snap; for (const a of snap.syncAssignments) { state.syncRegions.set(a.id, a.region); if (a.included) state.syncLights.set(a.id, a.region); } render(); });
 setInterval(() => { if (state.view === 'automations') render(); }, 30_000); // keep "Next:" times fresh
+
+/** Fully saturated color at hue 0…1 (segment painter rainbow). */
+function hueToRGB(h: number): number {
+  const f = (n: number) => { const k = (n + h * 6) % 6; return Math.round(255 * (1 - Math.max(0, Math.min(k, 4 - k, 1)))); };
+  return (f(5) << 16) | (f(3) << 8) | f(1);
+}

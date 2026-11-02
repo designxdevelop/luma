@@ -4,7 +4,8 @@ import AppKit
 import LumaCore
 
 public struct LumaApp: App {
-    @State private var store = HomeStore()
+    /// Shared with Siri / Shortcuts actions, which run in this process.
+    @State private var store = HomeStore.shared
     @State private var navigation = LumaNavigation()
     public init() {}
     public var body: some Scene {
@@ -14,6 +15,7 @@ public struct LumaApp: App {
                 .frame(minWidth: 1020, minHeight: 700)
                 .tint(.lumaAccentFill)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in store.shutdown() }
+                .onChange(of: store.shortcutVocabulary, initial: true) { LumaSiri.vocabularyChanged() }
         }
         .defaultSize(width: 1220, height: 820)
         .windowStyle(.hiddenTitleBar)
@@ -47,14 +49,14 @@ struct LumaCommands: Commands {
             Divider()
         }
         CommandMenu("Lights") {
-            Button("Turn All Lights On") { store.perform(.power(true), ids: store.devices.filter { $0.supports("powerSwitch") }.map(\.id)) }
+            Button("Turn All Lights On") { store.perform(.power(true), ids: store.lights.filter { $0.supports("powerSwitch") }.map(\.id)) }
                 .keyboardShortcut(.upArrow, modifiers: [.command, .option]).disabled(store.devices.isEmpty)
-            Button("Turn All Lights Off") { store.perform(.power(false), ids: store.devices.filter { $0.supports("powerSwitch") }.map(\.id)) }
+            Button("Turn All Lights Off") { store.perform(.power(false), ids: store.lights.filter { $0.supports("powerSwitch") }.map(\.id)) }
                 .keyboardShortcut(.downArrow, modifiers: [.command, .option]).disabled(store.devices.isEmpty)
             Divider()
             Button("Find Lights on Wi-Fi") { store.discover() }.disabled(store.scanning || store.demo)
             Button("Stop Running Scene") { store.stopScene() }.keyboardShortcut(".", modifiers: .command).disabled(store.runningSceneID == nil)
-            Button("Stop Screen Sync") { store.screenSync.stop() }.disabled(!store.screenSync.isActive)
+            Button("Stop \(store.screenSync.title)") { store.screenSync.stop() }.disabled(!store.screenSync.isActive)
         }
         CommandGroup(replacing: .help) {
             Link("Luma Source Code", destination: Links.source)
@@ -72,14 +74,14 @@ struct MenuBarView: View {
         Button("Open Luma") { presentMainWindow(openWindow, navigation: navigation) }
         if store.screenSync.isActive {
             Divider()
-            Text(store.screenSync.phase == .paused ? "Screen Sync paused" : "Screen Sync is capturing \(store.screenSync.source?.name ?? "your screen")")
-            if store.screenSync.phase == .paused { Button("Resume Screen Sync") { Task { await store.screenSync.start() } } }
-            else { Button("Pause Screen Sync") { store.screenSync.pause() } }
-            Button("Stop Screen Sync") { store.screenSync.stop() }
+            Text(store.screenSync.phase == .paused ? "\(store.screenSync.title) paused" : (store.screenSync.source?.isAudio == true ? "Listening to \(store.screenSync.source?.name ?? "audio")" : "Screen Sync is capturing \(store.screenSync.source?.name ?? "your screen")"))
+            if store.screenSync.phase == .paused { Button("Resume \(store.screenSync.title)") { Task { await store.screenSync.start() } } }
+            else { Button("Pause \(store.screenSync.title)") { store.screenSync.pause() } }
+            Button("Stop \(store.screenSync.title)") { store.screenSync.stop() }
         }
         Divider()
-        Button("Turn All Lights On") { store.perform(.power(true), ids: store.devices.filter { $0.supports("powerSwitch") }.map(\.id)) }.disabled(store.devices.isEmpty)
-        Button("Turn All Lights Off") { store.perform(.power(false), ids: store.devices.filter { $0.supports("powerSwitch") }.map(\.id)) }.disabled(store.devices.isEmpty)
+        Button("Turn All Lights On") { store.perform(.power(true), ids: store.lights.filter { $0.supports("powerSwitch") }.map(\.id)) }.disabled(store.devices.isEmpty)
+        Button("Turn All Lights Off") { store.perform(.power(false), ids: store.lights.filter { $0.supports("powerSwitch") }.map(\.id)) }.disabled(store.devices.isEmpty)
         if !store.home.scenes.isEmpty {
             Section("Scenes") {
                 ForEach(store.home.scenes) { scene in

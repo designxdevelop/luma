@@ -8,7 +8,8 @@ public struct LumaMobileApp: App {
     @State private var navigation = LumaNavigation()
     private let watch = WatchRelay()
     public init() {
-        let store = HomeStore()
+        // Shared with Siri / Shortcuts actions, which run in this process.
+        let store = HomeStore.shared
         _store = State(initialValue: store)
         // Started here, not on appear: a watch message can launch Luma in the
         // background, where no window appears.
@@ -18,6 +19,7 @@ public struct LumaMobileApp: App {
         WindowGroup {
             RootView(store: store, navigation: navigation).tint(.lumaAccentFill)
                 .onChange(of: store.watchSnapshot) { _, snapshot in watch.publish(snapshot) }
+                .onChange(of: store.shortcutVocabulary, initial: true) { LumaSiri.vocabularyChanged() }
         }
     }
 }

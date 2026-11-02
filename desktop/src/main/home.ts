@@ -7,21 +7,30 @@ import { loadWebhookIdentity, webhookSans, type WebhookIdentity } from '../core/
 // the ControlEngine overlay and are never persisted or served by the webhook API.
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import type { ActivityEntry, AppSnapshot, Capability, CapabilityCommand, LightDevice, LightScene, SavedHome, SceneSchedule, SceneStep } from '../shared/types';
-import { LAN_INSTANCES, LumaError, decodeScene, isObject, message, power, brightness, rgb, kelvin, safeInt, supports, validateCommand, validateScene } from '../core/model';
+import type { ActivityEntry, AppSnapshot, BackupResult, GoveeHomeView, Capability, CapabilityCommand, DeviceReading, LightDevice, LightScene, SavedHome, SceneSchedule, SceneStep } from '../shared/types';
+import { LAN_INSTANCES, LumaError, brightnessRange, decodeScene, isObject, message, power, brightness, rgb, kelvin, safeInt, supports, validateCommand, validateScene, whiteRange } from '../core/model';
+import { isLight } from '../shared/devices';
+import { compatibilityReport } from '../core/compat';
+import { applyBackup, decodeBackup, encodeBackup } from './backup';
 import { ControlEngine, type ControlOptions, type ControlTransport } from '../core/controls';
 import { SceneRunner, minuteKey, shouldRun, validateSchedule } from '../core/automation';
-import { GoveeCloud, type CloudOptions } from '../core/cloud';
+import { GoveeCloud, type CloudOptions, type DeviceState, type FetchLike } from '../core/cloud';
+import { GoveeAccount, SessionExpired, findConflicts, parseAutomations, parseDeviceList, parseGroups, planRooms, type ImportEntry } from '../core/account';
 import { GoveeLan, type LanPacket } from '../core/lan';
 import { WebhookServer } from '../core/http';
 import { createApiHandler } from '../core/api';
 import { HomeStorage, emptyHome, type SecretStore } from './storage';
-import { demoDevices, demoEffects, demoScenes } from './demo';
+import { demoDevices, demoEffects, demoReadings, demoScenes } from './demo';
 import { REGIONS } from '../shared/sync-math';
 import { SyncController } from './sync';
+import { ScheduleSync, type ScheduleSyncDeps } from './schedule-sync';
+import { canonicalID } from '../core/schedule-sync';
 import type { StreamField } from '../core/stream';
+import { DoorbellController } from './doorbell';
 
 const API_KEY = 'govee-api-key';
+const HOME_TOKEN = 'govee-home-token';
+const CLIENT_ID = 'govee-client-id';
 const WEBHOOK_TOKEN = 'webhook-token';
 
 export interface HomeOptions {
@@ -38,6 +47,12 @@ export interface HomeOptions {
   /** Real screen capture is available (connected mode on Windows). */
   captureSupported?: boolean;
   syncOptions?: Partial<ConstructorParameters<typeof SyncController>[1]>;
+  /** Govee Home account requests (tests); defaults to global fetch. */
+  accountFetch?: FetchLike;
+  /** Schedule sync overrides (tests: transport, clock, folder). */
+  scheduleSyncOptions?: Partial<ScheduleSyncDeps>;
+  /** Doorbell alert clock and relay fetch (tests). */
+  doorbellOptions?: Pick<ConstructorParameters<typeof DoorbellController>[0], 'clock' | 'fetch'>;
 }
 
 export class Home {
@@ -67,7 +82,15 @@ export class Home {
   private lanSeen = new Set<string>();
   /** Restore writes that must go over LAN or not at all (never cloud). */
   private readonly lanOnly = new WeakSet<CapabilityCommand>();
+  /** Last cloud readings per device (sensors, appliance modes). Never persisted. */
+  private readonly readings = new Map<string, DeviceReading[]>();
+  /** Confirmed state of the last scene's lights, taken before its first write. One level, never persisted. */
+  private restorePoint?: LightScene;
+  /** Last Govee Home import, in memory only (re-read with the saved token). */
+  private goveeHome: Omit<GoveeHomeView, 'available' | 'signedIn' | 'conflicts' | 'firmware'> & { entries: ImportEntry[] } = { awaitingCode: false, busy: false, groups: [], automations: [], unavailable: [], entries: [] };
   readonly sync: SyncController;
+  readonly scheduleSync: ScheduleSync;
+  readonly doorbell: DoorbellController;
 
   constructor(private readonly options: HomeOptions) {
     this.demo = options.demo;
@@ -77,7 +100,7 @@ export class Home {
         if (device.isDemo) return undefined;
         // Confirm over the route that carried the write: e.g. 1500 K goes by cloud even on a LAN light.
         if (device.ip && this.lan?.running && (!command || lanEligible(command))) { this.lan.requestStatus(device.ip); return undefined; }
-        if (this.cloud) return this.cloud.state(device);
+        if (this.cloud) return this.absorb(device.id, await this.cloud.state(device));
         return undefined;
       },
     };
@@ -94,8 +117,8 @@ export class Home {
       log: (text, isError) => this.log(text, isError),
     });
     this.sync = new SyncController({
-      devices: () => this.home.devices,
-      hasPending: (id) => this.engine.pendingFor(id).length > 0,
+      devices: () => this.home.devices.filter(isLight),
+      hasPending: (id) => this.engine.pendingFor(id).length > 0 || this.doorbell?.isAlerting(id) === true,
       sceneRunning: () => this.runner.runningSceneID !== undefined,
       lanReady: (d) => !!d.ip && !!this.lan?.running && this.lanSeen.has(d.ip),
       streamWrite: (id, field, value) => this.streamWrite(id, field, value),
@@ -109,6 +132,7 @@ export class Home {
     }, { demo: this.demo, captureSupported: !this.demo && options.captureSupported === true, ...options.syncOptions });
     if (this.demo) {
       this.home = { ...emptyHome(), devices: demoDevices(), scenes: demoScenes() };
+      for (const [id, values] of Object.entries(demoReadings())) this.readings.set(id, values);
       this.log('Demo home loaded. These are sample lights; nothing real is controlled, and changes are not saved.');
     } else if (options.storage) {
       try { this.home = options.storage.load(); }
@@ -118,6 +142,32 @@ export class Home {
       }
     }
     if (this.home.syncSettings) this.sync.setSettings(this.home.syncSettings);
+    this.scheduleSync = new ScheduleSync({
+      folder: this.demo ? undefined : options.storage?.folder,
+      secrets: this.demo ? undefined : options.secrets,
+      platform: process.platform === 'win32' ? 'windows' : process.platform,
+      scenes: () => this.home.scenes,
+      schedules: () => this.home.schedules,
+      apply: (scenes, schedules) => { this.home.scenes = scenes; this.home.schedules = schedules; this.schedulePersist(); },
+      run: (sceneID) => this.runSavedScene(sceneID),
+      runStatus: (runID) => this.runner.runs.find((r) => r.id === runID)?.status,
+      persistHome: () => this.persistNow(),
+      log: (text, isError) => this.log(text, isError),
+      changed: () => this.emit(),
+      ...options.scheduleSyncOptions,
+    });
+    this.doorbell = new DoorbellController({
+      demo: this.demo, folder: options.storage?.folder, secrets: options.secrets,
+      lights: () => this.home.devices.filter(isLight),
+      device: (id) => this.home.devices.find((d) => d.id === id),
+      lanReady: (d) => !!d.ip && !!this.lan?.running && this.lanSeen.has(d.ip),
+      busy: (id) => this.sync.holds(id) ? 'in Screen or Audio Sync' : this.home.devices.find((d) => d.id === id)?.dreamView ? 'DreamView is on' : this.engine.pendingFor(id).length ? 'being changed' : undefined,
+      read: (device) => this.freshRead(device),
+      write: (id, command) => this.alertWrite(id, command),
+      log: (text, isError) => this.log(text, isError),
+      changed: () => this.emit(),
+      ...options.doorbellOptions,
+    });
     this.scheduleTimer = setInterval(() => this.tickSchedules(), 15_000);
     this.scheduleTimer.unref?.();
   }
@@ -191,6 +241,11 @@ export class Home {
       sync: this.sync.view(),
       appearance: this.home.appearance ?? 'system',
       syncAssignments: this.home.syncAssignments ?? [],
+      readings: Object.fromEntries(this.readings),
+      goveeHome: this.goveeHomeView(),
+      scheduleSync: this.scheduleSync.view(),
+      doorbell: this.doorbell.view(),
+      restorePoint: this.restorePoint?.name,
     };
   }
 
@@ -290,7 +345,8 @@ export class Home {
       const existing = this.home.devices.find((d) => d.id.toLowerCase() === incoming.id.toLowerCase());
       if (existing) {
         existing.sku = incoming.sku;
-        existing.name = incoming.name;
+        existing.name = existing.customName ?? incoming.name; // a Luma rename survives cloud refreshes
+        if (incoming.deviceType) existing.deviceType = incoming.deviceType; else delete existing.deviceType;
         existing.capabilities = mergeCapabilities(existing.capabilities, incoming.capabilities);
       } else {
         this.home.devices.push({ ...incoming, room: 'Unassigned', capabilities: incoming.capabilities });
@@ -314,9 +370,20 @@ export class Home {
     if (device.ip && this.lan?.running) { this.lan.requestStatus(device.ip); return; }
     if (!this.cloud) throw new LumaError('Connect cloud or discover LAN lights to refresh state.');
     const revision = this.engine.revision(deviceID), generation = this.cloudGeneration;
-    const state = await this.cloud.state(device);
+    const state = this.absorb(deviceID, await this.cloud.state(device));
     this.ensureCurrent(generation);
     this.engine.report(deviceID, state, { revision });
+  }
+
+  /** Keeps readings and the DreamView flag from a cloud state read (the engine tracks basic controls only). */
+  private absorb(deviceID: string, state: DeviceState): DeviceState {
+    const { readings, dreamView, ...basic } = state;
+    const device = this.home.devices.find((d) => d.id === deviceID);
+    if (state.online === false) this.readings.delete(deviceID); // offline values are historical
+    else if (readings) this.readings.set(deviceID, readings);
+    if (device && dreamView !== undefined && state.online !== false) device.dreamView = dreamView;
+    this.emit();
+    return basic;
   }
 
   async discover(): Promise<void> {
@@ -368,6 +435,8 @@ export class Home {
 
   /** One write. LAN only for basic controls in the LAN range; everything else is cloud. Never retried. */
   private async transmit(device: LightDevice, command: CapabilityCommand, signal: AbortSignal): Promise<{ route: string; confirmed?: boolean }> {
+    // Any ordinary write takes the light out of a running doorbell alert; it is not restored.
+    this.doorbell.yield(device.id);
     if (device.isDemo) return { route: 'Demo', confirmed: true };
     if (this.demo) throw new LumaError('Demo mode never controls real lights.');
     if (this.lanOnly.has(command) && !(device.ip && this.lan?.running && lanEligible(command))) {
@@ -390,6 +459,68 @@ export class Home {
       await this.sync.exclude(deviceID);
     }
     await this.engine.submit(deviceID, command, { coalesce: true });
+    // DreamView state is cloud-only and has no confirmation read; check it once it has had time to start.
+    if (command.instance === 'dreamViewToggle' && this.cloud) setTimeout(() => void this.refresh(deviceID, true).catch(() => {}), 3000).unref?.();
+  }
+
+  /** Ordered writes to one light, never coalesced (each segment group is its own command). All validated before the first send. */
+  async controlBatch(deviceID: string, commands: unknown): Promise<void> {
+    const device = this.findDevice(deviceID);
+    if (!Array.isArray(commands) || commands.length === 0 || commands.length > 64) throw new LumaError('Send 1–64 commands at a time.');
+    for (const c of commands) validateCommand(c as CapabilityCommand, device);
+    if (this.sync.holds(deviceID)) await this.sync.exclude(deviceID);
+    // Enqueued synchronously in order; the engine sends them in order per light.
+    await Promise.all((commands as CapabilityCommand[]).map((c) => this.engine.submit(deviceID, c)));
+  }
+
+  /** Room brightness or white. Each light gets the value clamped to its own advertised range; non-lights are skipped. */
+  async roomAction(room: unknown, action: unknown): Promise<void> {
+    if (typeof room !== 'string' || !room || room.length > 160 || !isObject(action)) throw new LumaError('Invalid room action.');
+    const keys = Object.keys(action);
+    if (keys.length !== 1 || !['brightness', 'kelvin'].includes(keys[0]!)) throw new LumaError('Choose brightness or white for the room.');
+    const lights = this.home.devices.filter((d) => isLight(d) && d.room === room);
+    const writes: Array<[string, CapabilityCommand]> = [];
+    if (action.brightness !== undefined) {
+      const value = safeInt(action.brightness, 1, 100);
+      if (value === undefined) throw new LumaError('Brightness must be an integer 1–100.');
+      for (const d of lights) if (supports(d, 'brightness')) { const [lo, hi] = brightnessRange(d); writes.push([d.id, brightness(Math.min(hi, Math.max(lo, value)))]); }
+    } else {
+      const value = safeInt(action.kelvin, 1000, 10000);
+      if (value === undefined) throw new LumaError('White must be an integer 1000–10000 K.');
+      for (const d of lights) if (supports(d, 'colorTemperatureK')) { const [lo, hi] = whiteRange(d); writes.push([d.id, kelvin(Math.min(hi, Math.max(lo, value)))]); }
+    }
+    if (writes.length === 0) throw new LumaError(`No lights in ${room} support ${action.brightness !== undefined ? 'brightness' : 'white'}.`);
+    await Promise.allSettled(writes.map(([id, c]) => (this.sync.holds(id) ? this.control(id, c) : this.engine.submit(id, c, { coalesce: true }))));
+  }
+
+  /** Doorbell alert pulse or restore: one direct write, like a Screen Sync datagram, but cloud is allowed. */
+  private async alertWrite(deviceID: string, command: CapabilityCommand): Promise<void> {
+    const device = this.findDevice(deviceID);
+    validateCommand(command, device);
+    if (device.isDemo) { applyDemo(device, command); this.emit(); return; }
+    if (this.demo) throw new LumaError('Demo mode never controls real lights.');
+    if (device.ip && this.lan?.running && this.lanSeen.has(device.ip) && lanEligible(command)) { await this.lan.control(device.ip, command); return; }
+    if (!this.cloud) throw new LumaError('No LAN or cloud route for this light.');
+    await this.cloud.control(device, command, this.cloudAbort.signal);
+  }
+
+  /** One fresh state read for the doorbell alert. LAN waits up to 1.5 s for the status reply. */
+  private async freshRead(device: LightDevice): Promise<boolean> {
+    if (device.ip && this.lan?.running && this.lanSeen.has(device.ip)) {
+      const started = Date.now(), before = device.lastSeen ?? 0;
+      this.lan.requestStatus(device.ip);
+      for (let i = 0; i < 30; i++) {
+        const seen = this.home.devices.find((d) => d.id === device.id)?.lastSeen ?? 0;
+        if (seen > before && seen >= started) return true;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return false;
+    }
+    if (!this.cloud) return false;
+    const revision = this.engine.revision(device.id);
+    const state = await Promise.race([this.cloud.state(device), new Promise<never>((_, reject) => setTimeout(() => reject(new LumaError('timed out')), 3000).unref?.())]);
+    this.engine.report(device.id, this.absorb(device.id, state), { revision });
+    return true;
   }
 
   /** One Screen Sync datagram: LAN only, no status request, no cloud, IP from confirmed records only. */
@@ -421,6 +552,7 @@ export class Home {
     const trimmed = typeof name === 'string' ? name.trim().slice(0, 64) : '';
     if (!trimmed) throw new LumaError('Enter a name.');
     device.name = trimmed;
+    device.customName = trimmed;
     this.schedulePersist(); this.emit();
   }
 
@@ -434,10 +566,13 @@ export class Home {
 
   saveScene(input: unknown): LightScene {
     const scene = decodeScene(input, this.home.devices);
+    // Shared scenes need UUIDs so the Mac and iPhone can read them.
+    if (this.scheduleSync.role !== 'off' && !canonicalID(scene.id)) scene.id = randomUUID();
     const index = this.home.scenes.findIndex((s) => s.id === scene.id);
     if (index >= 0) this.home.scenes[index] = scene; else this.home.scenes.push(scene);
     this.schedulePersist();
     this.log(`Saved scene: ${scene.name}.`);
+    this.scheduleSync.localChange('scene', scene.id);
     return scene;
   }
 
@@ -445,11 +580,19 @@ export class Home {
     this.home.scenes = this.home.scenes.filter((s) => s.id !== sceneID);
     this.home.schedules = this.home.schedules.filter((s) => s.sceneID !== sceneID);
     this.schedulePersist(); this.emit();
+    this.scheduleSync.localChange('scene', sceneID);
   }
 
   /** Builds steps from confirmed state (never from pending intents). */
   captureScene(name: string, icon: string, deviceIDs: string[]): LightScene {
     if (!Array.isArray(deviceIDs) || deviceIDs.length === 0) throw new LumaError('Choose at least one light.');
+    const steps = this.snapshotSteps(deviceIDs);
+    if (steps.length === 0) throw new LumaError('Those lights have no known state to capture yet. Refresh them first.');
+    return this.saveScene({ id: randomUUID(), name, icon, steps });
+  }
+
+  /** Steps that put lights back to their last confirmed state. Unknown power is skipped. */
+  private snapshotSteps(deviceIDs: string[]): SceneStep[] {
     const steps: SceneStep[] = [];
     for (const device of this.home.devices.filter((d) => deviceIDs.includes(d.id))) {
       const add = (command: CapabilityCommand) => steps.push({ id: randomUUID(), deviceID: device.id, command, delayMilliseconds: 0 });
@@ -459,8 +602,7 @@ export class Home {
       if (device.colorTemperature && device.colorTemperature > 0 && supports(device, 'colorTemperatureK')) add(kelvin(device.colorTemperature));
       else if (device.rgb !== undefined && supports(device, 'colorRgb')) add(rgb(device.rgb));
     }
-    if (steps.length === 0) throw new LumaError('Those lights have no known state to capture yet. Refresh them first.');
-    return this.saveScene({ id: randomUUID(), name, icon, steps });
+    return steps;
   }
 
   validateSceneJSON(text: string): LightScene {
@@ -483,11 +625,26 @@ export class Home {
   }
 
   /** Validates the whole scene against current lights before the first command. */
-  runScene(scene: LightScene): string {
+  runScene(scene: LightScene, saveRestorePoint = true): string {
     validateScene(scene, this.home.devices);
     // Scenes, schedules and webhooks never fight the stream: the whole run is refused before its first write.
     if (scene.steps.some((st) => this.sync.holds(st.deviceID))) throw new LumaError('Screen Sync is using one of these lights. Stop it first.', 409);
-    return this.runner.start(scene);
+    // Taken before any step is sent. Effects, segments and DreamView aren't undone, only power/brightness/color/white.
+    const steps = saveRestorePoint ? this.snapshotSteps([...new Set(scene.steps.map((st) => st.deviceID))]) : [];
+    const runID = this.runner.start(scene);
+    if (saveRestorePoint) this.restorePoint = steps.length ? { id: randomUUID(), name: `Before ${scene.name}`.slice(0, 80), icon: 'sparkles', steps } : undefined;
+    this.emit();
+    return runID;
+  }
+
+  /** Puts the last scene's lights back. One level: restoring doesn't save a new point. */
+  restoreBeforeScene(): string {
+    const point = this.restorePoint;
+    if (!point) throw new LumaError('There is nothing to restore.');
+    const runID = this.runScene(point, false);
+    this.restorePoint = undefined;
+    this.emit();
+    return runID;
   }
 
   runSavedScene(sceneID: string): string {
@@ -505,6 +662,134 @@ export class Home {
     await Promise.allSettled(deviceIDs.map((id) => (this.sync.holds(id) ? this.control(id, command) : this.engine.submit(id, command, { coalesce: true }))));
   }
 
+  // ---------- Govee Home account (read-only) ----------
+
+  private goveeHomeView(): GoveeHomeView {
+    const { entries, ...view } = this.goveeHome;
+    const available = !this.demo && (this.options.secrets?.available ?? false);
+    const firmware: Record<string, string> = {};
+    for (const e of entries) {
+      const d = e.firmware ? this.home.devices.find((x) => x.id.toLowerCase() === e.device.toLowerCase() && x.sku.toLowerCase() === e.sku.toLowerCase()) : undefined;
+      if (d) firmware[d.id] = e.firmware!;
+    }
+    return { ...view, available, signedIn: available && this.hasSecret(HOME_TOKEN), conflicts: this.goveeConflicts(), firmware };
+  }
+
+  private goveeConflicts() {
+    // Automations name lights by their Govee name, which a Luma rename replaces in `name`.
+    const names = new Map(this.goveeHome.entries.map((e) => [e.device.toLowerCase(), e.name]));
+    const devices = this.home.devices.map((d) => ({ ...d, goveeName: names.get(d.id.toLowerCase()) ?? d.name }));
+    return findConflicts(this.goveeHome.automations, this.home.schedules, this.home.scenes, devices);
+  }
+
+  private account(): GoveeAccount {
+    const secrets = this.requireSecrets();
+    let clientId = secrets.read(CLIENT_ID);
+    if (!clientId) { clientId = randomBytes(16).toString('hex'); secrets.write(CLIENT_ID, clientId); }
+    return new GoveeAccount(clientId, { fetch: this.options.accountFetch });
+  }
+
+  /** Read-only sign-in. The password is sent once to app2.govee.com and never stored; the session token is kept encrypted. */
+  async goveeSignIn(email: unknown, password: unknown, code?: unknown): Promise<'needsCode' | 'signedIn'> {
+    this.requireReal('Govee Home sign-in');
+    if (typeof email !== 'string' || !/^[^\s@]{1,128}@[^\s@]{1,128}$/.test(email.trim())) throw new LumaError('Enter the email for your Govee Home account.');
+    if (typeof password !== 'string' || password.length === 0 || password.length > 256) throw new LumaError('Enter your Govee Home password.');
+    const codeText = typeof code === 'string' ? code.trim() : '';
+    if (codeText && !/^[0-9A-Za-z]{4,10}$/.test(codeText)) throw new LumaError('Enter the code from Govee’s email.');
+    if (this.goveeHome.busy) throw new LumaError('Already working on it.');
+    const secrets = this.requireSecrets();
+    this.goveeHome.busy = true; this.emit();
+    try {
+      const result = await this.account().login(email.trim(), password, codeText || undefined);
+      if (result.kind === 'needsCode') {
+        this.goveeHome.awaitingCode = true;
+        this.log('Govee emailed a sign-in code. Enter it to finish signing in.');
+        return 'needsCode';
+      }
+      secrets.write(HOME_TOKEN, result.token);
+      this.goveeHome.awaitingCode = false;
+      this.log('Signed in to Govee Home (read-only).');
+    } finally { this.goveeHome.busy = false; this.emit(); }
+    await this.goveeImport();
+    return 'signedIn';
+  }
+
+  /** Reads rooms (required), then control groups and automations (best effort) with the saved session. */
+  async goveeImport(): Promise<void> {
+    this.requireReal('Govee Home import');
+    const token = this.requireSecrets().read(HOME_TOKEN);
+    if (!token) throw new LumaError('Sign in to Govee Home first.');
+    if (this.goveeHome.busy) throw new LumaError('Already working on it.');
+    this.goveeHome.busy = true; this.emit();
+    const account = this.account();
+    try {
+      const entries = parseDeviceList(await account.deviceList(token));
+      const unavailable: string[] = [];
+      const extra = async <T>(label: string, read: () => Promise<T[]>): Promise<T[]> => {
+        try { return await read(); } catch (error) { if (error instanceof SessionExpired) throw error; unavailable.push(label); return []; }
+      };
+      const groups = await extra('control groups', async () => parseGroups(await account.groups(token)));
+      const automations = await extra('automations', async () => parseAutomations(await account.automations(token)));
+      this.goveeHome = { ...this.goveeHome, entries, groups, automations, unavailable, importedAt: Date.now(), plan: planRooms(entries, this.home.devices) };
+      this.log(`Read Govee Home: ${entries.length} devices, ${groups.length} groups, ${automations.length} automations.${unavailable.length ? ` Couldn't read ${unavailable.join(' or ')}.` : ''}`);
+    } catch (error) {
+      if (error instanceof SessionExpired) { this.options.secrets?.delete(HOME_TOKEN); this.goveeHome = { ...this.goveeHome, plan: undefined }; }
+      this.log(`Govee Home import failed: ${message(error)}`, true);
+      throw error;
+    } finally { this.goveeHome.busy = false; this.emit(); }
+  }
+
+  /** Applies the chosen Govee Home rooms. Only lights in the current plan can change. */
+  goveeApplyRooms(deviceIDs: unknown): void {
+    const plan = this.goveeHome.plan;
+    if (!plan) throw new LumaError('Import from Govee Home first.');
+    if (!Array.isArray(deviceIDs) || deviceIDs.length > 1000) throw new LumaError('Invalid selection.');
+    const chosen = new Set(deviceIDs.filter((id): id is string => typeof id === 'string'));
+    let applied = 0;
+    for (const change of plan.changes.filter((c) => chosen.has(c.deviceID))) {
+      const device = this.home.devices.find((d) => d.id === change.deviceID);
+      if (device) { device.room = change.goveeRoom.slice(0, 40); applied++; }
+    }
+    this.goveeHome.plan = planRooms(this.goveeHome.entries, this.home.devices);
+    this.schedulePersist();
+    this.log(`Imported Govee Home rooms for ${applied} light${applied === 1 ? '' : 's'}.`);
+  }
+
+  goveeSignOut(): void {
+    this.requireReal('Govee Home sign-out');
+    this.options.secrets?.delete(HOME_TOKEN);
+    this.goveeHome = { awaitingCode: false, busy: false, groups: [], automations: [], unavailable: [], entries: [] };
+    this.log('Signed out of Govee Home and removed the saved session.');
+  }
+
+  // ---------- backup ----------
+
+  /** Scenes, schedules, names and rooms in the native backup format. No keys, tokens, IPs or webhook settings. */
+  exportBackup(): string {
+    this.requireReal('backup');
+    return encodeBackup(this.home);
+  }
+
+  /** Replaces scenes and schedules; names and rooms apply to known lights. The current home is saved beside home.json first. */
+  restoreBackup(text: string): BackupResult {
+    this.requireReal('restore');
+    this.scheduleSync.assertMayReplaceAll();
+    if (!this.canSave) throw new LumaError('Your saved home could not be read, so restore is disabled to keep that file untouched.');
+    if (this.runner.runningSceneID) throw new LumaError('Stop the running scene before restoring.');
+    const backup = decodeBackup(text);
+    try { this.options.storage?.saveCopy(this.home, 'home-before-restore.json'); }
+    catch (error) { throw new LumaError(`Could not save a safety copy, so nothing was restored: ${message(error)}`); }
+    const result = applyBackup(this.home, backup);
+    this.restorePoint = undefined;
+    this.persistNow();
+    this.log(`Restored backup: ${result.scenes} scenes, ${result.schedules} schedules, ${result.lightsUpdated} lights.${result.lightsNotFound ? ` ${result.lightsNotFound} lights in the backup aren't connected here.` : ''}`);
+    return result;
+  }
+
+  compatibilityReport(): string {
+    return compatibilityReport(this.home.devices, `Luma ${this.options.version} for ${process.platform === 'win32' ? 'Windows' : process.platform === 'linux' ? 'Linux' : process.platform} (Electron)`);
+  }
+
   // ---------- schedules ----------
 
   saveSchedule(input: unknown): void {
@@ -513,14 +798,18 @@ export class Home {
     if (index >= 0) this.home.schedules[index] = { ...schedule, lastRunMinute: this.home.schedules[index]!.lastRunMinute };
     else this.home.schedules.push(schedule);
     this.schedulePersist(); this.emit();
+    this.scheduleSync.localChange('schedule', schedule.id);
   }
 
   deleteSchedule(id: string): void {
     this.home.schedules = this.home.schedules.filter((s) => s.id !== id);
     this.schedulePersist(); this.emit();
+    this.scheduleSync.localChange('schedule', id);
   }
 
   tickSchedules(now = new Date()): void {
+    // Shared schedules run only on the selected computer; a paired one never runs them.
+    if (this.scheduleSync.tick(now)) return;
     for (const schedule of this.home.schedules) {
       if (!shouldRun(schedule, now)) continue;
       schedule.lastRunMinute = minuteKey(now);
@@ -600,11 +889,14 @@ export class Home {
       scenes: () => this.home.scenes,
       runs: () => this.runner.runs,
       runScene: (scene: LightScene) => this.runScene(scene),
+      doorbell: (method: string, rest: string[], body: Buffer) => this.doorbell.api(method, rest, body),
     };
   }
 
   async shutdown(): Promise<void> {
+    await this.doorbell.shutdown();
     clearInterval(this.scheduleTimer);
+    await this.scheduleSync.stop();
     clearTimeout(this.scanTimer);
     await this.sync.stop('Luma is quitting.');
     this.runner.stop();
@@ -616,7 +908,7 @@ export class Home {
 
   /** Schedules for the tray / renderer, and light IDs by room. */
   roomDeviceIDs(room?: string): string[] {
-    return this.home.devices.filter((d) => room === undefined || d.room === room).map((d) => d.id);
+    return this.home.devices.filter((d) => isLight(d) && (room === undefined || d.room === room)).map((d) => d.id);
   }
 
   get hasSavedHome(): boolean { return this.home.devices.length > 0; }
@@ -624,6 +916,14 @@ export class Home {
 }
 
 function fail(text: string): never { throw new LumaError(text); }
+
+function applyDemo(device: LightDevice, command: CapabilityCommand): void {
+  const n = command.value as number;
+  if (command.instance === 'powerSwitch') device.power = n === 1;
+  else if (command.instance === 'brightness') device.brightness = n;
+  else if (command.instance === 'colorRgb') { device.rgb = n; device.colorTemperature = 0; }
+  else if (command.instance === 'colorTemperatureK') device.colorTemperature = n;
+}
 
 function newToken(): string { return `lm_${randomBytes(32).toString('base64url')}`; }
 
