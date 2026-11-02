@@ -12,7 +12,7 @@ import { X509Certificate } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, normalize, resolve } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import {
   SYNC_PATH, applyResponse, buildBatches, certPin, clientView, formatPairingCode, newClientState, parsePairingCode, stage,
@@ -24,10 +24,13 @@ import { encodeBackup } from '../main/backup';
 import { emptyHome } from '../main/storage';
 import { serviceDefinition } from '../bridge/cli';
 
+import { createSecretStore } from '../bridge/secret-store';
+
 const CLI = join(__dirname, '..', 'bridge', 'cli.js');
 const SCENE = 'A1A1A1A1-0000-4000-8000-0000000000B1';
 const SCHED = 'B2B2B2B2-0000-4000-8000-0000000000B2';
 const posix = process.platform !== 'win32';
+const backend = posix ? 'file' : 'dpapi';
 
 const SCHED2 = 'B2B2B2B2-0000-4000-8000-0000000000B6';
 
@@ -53,10 +56,15 @@ async function bridge(t: TestContext) {
   t.after(() => { if (posix) chmodSync(join(root, 'data'), 0o700); rmSync(root, { recursive: true, force: true }); });
   const dir = join(root, 'data');
   const port = await freePort();
-  const setup = await cli(dir, ['setup', '--secrets', 'file', '--port', String(port)]);
+  const setup = await cli(dir, ['setup', '--secrets', backend, '--port', String(port)]);
   assert.equal(setup.code, 0, setup.out);
   assert.equal((await cli(dir, ['configure', '--lan', 'off'])).code, 0);
-  const secret = (name: string) => Buffer.from(readFileSync(join(dir, 'secrets', name), 'utf8'), 'base64').toString('utf8');
+  const store = createSecretStore(backend, dir);
+  const secret = (name: string) => {
+    const value = store.read(name);
+    assert.ok(value, `Missing test secret: ${name}`);
+    return value;
+  };
   const token = secret('schedule-sync-token');
   const pin = certPin(new X509Certificate((JSON.parse(secret('schedule-sync-tls')) as { cert: string }).cert).raw);
   return { dir, port, token, pin, code: formatPairingCode({ host: '127.0.0.1', port, pin, token }) };
@@ -181,7 +189,7 @@ test('bridge refuses to run: not set up, app profile, corrupt state, open secret
 
   const electron = join(root, 'electron');
   mkdirSync(electron); writeFileSync(join(electron, 'Local State'), '{}');
-  const refused = await cli(electron, ['setup', '--secrets', 'file']);
+  const refused = await cli(electron, ['setup', '--secrets', backend]);
   assert.equal(refused.code, 1); assert.match(refused.out, /belongs to a Luma app/);
   assert.ok(!existsSync(join(electron, 'bridge.json')), 'nothing written into an app profile');
 
@@ -253,9 +261,9 @@ test('bridge: doorbell alert is configurable headless when the build includes it
 });
 
 test('bridge: data folder, app profile guard and service definitions', () => {
-  assert.equal(defaultDataDir('linux', {}, '/home/pi'), '/home/pi/.config/luma-bridge');
-  assert.equal(defaultDataDir('darwin', {}, '/Users/a'), '/Users/a/Library/Application Support/LumaBridge');
-  assert.equal(defaultDataDir('linux', { LUMA_BRIDGE_DATA: '/srv/luma' }, '/home/pi'), '/srv/luma');
+  assert.equal(defaultDataDir('linux', {}, '/home/pi'), normalize('/home/pi/.config/luma-bridge'));
+  assert.equal(defaultDataDir('darwin', {}, '/Users/a'), normalize('/Users/a/Library/Application Support/LumaBridge'));
+  assert.equal(defaultDataDir('linux', { LUMA_BRIDGE_DATA: '/srv/luma' }, '/home/pi'), resolve('/srv/luma'));
   assert.throws(() => assertNotAppProfile('/home/pi/.config/LumaLinux', 'linux', {}, '/home/pi'), /belongs to a Luma app/);
   assert.doesNotThrow(() => assertNotAppProfile('/home/pi/.config/luma-bridge', 'linux', {}, '/home/pi'));
   for (const kind of ['launchd', 'systemd', 'systemd-system', 'windows']) {
@@ -279,7 +287,7 @@ test('bridge: hand-off between two bridges uses the protocol (pair, take-over; o
   t.after(() => rmSync(join(bDir, '..'), { recursive: true, force: true }));
   const bPort = await freePort();
   // A fresh folder: pair creates bridge.json itself. The code arrives on stdin, never argv.
-  const pair = await cli(bDir, ['pair', '--secrets', 'file', '--port', String(bPort)], a.code);
+  const pair = await cli(bDir, ['pair', '--secrets', backend, '--port', String(bPort)], a.code);
   assert.equal(pair.code, 0, pair.out);
   assert.equal((await cli(bDir, ['configure', '--lan', 'off'])).code, 0);
   const take = await cli(bDir, ['take-over']);
@@ -308,7 +316,7 @@ test('bridge: import a home backup on a fresh folder, then set up', async (t) =>
   const dir = join(root, 'data');
   const file = join(root, 'home.luma-backup.json');
   writeFileSync(file, encodeBackup({ ...emptyHome(), scenes: [{ id: SCENE, name: 'Evening', icon: 'moon', steps: [{ id: 'C3C3C3C3-0000-4000-8000-0000000000B8', deviceID: 'AA:BB', command: { type: 'devices.capabilities.on_off', instance: 'powerSwitch', value: 1 }, delayMilliseconds: 0 }] }], schedules: [{ id: SCHED, sceneID: SCENE, hour: 3, minute: 17, weekdays: [1], enabled: true }] }));
-  const imported = await cli(dir, ['import-backup', file, '--secrets', 'file']);
+  const imported = await cli(dir, ['import-backup', file, '--secrets', backend]);
   assert.equal(imported.code, 0, imported.out);
   assert.match(imported.out, /1 scenes, 1 schedules/);
   const setup = await cli(dir, ['setup', '--port', String(await freePort())]);
