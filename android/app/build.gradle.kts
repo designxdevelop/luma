@@ -11,11 +11,26 @@ android {
         applicationId = "com.designxdevelop.luma"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0" // Release rule: stays 1.0; only versionCode increases.
+        // Release rule: versionName stays 1.0; every Play upload needs a higher versionCode.
+        versionCode = (findProperty("versionCode") as String? ?: System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+        versionName = "1.0"
+    }
+    // Play upload key, kept outside the repo (see docs/PLAY.md). Without it, release builds are unsigned.
+    val uploadKeystore = System.getenv("LUMA_UPLOAD_KEYSTORE")?.let(::file)?.takeIf { it.exists() }
+    signingConfigs {
+        if (uploadKeystore != null) create("upload") {
+            storeFile = uploadKeystore
+            storePassword = System.getenv("LUMA_UPLOAD_PASSWORD")
+            keyAlias = System.getenv("LUMA_UPLOAD_ALIAS") ?: "luma-upload"
+            keyPassword = System.getenv("LUMA_UPLOAD_PASSWORD")
+        }
     }
     buildTypes {
-        release { isMinifyEnabled = false }
+        // ponytail: R8 off; enabling it needs kotlinx-serialization keep rules.
+        release {
+            isMinifyEnabled = false
+            signingConfigs.findByName("upload")?.let { signingConfig = it }
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
