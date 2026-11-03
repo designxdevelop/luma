@@ -110,7 +110,20 @@ data class SceneSchedule(
     fun shouldRun(at: ZonedDateTime): Boolean =
         enabled && at.hour == hour && at.minute == minute && appleWeekday(at) in weekdays &&
             lastRunMinute != minuteKey(at) &&
-            !(pausedUntil?.let { runCatching { java.time.Instant.parse(it) }.getOrNull()?.isAfter(at.toInstant()) } ?: false)
+            !paused(at)
+
+    private fun paused(at: ZonedDateTime) = pausedUntil?.let { runCatching { java.time.Instant.parse(it) }.getOrNull()?.isAfter(at.toInstant()) } ?: false
+
+    /** The first run strictly after [after], or null when disabled. A time skipped by DST moves forward, as java.time does. */
+    fun next(after: ZonedDateTime): ZonedDateTime? {
+        if (!enabled || weekdays.isEmpty()) return null
+        for (day in 0L..8L) {
+            val at = after.toLocalDate().plusDays(day).atTime(hour, minute).atZone(after.zone)
+            if (at.isAfter(after) && appleWeekday(at) in weekdays && !paused(at)) return at
+        }
+        // Paused for more than a week: look again from the end of the pause.
+        return pausedUntil?.let { runCatching { java.time.Instant.parse(it) }.getOrNull() }?.let { next(it.atZone(after.zone)) }
+    }
 
     companion object {
         /** java.time counts Monday = 1 … Sunday = 7; Apple counts Sunday = 1 … Saturday = 7. */

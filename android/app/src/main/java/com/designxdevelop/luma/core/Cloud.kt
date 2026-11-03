@@ -22,7 +22,8 @@ import java.net.UnknownHostException
  * Commands are never retried; reads get one retry after a transient transport failure.
  */
 class GoveeCloud(apiKey: String, private val transport: Transport = HttpTransport) {
-    fun interface Transport { fun send(method: String, url: String, headers: Map<String, String>, body: ByteArray?): Pair<Int, ByteArray> }
+    data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null)
+    fun interface Transport { fun send(method: String, url: String, headers: Map<String, String>, body: ByteArray?): Response }
 
     private val apiKey = apiKey.trim()
     private val mutex = Mutex()
@@ -146,11 +147,10 @@ class GoveeCloud(apiKey: String, private val transport: Transport = HttpTranspor
             }.toString().toByteArray()
         }
         val headers = mapOf("Govee-API-Key" to apiKey, "Content-Type" to "application/json")
-        val (status, data) = withContext(Dispatchers.IO) {
+        val (status, data, retryAfter) = withContext(Dispatchers.IO) {
             transport.send(if (device != null) "POST" else "GET", "https://openapi.api.govee.com/router/api/v1/$path", headers, body)
         }
-        // ponytail: fixed 60 s pause on 429; Swift reads Retry-After (2…3600 s). Pass headers through Transport if Govee starts sending short values.
-        if (status == 429) nextAccount = now() + 60_000
+        if (status == 429) nextAccount = now() + retryAfterMillis(retryAfter)
         if (status !in 200..299) throw when (status) {
             401, 403 -> LumaException("Govee rejected the API key (HTTP $status). Check your key in Settings.")
             429 -> LumaException("Govee's rate limit was reached. Requests are paused; try again later.")
@@ -169,8 +169,13 @@ class GoveeCloud(apiKey: String, private val transport: Transport = HttpTranspor
 
     private fun now() = System.nanoTime() / 1_000_000
 
+    companion object {
+        /** Retry-After in seconds, clamped to 2…3600 like the Swift client; 60 s when absent or unreadable. */
+        fun retryAfterMillis(header: String?): Long = ((header?.trim()?.toDoubleOrNull() ?: 60.0).coerceIn(2.0, 3600.0) * 1000).toLong()
+    }
+
     object HttpTransport : Transport {
-        override fun send(method: String, url: String, headers: Map<String, String>, body: ByteArray?): Pair<Int, ByteArray> {
+        override fun send(method: String, url: String, headers: Map<String, String>, body: ByteArray?): Response {
             val c = URL(url).openConnection() as HttpURLConnection
             try {
                 c.requestMethod = method
@@ -179,7 +184,7 @@ class GoveeCloud(apiKey: String, private val transport: Transport = HttpTranspor
                 if (body != null) { c.doOutput = true; c.outputStream.use { it.write(body) } }
                 val status = c.responseCode
                 val stream = if (status >= 400) c.errorStream else c.inputStream
-                return status to (stream?.use { it.readBytes() } ?: ByteArray(0))
+                return Response(status, stream?.use { it.readBytes() } ?: ByteArray(0), c.getHeaderField("Retry-After"))
             } finally { c.disconnect() }
         }
     }

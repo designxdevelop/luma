@@ -100,6 +100,23 @@ class CoreTest {
         assertEquals("2026-11-2-7-30", SceneSchedule.minuteKey(monday))
     }
 
+    @Test fun nextRunHonorsWeekdaysPauseAndDst() {
+        val zone = ZoneId.of("America/New_York")
+        val monday = ZonedDateTime.of(2026, 11, 2, 7, 30, 0, 0, zone)
+        val s = SceneSchedule(sceneID = "S", hour = 7, minute = 30, weekdays = listOf(2, 3, 4))
+        assertEquals(monday.plusDays(1), s.next(monday)) // strictly after: Tuesday
+        assertEquals(monday, s.next(monday.minusMinutes(1)))
+        assertEquals(monday.plusDays(7), s.next(monday.plusDays(2))) // Wednesday 7:30 → next Monday
+        assertEquals(null, s.copy(enabled = false).next(monday))
+        assertEquals(monday.plusDays(14), s.copy(pausedUntil = monday.plusDays(10).toInstant().toString()).next(monday.minusMinutes(1)))
+        // 2:30 doesn't exist on 2027-03-14 in New York; it moves to 3:30.
+        val gap = SceneSchedule(sceneID = "S", hour = 2, minute = 30).next(ZonedDateTime.of(2027, 3, 14, 0, 0, 0, 0, zone))!!
+        assertEquals(3, gap.hour)
+        assertEquals(30_000L, GoveeCloud.retryAfterMillis("30"))
+        assertEquals(2_000L, GoveeCloud.retryAfterMillis("0"))
+        assertEquals(60_000L, GoveeCloud.retryAfterMillis(null))
+    }
+
     // ---- Shared fixtures ----
 
     @Test fun nativeBackupFixtureRestoresIntoDemoHome() {
@@ -152,10 +169,10 @@ class CoreTest {
         val cloud = GoveeCloud(" key ") { method, url, headers, body ->
             assertEquals("key", headers["Govee-API-Key"])
             sent += "$method ${url.substringAfterLast("v1/")}"
-            200 to when {
+            GoveeCloud.Response(200, when {
                 url.endsWith("user/devices") -> """{"code":200,"data":[{"device":"AA:BB","sku":"H6008","deviceName":"Lamp","capabilities":[{"type":"devices.capabilities.on_off","instance":"powerSwitch"}]},{"device":"S1","sku":"H5179","type":"devices.types.thermometer"}]}"""
                 else -> { assertNotNull(body); """{"code":200,"payload":{"device":"AA:BB","sku":"H6008","capabilities":[{"instance":"online","state":{"value":true}},{"instance":"powerSwitch","state":{"value":1}},{"instance":"brightness","state":{"value":55}}]}}""" }
-            }.toByteArray()
+            }.toByteArray())
         }
         val devices = cloud.devices()
         assertEquals(listOf("Lamp", "H5179"), devices.map { it.name })
@@ -163,7 +180,7 @@ class CoreTest {
         val (state, _) = cloud.stateAndReadings(devices[0])
         assertEquals(true, state.power); assertEquals(55, state.brightness)
         assertEquals(listOf("GET user/devices", "POST device/state"), sent)
-        val rejected = GoveeCloud("key") { _, _, _, _ -> 401 to ByteArray(0) }
+        val rejected = GoveeCloud("key") { _, _, _, _ -> GoveeCloud.Response(401, ByteArray(0)) }
         assertThrows(LumaException::class.java) { runBlocking { rejected.devices() } }
         Unit
     }

@@ -283,6 +283,7 @@ fun WhitePicker(current: Int?, range: IntRange, onPick: (Int) -> Unit) {
 private fun EffectsDialog(store: HomeStore, d: LightDevice, onDismiss: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var kind by remember { mutableStateOf<SceneKind?>(null) }
+    var sent by remember { mutableStateOf<String?>(null) }
     val all = SceneLibrary.options(d)
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Effects · ${d.displayName}") }, confirmButton = { TextButton(onDismiss) { Text("Done") } },
         dismissButton = { if (!d.isDemo) TextButton({ store.loadEffects(d) }) { Text("Reload") } },
@@ -297,8 +298,8 @@ private fun EffectsDialog(store: HomeStore, d: LightDevice, onDismiss: () -> Uni
                 if (shown.isEmpty()) Text(if (all.isEmpty()) "No effects loaded yet." else "No matches.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 LazyColumn(Modifier.height(320.dp)) {
                     items(shown, key = { it.id }) { o ->
-                        Row(Modifier.fillMaxWidth().height(48.dp).clickable { store.perform(o.command, listOf(d.id)); store.message = "${o.name} sent to ${d.displayName}." }, verticalAlignment = Alignment.CenterVertically) {
-                            Text(o.name, Modifier.weight(1f)); Text(o.kind.title, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(Modifier.fillMaxWidth().height(48.dp).clickable { store.perform(o.command, listOf(d.id)); sent = o.id }, verticalAlignment = Alignment.CenterVertically) {
+                            Text(o.name, Modifier.weight(1f)); if (sent == o.id) Text("Sent ✓ ", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary); Text(o.kind.title, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }

@@ -51,6 +51,11 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("luma", Context.MODE_PRIVATE)
     private val file = File(app.filesDir, "home.json")
 
+    companion object {
+        /** The running app's store, so a schedule alarm runs through it instead of a second copy of the home. */
+        @Volatile var live: HomeStore? = null
+    }
+
     var home by mutableStateOf(SavedHome()); private set
     var demo by mutableStateOf(false); private set
     var hasKey by mutableStateOf(false); private set
@@ -58,6 +63,9 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     var lanOnly by mutableStateOf(false); private set
     var loading by mutableStateOf(false); private set
     var runningSceneID by mutableStateOf<String?>(null); private set
+    /** Lights as they were before the last scene, one level deep (as on iOS). */
+    var restorePoint by mutableStateOf<LightScene?>(null)
+    var exactAlarms by mutableStateOf(ScheduleAlarms.canExact(app)); private set
     var message by mutableStateOf<String?>(null)
     var lastScan by mutableStateOf<Long?>(null); private set
     val readings = mutableStateMapOf<String, List<Readings.Reading>>()
@@ -76,11 +84,13 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
         demo = prefs.getBoolean("demo", false)
         lanOnly = prefs.getBoolean("lanOnly", false)
         if (demo) loadDemo() else {
-            home = runCatching { LumaJson.decodeFromString(SavedHome.serializer(), file.readText()) }.getOrDefault(SavedHome())
+            home = HomeFile.load(app) ?: SavedHome()
             KeyStore.read(context)?.let { connectCloud(it) }
             if (onboarded) scan() // LAN scan on every launch.
         }
-        viewModelScope.launch { scheduleTicker() }
+        live = this
+        ScheduleAlarms.reschedule(app, home, demo)
+        viewModelScope.launch { demoTicker() }
     }
 
     // ---- Account and modes ----
@@ -102,12 +112,14 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
         stopScene(); stopLan(); cloud = null
         demo = true; prefs.edit().putBoolean("demo", true).apply()
         loadDemo()
+        ScheduleAlarms.reschedule(context, home, demo = true)
     }
 
     fun leaveDemo() {
         stopScene(); readings.clear()
         demo = false; prefs.edit().putBoolean("demo", false).apply()
-        home = runCatching { LumaJson.decodeFromString(SavedHome.serializer(), file.readText()) }.getOrDefault(SavedHome())
+        home = HomeFile.load(context) ?: SavedHome()
+        ScheduleAlarms.reschedule(context, home, demo = false)
         KeyStore.read(context)?.let { connectCloud(it) }
         log("Left the demo home.")
         if (onboarded) scan()
@@ -200,7 +212,7 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
 
     private fun stopLan() { lan?.stop(); lan = null; multicastLock?.release(); multicastLock = null }
 
-    override fun onCleared() { stopLan(); sceneJob?.cancel() }
+    override fun onCleared() { stopLan(); sceneJob?.cancel(); if (live === this) live = null }
 
     // ---- Control ----
 
@@ -290,9 +302,14 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     fun deleteScene(scene: LightScene) = update { s -> s.copy(scenes = s.scenes - scene, schedules = s.schedules.filter { it.sceneID != scene.id }) }
 
     /** One scene runs at a time; steps go out in order with their delays. */
-    fun runScene(scene: LightScene) {
+    fun runScene(scene: LightScene, saveRestorePoint: Boolean = true) {
         if (runningSceneID != null) { message = "A scene is already running. Stop it before starting another."; return }
         try { CommandValidation.validateScene(scene, home.devices) } catch (e: Exception) { message = e.message; return }
+        if (saveRestorePoint) {
+            // Taken before any step is sent. Effects and DreamView aren't undone.
+            val steps = snapshotSteps(scene.steps.map { it.deviceID }.toSet())
+            restorePoint = if (steps.isEmpty()) null else LightScene(name = "Before ${scene.name}", symbol = "arrow.uturn.backward", steps = steps)
+        }
         runningSceneID = scene.id
         log("Running ${scene.name}.")
         sceneJob = viewModelScope.launch {
@@ -303,6 +320,8 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
 
     fun stopScene() { sceneJob?.cancel(); sceneJob = null; runningSceneID = null }
 
+    fun restoreBeforeScene() { restorePoint?.let { runScene(it, saveRestorePoint = false) }; restorePoint = null }
+
     // ---- Schedules ----
 
     fun saveSchedule(schedule: SceneSchedule) = update { s ->
@@ -311,20 +330,39 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
 
     fun deleteSchedule(schedule: SceneSchedule) = update { s -> s.copy(schedules = s.schedules.filter { it.id != schedule.id }) }
 
-    /**
-     * ponytail: in-process ticker; it only fires while Luma's process is alive (open, or recently
-     * backgrounded). Upgrade path: exact alarms (SCHEDULE_EXACT_ALARM) + a foreground service.
-     */
-    private suspend fun scheduleTicker() {
+    /** The demo home schedules nothing with AlarmManager; its schedules tick in-app instead. */
+    private suspend fun demoTicker() {
         while (viewModelScope.isActive) {
-            val now = ZonedDateTime.now()
-            for (s in home.schedules.filter { it.shouldRun(now) }) {
-                saveSchedule(s.copy(lastRunMinute = SceneSchedule.minuteKey(now)))
-                home.scenes.firstOrNull { it.id == s.sceneID }?.let { log("Schedule: ${it.name} at %02d:%02d.".format(s.hour, s.minute)); runScene(it) }
+            if (demo) {
+                val now = ZonedDateTime.now()
+                for (s in home.schedules.filter { it.shouldRun(now) }) {
+                    saveSchedule(s.copy(lastRunMinute = SceneSchedule.minuteKey(now)))
+                    home.scenes.firstOrNull { it.id == s.sceneID }?.let { log("Schedule: ${it.name} at %02d:%02d.".format(s.hour, s.minute)); runScene(it) }
+                }
             }
             delay(15_000)
         }
     }
+
+    /** Called by the schedule alarm while the app is alive. */
+    fun runDueSchedules(millis: Long) {
+        if (demo) return
+        val at = java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneId.systemDefault())
+        val due = ScheduleAlarms.due(home, at)
+        val late = System.currentTimeMillis() - millis > ScheduleAlarms.GRACE_MS
+        for (s in due) {
+            saveSchedule(s.copy(lastRunMinute = SceneSchedule.minuteKey(at)))
+            val scene = home.scenes.firstOrNull { it.id == s.sceneID } ?: continue
+            when {
+                late -> log("Missed ${scene.name} at %02d:%02d: Android delivered the alarm late. Allow exact alarms in Automations.".format(s.hour, s.minute), error = true)
+                runningSceneID != null -> log("Skipped ${scene.name}: another scene was running.", error = true)
+                else -> { log("Schedule: ${scene.name} at %02d:%02d.".format(s.hour, s.minute)); runScene(scene) }
+            }
+        }
+        ScheduleAlarms.reschedule(context, home, demo)
+    }
+
+    fun refreshAlarmAccess() { exactAlarms = ScheduleAlarms.canExact(context); ScheduleAlarms.reschedule(context, home, demo) }
 
     // ---- Backup ----
 
@@ -353,12 +391,10 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     private fun replace(id: String, change: (LightDevice) -> LightDevice) = update { s -> s.copy(devices = s.devices.map { if (it.id == id) change(it) else it }) }
 
     private fun update(change: (SavedHome) -> SavedHome) {
+        val before = home
         home = change(home)
-        if (!demo) runCatching {
-            val tmp = File(file.parentFile, "home.json.tmp")
-            tmp.writeText(LumaJson.encodeToString(SavedHome.serializer(), home))
-            tmp.renameTo(file)
-        }.onFailure { log("Couldn't save: ${it.message}", error = true) }
+        if (!demo) runCatching { HomeFile.save(context, home) }.onFailure { log("Couldn't save: ${it.message}", error = true) }
+        if (before.schedules != home.schedules || before.scenes != home.scenes) ScheduleAlarms.reschedule(context, home, demo)
     }
 
     fun log(text: String, error: Boolean = false) {

@@ -57,6 +57,11 @@ Newer Compose BOMs need compileSdk 37.
   - Delete. This also deletes the scene's schedules.
   - New scene from the current lighting of the lights you select.
 - **Schedules:** time, days and scene, with an enable switch, edit and delete. They use the same `SceneSchedule` model and `lastRunMinute` de-duplication as the other clients.
+  - They run with Luma closed. One `AlarmManager` alarm is armed for the next run across all schedules, and it is re-armed after a run, a reboot, an app update, a clock or time-zone change, or a change to alarm access.
+  - With "Alarms & reminders" access (`SCHEDULE_EXACT_ALARM`) the alarm is exact. Without it the alarm is inexact, and a run delivered more than 2 minutes late is logged as missed, the same grace as `ScheduleSync.runGrace`. Automations shows an "Allow exact alarms" button.
+  - If the app is alive, the scene runs through it. Otherwise a receiver sends the steps headlessly: LAN for basic controls, the cloud for the rest.
+  - The demo home never arms alarms. Its schedules tick in-app.
+- **Restore point:** after a scene runs, Scenes offers "Before …" → Restore, which puts the lights back to the power, brightness and color they had before. This is one level deep, as on iOS.
 - **LAN scan on every launch** (outside demo mode), plus "Scan now" in Settings.
   - Uses `CHANGE_WIFI_MULTICAST_STATE` and holds a `WifiManager.MulticastLock`.
   - Lights found on the LAN merge with cloud lights by ID.
@@ -80,15 +85,12 @@ Newer Compose BOMs need compileSdk 37.
 
 | Feature | Why |
 | --- | --- |
-| **Reliable background schedules** | Schedules run from an in-app ticker (checked every 15 s) while Luma's process is alive: open, or recently in the background. Android can kill the process, so a run can be missed. WorkManager can't be used because its minimum interval is 15 minutes and it doesn't run at an exact minute. The upgrade path is exact alarms (`SCHEDULE_EXACT_ALARM`/`USE_EXACT_ALARM`) that start a short foreground service. |
+| **Long scenes from a closed app** | The headless alarm receiver has about 10 s, so a scheduled scene whose step delays add up to more than 9 s is cut short when Luma isn't running. The upgrade path is an expedited WorkManager job. |
 | **Schedule sync with a computer runner** | Only the shared pure helpers are ported (base32, pin, pairing-code parsing, tested against `schedule-sync-vectors.json`). The phone-side client (`stage`/`buildBatches`/`applyResponse`) and the pinned-TLS transport still need porting. The hub replay in the vectors is the runner's role, which Android doesn't take. |
 | **Camera / screen sync, audio sync** | They need MediaProjection or camera capture and a streaming loop. No Android capture code exists yet. |
 | **Bluetooth (BLE) control** | Govee's BLE protocol and encryption (`GoveeBLE*.swift`) aren't ported. They would also need the `BLUETOOTH_SCAN`/`CONNECT` runtime permissions. |
 | **DreamView group editing, segment painting** | Not ported. The iOS app also blocks writing DreamView members (see `DreamViewDraft.applyBlocker`). |
 | **Floor plan, iCloud sync, Govee Home sign-in import, doorbell alerts, webhooks, Alexa relay, Watch** | Apple-platform or desktop features that this first Android version leaves out. Android has no iCloud, and webhooks need a local server. |
-| **Restore point after a scene** | iOS saves a "Before …" scene. Android doesn't yet. |
-| **429 `Retry-After`** | The cloud client always pauses for 60 s after a 429 instead of reading the header (marked `ponytail:` in `Cloud.kt`). |
-| **Effect feedback inside sheets** | The "sent" snackbar appears behind the light sheet. |
 
 ## QA
 

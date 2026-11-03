@@ -133,6 +133,15 @@ class GoveeLan(private val onDevice: (LightDevice) -> Unit, private val onError:
 
     @Synchronized fun stop() { socket?.close(); socket = null; knownByIP.clear() }
 
+    companion object {
+        /** One control datagram from a throwaway socket, for runs with no discovery listener (scheduled alarms). */
+        fun sendOnce(device: LightDevice, command: CapabilityCommand) {
+            val ip = device.ip?.takeIf(LanPacket::isUnicastIPv4) ?: throw LumaException("This light has no discovered LAN address.")
+            val packet = LanPacket.control(command)
+            java.net.DatagramSocket().use { it.send(DatagramPacket(packet, packet.size, InetAddress.getByName(ip), LanPacket.CONTROL_PORT)) }
+        }
+    }
+
     private fun send(data: ByteArray, ip: String, port: Int) {
         val s = socket ?: throw LumaException("Start LAN discovery first.")
         s.send(DatagramPacket(data, data.size, InetAddress.getByName(ip), port))
