@@ -23,7 +23,7 @@ Watch work must start after the preceding release upload, and must not hold up t
 
 ## Initial release uploaded — 2026-10-30
 
-Both stable-Xcode version0.1.0/build5 archives exported with destination upload and internal-only TestFlight. `manageAppVersionAndBuildNumber=false`.
+Both stable-Xcode version 0.1.0/build 5 (superseded: all releases now ship as 1.0) archives exported with destination upload and internal-only TestFlight. `manageAppVersionAndBuildNumber=false`.
 - Mac: `/private/tmp/luma-mac-5-upload.log` — Uploaded LumaMac / EXPORT SUCCEEDED.
 - iOS: `/private/tmp/luma-ios-5-upload.log` — 16:11:52 Upload succeeded / Uploaded LumaiOS / EXPORT SUCCEEDED.
 - Signed local Mac app: dist/Luma-iCloud.app, signature verified.
