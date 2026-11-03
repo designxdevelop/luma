@@ -152,6 +152,8 @@ struct ActivityEntry: Identifiable {
                 } catch { self.log("Reconnect in Settings to unlock your saved API key.") }
             }
         }
+        // Lights can change IP between launches (updates, router restarts), so rescan every launch.
+        if !isDemo && demoOverride == nil && !home.devices.isEmpty { discover() }
         timerTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(15))

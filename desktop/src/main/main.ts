@@ -385,6 +385,8 @@ if (unsupported) {
     openWindow();
     // Reconnect with the saved encrypted key; the webhook server always starts off.
     if (!demo && home.hasSavedHome && home.snapshot().hasSavedKey) void home.reconnect().catch(() => {});
+    // Lights can change IP between launches (updates, router restarts), so rescan every launch.
+    if (!demo && home.hasSavedHome) void home.discover().catch(() => {});
     // The schedule runner's LAN server starts with the app when this computer runs shared schedules.
     void home.scheduleSync.start();
   });
