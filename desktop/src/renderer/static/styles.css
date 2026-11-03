@@ -294,3 +294,33 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .audio-band span { align-self: end; display: block; height: var(--level, 0%); min-height: 2px; border-radius: 3px 3px 0 0; background: color-mix(in srgb, var(--accent) 75%, transparent); transition: height 60ms linear; }
 .audio-band small { color: var(--muted); font-size: 11px; }
 @media (prefers-reduced-motion: reduce) { .audio-meter-level span, .audio-band span { transition: none; } }
+
+/* Room header switch, floor plans, Govee scene list, DreamView draft (Mac/iPhone parity) */
+.room-head h2 .sub { font-weight: 400; margin-left: 6px; }
+.room-toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); padding: 2px 10px 2px 4px; border-radius: 999px; background: color-mix(in srgb, var(--text) 6%, transparent); }
+.room-toggle.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.floors { margin: 0 0 12px; flex-wrap: wrap; }
+.floor-canvas { position: relative; display: inline-block; max-width: 100%; border-radius: var(--radius); overflow: visible; background: var(--surface); border: 1px solid var(--line); user-select: none; }
+.floor-canvas img { display: block; max-width: 100%; max-height: 70vh; border-radius: var(--radius); }
+.pin { position: absolute; transform: translate(-50%, -50%); background: none; border: 0; padding: 0; min-height: 0; display: grid; justify-items: center; gap: 2px; cursor: pointer; touch-action: none; }
+.pin .dot { width: 26px; height: 26px; border-radius: 50%; background: color-mix(in srgb, var(--muted) 45%, transparent); border: 2px solid var(--surface); display: grid; place-items: center; font-weight: 700; font-size: 12px; }
+.pin.on .dot { background: var(--orb, var(--accent)); box-shadow: 0 0 12px var(--orb, var(--accent)); }
+.pin.offline .dot { border: 2px dashed var(--danger, #c33); }
+.pin.missing .dot { background: transparent; border: 2px dashed var(--muted); }
+.pin-label { font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); white-space: nowrap; }
+.floor-canvas.editing .pin { cursor: grab; }
+.pin:focus-visible .dot { outline: 2px solid var(--accent); outline-offset: 2px; }
+.floor-tray { margin-top: 12px; padding: 10px; border: 1px dashed var(--line); border-radius: var(--radius); }
+.pin-list { list-style: none; padding: 0; display: grid; gap: 4px; }
+.pin-list button { width: 100%; justify-content: flex-start; gap: 8px; }
+.pin-list .sub { margin-left: auto; }
+.scene-rows { list-style: none; padding: 0; margin: 8px 0; max-height: 360px; overflow: auto; display: grid; gap: 2px; }
+.scene-rows li { display: flex; align-items: center; gap: 6px; }
+.scene-apply { flex: 1; justify-content: flex-start; gap: 8px; text-align: left; }
+.govee-scenes summary { cursor: pointer; }
+.dv-partners, .dv-draft { margin-top: 10px; }
+.dv-draft { padding: 10px; border: 1px dashed color-mix(in srgb, orange 45%, transparent); border-radius: 8px; }
+.dv-draft .pill { font-size: 10px; color: orange; background: color-mix(in srgb, orange 18%, transparent); padding: 1px 6px; border-radius: 999px; }
+.dv-areas { display: flex; flex-wrap: wrap; gap: 3px; margin: 4px 0 8px 20px; }
+.dv-areas .chip { padding: 1px 7px; min-height: 22px; }
+.dv-partners summary { cursor: pointer; font-weight: 600; }

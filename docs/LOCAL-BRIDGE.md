@@ -29,7 +29,7 @@ npm run bridge:pack        # writes release/luma-bridge-<version>.tar.gz (about 
 Copy the tarball to the target computer, then unpack it:
 
 ```sh
-tar -xzf luma-bridge-0.2.0.tar.gz          # makes ./luma-bridge
+tar -xzf luma-bridge-1.0.0.tar.gz          # makes ./luma-bridge
 alias luma-bridge="node $PWD/luma-bridge/dist/bridge/cli.js"
 luma-bridge help
 ```

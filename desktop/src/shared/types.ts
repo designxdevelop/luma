@@ -114,6 +114,10 @@ export interface SavedHome {
 /** Matches the native DreamViewDraft: member light IDs with screen areas 1…10. */
 export interface DreamViewDraft { members: Array<{ deviceID: string; areas: number[] }> }
 
+/** Matches the native FloorPlan (floor-plans/plans.json): x and y are 0…1 of the image itself. */
+export interface FloorPlanPin { deviceID: string; x: number; y: number }
+export interface FloorPlan { id: string; name: string; pins: FloorPlanPin[] }
+
 export type ControlPhase = 'queued' | 'sending' | 'confirming';
 
 export interface PendingView {
@@ -259,6 +263,11 @@ export interface AppSnapshot {
   goveeHome: GoveeHomeView;
   scheduleSync: ScheduleSyncView;
   doorbell: DoorbellView;
+  /** Local floor plans. Images are fetched separately (floorPlanImage); `imageVersion` changes when one is replaced. */
+  floorPlans: Array<FloorPlan & { imageVersion: number }>;
+  /** False when plans.json couldn't be read: the files are preserved and nothing is saved over them. */
+  floorPlansWritable: boolean;
+  dreamViewDrafts: Record<string, DreamViewDraft>;
 }
 
 /** What one computer reported when it ran (or skipped) a shared schedule. Observed, not settings. */
@@ -418,4 +427,15 @@ export interface LumaBridge {
   goveeImport(): Promise<void>;
   goveeApplyRooms(deviceIDs: string[]): Promise<void>;
   goveeSignOut(): Promise<void>;
+  /** Open dialog in main; the image is re-encoded as PNG (metadata such as GPS removed). Returns the new floor's ID, or undefined when cancelled. */
+  floorPlanAdd(): Promise<string | undefined>;
+  floorPlanReplace(id: string): Promise<void>;
+  floorPlanRename(id: string, name: string): Promise<void>;
+  floorPlanDelete(id: string): Promise<void>;
+  floorPlanPlace(id: string, deviceID: string, x: number, y: number): Promise<void>;
+  floorPlanRemovePin(id: string, deviceID: string): Promise<void>;
+  /** PNG data URL, or undefined when the image can't be read. */
+  floorPlanImage(id: string): Promise<string | undefined>;
+  /** Local DreamView partner draft for a main light. Never sent to lights. */
+  saveDreamViewDraft(lightID: string, draft: DreamViewDraft): Promise<void>;
 }

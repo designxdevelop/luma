@@ -12,6 +12,8 @@ import { audioBanner, audioSyncView, commitAudioSetting, followAudio, initAudioS
 import { ToggleIntents } from './toggles.js';
 import { scheduleSyncBlock, scheduleSyncLine, scheduleSyncSubtitle } from './schedule-sync-view.js';
 import { doorbellView, initDoorbell } from './doorbell-view.js';
+import { dreamViewPartners, floorView, initParity, paintFloor, sceneBrowser, sceneList } from './parity-view.js';
+import { advertisesScenes } from '../shared/library.js';
 import { isLight, paintCommands, segmentSchema, SEGMENT_INSTANCES, type SegmentSchema } from '../shared/devices.js';
 import {
   BASIC, SCENE_ICONS, WEEKDAYS, basicCommand, brightnessRange, capOf, describeCommand, effectCapabilities, esc, friendly, fromHex, hex, icon,
@@ -20,7 +22,7 @@ import {
 
 const luma = (window as unknown as { luma: LumaBridge }).luma;
 
-type View = 'activity' | 'lights' | 'scenes' | 'sync' | 'automations' | 'settings' | 'about';
+type View = 'activity' | 'lights' | 'floor' | 'scenes' | 'sync' | 'automations' | 'settings' | 'about';
 type Tab = 'light' | 'effects' | 'details';
 type SceneEditor = { kind: 'editor'; draft: LightScene; json: boolean; jsonText: string; error?: string; isNew: boolean };
 type Capture = { kind: 'capture'; name: string; icon: string; ids: string[]; error?: string };
@@ -81,6 +83,7 @@ function render(): void {
   renderModal();
   paintVars(document.body);
   paintAudio(document.body);
+  paintFloor(document.body);
 }
 
 /** CSP forbids inline style attributes, so colors/fills are applied through CSSOM. */
@@ -95,7 +98,7 @@ function fill(el: HTMLInputElement): void {
 }
 
 function shell(s: AppSnapshot): string {
-  const nav: Array<[View, string, string]> = [['lights', 'Lights', 'bulb'], ['scenes', 'Scenes', 'scenes'], ['sync', 'Sync', 'screen'], ['automations', 'Automations', 'clock'], ['activity', 'Activity', 'clock'], ['settings', 'Settings', 'gear'], ['about', 'About', 'info']];
+  const nav: Array<[View, string, string]> = [['lights', 'Lights', 'bulb'], ['floor', 'Floor plan', 'map'], ['scenes', 'Scenes', 'scenes'], ['sync', 'Sync', 'screen'], ['automations', 'Automations', 'clock'], ['activity', 'Activity', 'clock'], ['settings', 'Settings', 'gear'], ['about', 'About', 'info']];
   return `
   <nav class="sidebar" aria-label="Sections">
     <div class="brand"><span class="orb small" data-color="#ffb347"></span><span>Luma</span>${s.demo ? '<span class="badge">Demo</span>' : ''}</div>
@@ -106,7 +109,7 @@ function shell(s: AppSnapshot): string {
     ${s.notice ? `<div class="notice" role="alert"><span>${esc(s.notice)}</span><button class="ghost" data-action="dismiss-notice" aria-label="Dismiss message">${icon('close')}</button></div>` : ''}
     ${syncBanner(s)}
     ${state.status ? `<div class="status ${state.status.error ? 'error' : ''}">${esc(state.status.text)}</div>` : ''}
-    ${state.view === 'lights' ? lightsView(s) : state.view === 'scenes' ? scenesView(s) : state.view === 'sync' ? (syncMode(s) === 'audio' ? audioSyncView(s) : syncView(s)) : state.view === 'automations' ? automationsView(s) : state.view === 'settings' ? settingsView(s) : state.view === 'activity' ? activityView(s) : aboutView(s)}
+    ${state.view === 'lights' ? lightsView(s) : state.view === 'floor' ? floorView(s) : state.view === 'scenes' ? scenesView(s) : state.view === 'sync' ? (syncMode(s) === 'audio' ? audioSyncView(s) : syncView(s)) : state.view === 'automations' ? automationsView(s) : state.view === 'settings' ? settingsView(s) : state.view === 'activity' ? activityView(s) : aboutView(s)}
   </main>`;
 }
 
@@ -137,8 +140,11 @@ function lightsView(s: AppSnapshot): string {
       ${s.devices.length === 0 ? `<div class="empty"><span class="orb large" data-color="#ffb347"></span><h2>Bring your lights in</h2><p>Connect your Govee account in Settings, or enable <strong>LAN Control</strong> for each light in the Govee Home app and choose Discover.</p><button class="primary" data-action="view" data-view="settings">Open Settings</button> <button data-action="explore-demo">Explore Demo</button></div>` : ''}
       ${rooms.map((room) => {
         const devices = filtered.filter((d) => d.room === room);
+        // Room actions never switch appliances (native roomHeader).
+        const roomLights = s.devices.filter((d) => isLight(d) && d.room === room), switchable = roomLights.filter((d) => supports(d, 'powerSwitch'));
+        const roomOn = roomLights.filter((d) => d.power === true).length;
         return `<section class="room" aria-label="${esc(room)}">
-          <div class="room-head"><h2>${esc(room)}</h2><div class="room-actions"><button class="ghost" data-action="room" data-room="${esc(room)}" data-on="1">On</button><button class="ghost" data-action="room" data-room="${esc(room)}" data-on="0">Off</button></div></div>
+          <div class="room-head"><h2>${esc(room)} <span class="sub">${roomOn} of ${roomLights.length} on</span></h2><div class="room-actions"><label class="room-toggle ${roomOn ? 'on' : ''}"><input type="checkbox" role="switch" class="switch" data-action="room-power" data-room="${esc(room)}" ${roomOn ? 'checked' : ''} ${switchable.length ? '' : 'disabled'} aria-label="All lights in ${esc(room)}">${roomOn ? 'On' : 'Off'}</label></div></div>
           ${roomAdjust(s, room)}
           <div class="cards">${devices.map((d) => card(s, d)).join('')}</div>
         </section>`;
@@ -156,7 +162,8 @@ function roomAdjust(s: AppSnapshot, room: string): string {
   const known = dimmable.map((d) => d.brightness).filter((b): b is number => typeof b === 'number' && b > 0);
   const level = known.length ? Math.round(known.reduce((a, b) => a + b, 0) / known.length) : 50;
   return `<details class="room-adjust"><summary>Adjust ${esc(room)}</summary>
-    ${dimmable.length ? slider(`room|${room}|brightness`, 'Room brightness', level, [1, 100], '%') : ''}
+    ${dimmable.length ? `${slider(`room|${room}|brightness`, 'Room brightness', level, [1, 100], '%')}
+      <div class="presets" aria-label="${esc(room)} brightness">${[10, 25, 50, 75, 100].map((v) => `<button class="chip" data-action="room-brightness" data-room="${esc(room)}" data-value="${v}">${v}%</button>`).join('')}</div>` : ''}
     ${white.length ? `<div class="presets" aria-label="${esc(room)} white">${WHITE_PRESETS.map(([name, k]) => `<button class="chip" data-action="room-white" data-room="${esc(room)}" data-value="${k}"><span class="orb tiny" data-color="${kelvinToHex(k)}"></span>${name}</button>`).join('')}</div>` : ''}
     <p class="hint">Each light is clamped to its own range. Appliances and sensors are never included.</p>
   </details>`;
@@ -209,7 +216,9 @@ function dreamViewBlock(s: AppSnapshot, d: LightDevice): string {
   return `<section class="effect" aria-label="DreamView"><h3>DreamView</h3>
     <p class="sub">TV sync with the group you set up in Govee Home · ${esc(status)}</p>
     <div class="actions"><button class="primary" data-action="dreamview" data-id="${esc(d.id)}" data-on="1" ${ready ? '' : 'disabled'}>Start</button><button data-action="dreamview" data-id="${esc(d.id)}" data-on="0" ${ready ? '' : 'disabled'}>Stop</button></div>
-    <p class="hint">${ready ? 'Group members and Movie/Game settings are managed in Govee Home; the cloud API only starts and stops sync.' : 'Connect Govee cloud to start or stop DreamView.'}</p>
+    <button data-action="dv-movie" data-id="${esc(d.id)}" ${ready ? '' : 'disabled'} title="Save a scene that turns this light on, then starts DreamView sync">Save Movie scene</button>
+    <p class="hint">${ready ? 'Movie or Game, All or Part, and saturation are set in Govee Home; the cloud API only starts and stops sync. Govee accepting a command doesn\'t confirm the lights are syncing.' : 'Connect Govee cloud to start or stop DreamView.'}${supports(d, 'movieMode') ? ' Movie mode under Effects is this light\'s own video effect, not DreamView, and choosing it may stop a running group.' : ''}</p>
+    ${dreamViewPartners(s, d)}
   </section>`;
 }
 
@@ -318,6 +327,7 @@ function lightTab(d: LightDevice): string {
     ${mode === 'white' && hasWhite ? `
       ${slider(`${d.id}|colorTemperatureK`, 'White temperature', d.colorTemperature && d.colorTemperature > 0 ? d.colorTemperature : Math.round((wlo + whi) / 2), [wlo, whi], ' K', 'kelvin')}
       <div class="presets" aria-label="White presets">${WHITE_PRESETS.filter(([, k]) => k >= wlo && k <= whi).map(([name, k]) => `<button class="chip ${d.colorTemperature === k ? 'on' : ''}" data-action="preset" data-id="${esc(d.id)}" data-instance="colorTemperatureK" data-value="${k}"><span class="orb tiny" data-color="${kelvinToHex(k)}"></span>${name}</button>`).join('')}</div>` : ''}
+    <button data-action="save-look" data-id="${esc(d.id)}">Save this look as a scene</button>
     <p class="hint">Changes show immediately and are confirmed from the light's reported state.</p>`;
 }
 
@@ -337,7 +347,7 @@ function effectsTab(s: AppSnapshot, d: LightDevice): string {
   const all = d.capabilities.filter((c) => !c.type.endsWith('.online') && !c.type.endsWith('.event'));
   const adv = state.advanced.get(d.id) ?? { instance: all[0]?.instance ?? '', text: '' };
   return `${caps.length === 0 ? `<p class="hint">${d.ip && !s.cloudConnected ? 'LAN lights support power, brightness, color and white. Connect Govee cloud to load model effects.' : 'This light advertises no extra effects. Try Load effects.'}</p>` : ''}
-    ${loaders}${painterView(d)}${forms}
+    ${advertisesScenes(d) ? sceneList(s, [d], d.name, `light|${d.id}`) : ''}${loaders}${painterView(d)}${forms}
     <details class="advanced"><summary>Advanced</summary>
       <p class="hint">Send a raw JSON value for any capability this light advertises. Values are validated against its schema before sending.</p>
       <div class="row"><label for="adv-inst">Capability</label><select id="adv-inst" data-action="adv-instance" data-id="${esc(d.id)}">${all.map((c) => `<option value="${esc(c.instance)}" ${c.instance === adv.instance ? 'selected' : ''}>${esc(friendly(c.instance))} (${esc(c.instance)})</option>`).join('')}</select></div>
@@ -470,6 +480,7 @@ function scenesView(s: AppSnapshot): string {
         <button class="ghost danger" data-action="delete-scene" data-id="${esc(scene.id)}" aria-label="Delete ${esc(scene.name)}">${icon('trash')}</button>
       </div>
     </article>`).join('')}</div>
+    ${sceneBrowser(s)}
     <p class="hint">Stopping a scene does not undo commands it already sent. Restore lights puts power, brightness, color and white back to how they were before the last scene ran (effects and segments aren't undone).</p>
   </section>`;
 }
@@ -1040,6 +1051,12 @@ document.addEventListener('click', (event) => {
     case 'deselect': selectDevice(undefined); break;
     case 'tab': state.tab = target.dataset.tab as Tab; render(); document.querySelector<HTMLElement>(`#tab-${state.tab}`)?.focus(); break;
     case 'all': for (const d of state.snap?.devices ?? []) if (isLight(d) && supports(d, 'powerSwitch')) control(d.id, basicCommand(d, 'powerSwitch', target.dataset.on === '1' ? 1 : 0)); break;
+    case 'room-brightness': void act(() => luma.roomAction(target.dataset.room!, { brightness: Number(target.dataset.value) })); break;
+    case 'dv-movie': { const d = device(id), cap = d && capOf(d, 'dreamViewToggle'); if (!d || !cap) break;
+      const steps: SceneStep[] = [...(supports(d, 'powerSwitch') ? [{ id: uuid(), deviceID: d.id, command: basicCommand(d, 'powerSwitch', 1), delayMilliseconds: 0 }] : []),
+        { id: uuid(), deviceID: d.id, command: { type: cap.type, instance: cap.instance, value: dreamViewValue(d, true) }, delayMilliseconds: 0 }];
+      void act(() => luma.saveScene({ id: uuid(), name: `Movie · ${d.name}`.slice(0, 80), icon: 'film', steps }), 'Saved to Scenes.'); break; }
+    case 'save-look': { const d = device(id); if (d) { state.modal = { kind: 'capture', name: `${d.name} look`.slice(0, 80), icon: 'sparkles', ids: [d.id] }; render(); } break; }
     case 'room-white': void act(() => luma.roomAction(target.dataset.room!, { kelvin: Number(target.dataset.value) })); break;
     case 'dreamview': { const d = device(id), cap = d && capOf(d, 'dreamViewToggle'); if (d && cap) void act(() => luma.control(d.id, { type: cap.type, instance: cap.instance, value: dreamViewValue(d, target.dataset.on === '1') }), target.dataset.on === '1' ? 'DreamView start sent.' : 'DreamView stop sent.'); break; }
     case 'restore-before': void act(() => luma.restoreBeforeScene(), 'Restoring lights.'); break;
@@ -1219,6 +1236,7 @@ document.addEventListener('change', (event) => {
   switch (a) {
     case 'appearance': void act(() => luma.setAppearance(el.value as 'system' | 'light' | 'dark')); break;
     case 'power': { const d = device(id); if (d) control(d.id, basicCommand(d, 'powerSwitch', el.checked ? 1 : 0)); break; }
+    case 'room-power': for (const d of state.snap?.devices ?? []) if (isLight(d) && d.room === el.dataset.room && supports(d, 'powerSwitch')) control(d.id, basicCommand(d, 'powerSwitch', el.checked ? 1 : 0)); break;
     case 'effect-toggle': {
       const d = device(id), cap = d && capOf(d, el.dataset.instance!);
       if (!d || !cap) break;
@@ -1358,6 +1376,7 @@ modalHost.addEventListener('cancel', (event) => { event.preventDefault(); state.
 
 initAudioSync({ luma, snap: () => state.snap, render, act, flash, errorText, slider: syncSlider });
 initDoorbell({ luma, snap: () => state.snap, act });
+initParity({ luma, snap: () => state.snap, act, render, flash, open: (id) => { state.view = 'lights'; selectDevice(id, 'light'); } });
 luma.onSnapshot((snap) => { state.snap = snap; followSync(snap); followAudio(snap); render(); });
 luma.onNavigate((target) => { if (target.deviceID) selectDevice(target.deviceID, 'light'); else if (target.tab) { state.view = target.tab as View; render(); } });
 void luma.snapshot().then((snap) => { state.snap = snap; for (const a of snap.syncAssignments) { state.syncRegions.set(a.id, a.region); if (a.included) state.syncLights.set(a.id, a.region); } render(); });

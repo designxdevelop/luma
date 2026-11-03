@@ -78,6 +78,14 @@ const bridge: LumaBridge = {
   goveeImport: call('goveeImport') as LumaBridge['goveeImport'],
   goveeApplyRooms: call('goveeApplyRooms') as LumaBridge['goveeApplyRooms'],
   goveeSignOut: call('goveeSignOut') as LumaBridge['goveeSignOut'],
+  floorPlanAdd: call('floorPlanAdd') as LumaBridge['floorPlanAdd'],
+  floorPlanReplace: call('floorPlanReplace') as LumaBridge['floorPlanReplace'],
+  floorPlanRename: call('floorPlanRename') as LumaBridge['floorPlanRename'],
+  floorPlanDelete: call('floorPlanDelete') as LumaBridge['floorPlanDelete'],
+  floorPlanPlace: call('floorPlanPlace') as LumaBridge['floorPlanPlace'],
+  floorPlanRemovePin: call('floorPlanRemovePin') as LumaBridge['floorPlanRemovePin'],
+  floorPlanImage: call('floorPlanImage') as LumaBridge['floorPlanImage'],
+  saveDreamViewDraft: call('saveDreamViewDraft') as LumaBridge['saveDreamViewDraft'],
 };
 
 contextBridge.exposeInMainWorld('luma', bridge);

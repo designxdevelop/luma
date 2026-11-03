@@ -16,6 +16,9 @@ import { audioSupportFor } from './audio-capture';
 import { LINUX_PROFILE_DIR, linuxCaptureSwitches, linuxRevalidatesSources, linuxSecretsAvailable, linuxSessionType } from './linux-platform';
 import { HomeStorage, type SecretStore } from './storage';
 import { BACKUP_LIMIT } from './backup';
+import { FLOOR_IMAGE_LIMIT, FloorPlanStore } from './floor-plans';
+import { isLight } from '../shared/devices';
+import { roomPower } from '../shared/library';
 import { LumaError, message, power } from '../core/model';
 
 const demo = process.argv.includes('--demo');
@@ -165,6 +168,15 @@ function flushNavigation(): void {
   pendingNavigation = undefined;
 }
 
+/** PNG re-encode (drops EXIF/GPS), at most 4096 px on the long side, like the native rasterizer. */
+function encodeFloorImage(data: Buffer): Buffer | undefined {
+  const image = nativeImage.createFromBuffer(data);
+  if (image.isEmpty()) return undefined;
+  const { width, height } = image.getSize();
+  const scale = Math.min(1, 4096 / Math.max(width, height));
+  return (scale < 1 ? image.resize({ width: Math.round(width * scale), height: Math.round(height * scale), quality: 'best' }) : image).toPNG();
+}
+
 function buildTray(): void {
   if (!tray) {
     const icon = nativeImage.createFromPath(join(__dirname, '..', '..', 'assets', 'tray.png'));
@@ -175,12 +187,26 @@ function buildTray(): void {
   tray.setToolTip(`${demo ? 'Luma (Demo)' : 'Luma'}${home.sync.active ? ` · ${syncLabel} ${home.sync.phase === 'paused' ? 'paused' : 'live'}` : ''}`);
   const snapshot = home.snapshot();
   const rooms = [...new Set(snapshot.devices.map((d) => d.room))].sort();
+  const lights = snapshot.devices.filter(isLight);
+  const powerRooms = roomPower(snapshot.devices);
   const run = (fn: () => unknown) => () => { try { void Promise.resolve(fn()).catch((e) => home.log(message(e), true)); } catch (e) { home.log(message(e), true); } };
   tray.setContextMenu(Menu.buildFromTemplate([
+    { label: lights.length ? `${demo ? 'Luma (Demo)' : 'Luma'} · ${lights.filter((d) => d.power === true).length} of ${lights.length} lights on` : 'Luma · No lights yet', enabled: false },
     { label: 'Open Luma', click: () => openWindow() },
     { type: 'separator' },
     { label: 'All lights on', enabled: snapshot.devices.length > 0, click: run(() => home.quickAction(home.roomDeviceIDs(), power(true))) },
     { label: 'All lights off', enabled: snapshot.devices.length > 0, click: run(() => home.quickAction(home.roomDeviceIDs(), power(false))) },
+    // Per-room On/Off, as in the Mac menu bar: lights with a power switch only.
+    ...(powerRooms.length > 1 ? [
+      { type: 'separator' as const },
+      ...powerRooms.map(({ room, ids, on }) => ({
+        label: `${room} · ${on} of ${ids.length} on`, enabled: ids.length > 0,
+        submenu: [
+          { label: 'Turn on', click: run(() => home.quickAction(ids, power(true))) },
+          { label: 'Turn off', click: run(() => home.quickAction(ids, power(false))) },
+        ],
+      })),
+    ] : []),
     {
       label: 'Lights', enabled: snapshot.devices.length > 0,
       submenu: rooms.map((room) => ({
@@ -305,6 +331,21 @@ function registerIPC(): void {
   handle('goveeImport', () => home.goveeImport());
   handle('goveeApplyRooms', (ids) => home.goveeApplyRooms(Array.isArray(ids) ? ids.slice(0, 1000).map((i) => str(i)) : []));
   handle('goveeSignOut', () => home.goveeSignOut());
+  const pickImage = async (): Promise<Buffer | undefined> => {
+    const result = await dialog.showOpenDialog(window!, { properties: ['openFile'], filters: [{ name: 'Floor plan image', extensions: ['png', 'jpg', 'jpeg'] }] });
+    const file = result.filePaths[0];
+    if (result.canceled || !file) return undefined;
+    if (statSync(file).size > FLOOR_IMAGE_LIMIT) throw new LumaError('Choose an image smaller than 20 MB.');
+    return readFileSync(file);
+  };
+  handle('floorPlanAdd', async () => { const image = await pickImage(); return image ? home.floorPlan((f) => f.add(image)) : undefined; });
+  handle('floorPlanReplace', async (id) => { const image = await pickImage(); if (image) home.floorPlan((f) => f.replace(str(id, 64), image)); });
+  handle('floorPlanRename', (id, name) => home.floorPlan((f) => f.rename(str(id, 64), str(name, 256))));
+  handle('floorPlanDelete', (id) => home.floorPlan((f) => f.delete(str(id, 64))));
+  handle('floorPlanPlace', (id, deviceID, x, y) => home.floorPlanPlace(str(id, 64), str(deviceID), x, y));
+  handle('floorPlanRemovePin', (id, deviceID) => home.floorPlan((f) => f.removePin(str(id, 64), str(deviceID))));
+  handle('floorPlanImage', (id) => { const png = home.floorPlan((f) => f.image(str(id, 64))); return png ? `data:image/png;base64,${png.toString('base64')}` : undefined; });
+  handle('saveDreamViewDraft', (id, draft) => home.saveDreamViewDraft(str(id), draft));
   handle('roomAction', (room, action) => home.roomAction(str(room, 160), action));
   handle('controlBatch', (id, commands) => home.controlBatch(str(id), commands));
   handle('restoreBeforeScene', () => { home.restoreBeforeScene(); });
@@ -363,6 +404,7 @@ if (unsupported) {
       captureSupported: captureReal,
       syncOptions: { audioSupport },
       scheduleSyncOptions: { keepAwake },
+      floorPlans: new FloorPlanStore(demo ? undefined : join(app.getPath('userData'), 'floor-plans'), encodeFloorImage),
     });
     nativeTheme.themeSource = home.snapshot().appearance;
     capture = createCaptureAdapter({ real: captureReal, revalidate: !linux || linuxRevalidatesSources(linuxSession), sync: home.sync, window: () => window, rendererURL, audioSupport });
