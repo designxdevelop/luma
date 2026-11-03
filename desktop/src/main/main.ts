@@ -19,6 +19,7 @@ import { BACKUP_LIMIT } from './backup';
 import { FLOOR_IMAGE_LIMIT, FloorPlanStore } from './floor-plans';
 import { isLight } from '../shared/devices';
 import { roomPower } from '../shared/library';
+import type { BluetoothOp } from '../shared/types';
 import { LumaError, message, power } from '../core/model';
 
 const demo = process.argv.includes('--demo');
@@ -65,6 +66,8 @@ if (demo) {
   demoProfile = scratch;
 } else {
   app.setPath('userData', join(app.getPath('appData'), linux ? LINUX_PROFILE_DIR : 'LumaWindows'));
+  // Bluetooth lights: the advertisement (encryption flag, Pact) is read with watchAdvertisements, still behind a Blink flag.
+  app.commandLine.appendSwitch('enable-blink-features', 'WebBluetoothWatchAdvertisements,WebBluetoothScanning');
   if (linux) {
     // Capture switches are merged into any existing value (appendSwitch would replace it). Never --no-sandbox.
     for (const [name, value] of linuxCaptureSwitches(linuxSession)) {
@@ -142,6 +145,8 @@ function createWindow(): BrowserWindow {
     }
   });
   win.on('closed', () => { if (window === win) window = undefined; });
+  // Web Bluetooth's chooser: main lists Govee lights as they advertise; the person picks one on the Bluetooth page.
+  win.webContents.on('select-bluetooth-device', (event, devices, callback) => { event.preventDefault(); home.bluetooth.found(devices, callback); });
   // A hidden or minimized window pauses Screen Sync rather than sampling in the background.
   // Audio Sync keeps running from the tray (music plays with Luma closed); the tray shows it.
   win.on('hide', () => { if (home.sync.kind !== 'audio') home.sync.pause(); });
@@ -346,6 +351,14 @@ function registerIPC(): void {
   handle('floorPlanRemovePin', (id, deviceID) => home.floorPlan((f) => f.removePin(str(id, 64), str(deviceID))));
   handle('floorPlanImage', (id) => { const png = home.floorPlan((f) => f.image(str(id, 64))); return png ? `data:image/png;base64,${png.toString('base64')}` : undefined; });
   handle('saveDreamViewDraft', (id, draft) => home.saveDreamViewDraft(str(id), draft));
+  handle('bluetooth', async (op, arg) => {
+    if (op !== 'capture') return home.bluetooth.handle(str(op, 16) as BluetoothOp, arg);
+    const result = await dialog.showOpenDialog(window!, { properties: ['openFile'], filters: [{ name: 'Bluetooth capture', extensions: ['txt', 'log'] }, { name: 'All files', extensions: ['*'] }] });
+    const file = result.filePaths[0];
+    if (result.canceled || !file) return;
+    if (statSync(file).size > 16 * 1024 * 1024) throw new LumaError('That capture is too large.');
+    return home.bluetooth.handle('capture', readFileSync(file, 'utf8'));
+  });
   handle('roomAction', (room, action) => home.roomAction(str(room, 160), action));
   handle('controlBatch', (id, commands) => home.controlBatch(str(id), commands));
   handle('restoreBeforeScene', () => { home.restoreBeforeScene(); });
@@ -374,7 +387,9 @@ function registerIPC(): void {
 
 function hardenSessions(): void {
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
-  session.defaultSession.setPermissionCheckHandler(() => false);
+  // Only our own renderer may use Web Bluetooth (Bluetooth lights); everything else stays denied.
+  const ours = (wc: Electron.WebContents | null) => !!window && wc === window.webContents && wc.getURL() === rendererURL();
+  session.defaultSession.setPermissionCheckHandler((wc, permission) => (permission as string) === 'bluetooth' && ours(wc));
   app.on('web-contents-created', (_event, contents) => {
     contents.on('will-navigate', (event) => event.preventDefault());
     contents.on('will-attach-webview', (event) => event.preventDefault());
@@ -404,6 +419,7 @@ if (unsupported) {
       captureSupported: captureReal,
       syncOptions: { audioSupport },
       scheduleSyncOptions: { keepAwake },
+      postToRenderer: (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send(channel, payload); },
       floorPlans: new FloorPlanStore(demo ? undefined : join(app.getPath('userData'), 'floor-plans'), encodeFloorImage),
     });
     nativeTheme.themeSource = home.snapshot().appearance;

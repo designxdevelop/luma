@@ -8,7 +8,6 @@ Status values:
 - **Added**: built in this pass.
 - **Windows equivalent**: the Apple feature doesn't exist on Windows, and Luma does the same job another way.
 - **N/A**: doesn't apply to Windows, with the reason.
-- **Deferred (applicable)**: belongs on Windows but isn't built yet, with the reason.
 
 Every release ships as version 1.0. The desktop package is now `1.0.0` (it was `0.2.0`), and the installer is `release/Luma Setup 1.0.0.exe`.
 
@@ -105,22 +104,42 @@ Round trips are covered by `fixtures/native-backup.json` and the Swift `CrossPla
 | Same-account schedule failover | **Windows equivalent** | LAN schedule sync (see above) |
 | `ActivationClicks` (macOS first-click behavior) | **N/A** | An AppKit detail. Electron windows already accept the first click |
 
-## Deferred (applicable)
+## Bluetooth lights
 
-| Feature | Why it isn't built yet |
+| Feature | Mac/iPhone source | Windows/Linux | Notes |
+| --- | --- | --- | --- |
+| Protocol: frames, advertisement, model from name, commands, queries, replies, A3 reassembly, profiles | `GoveeBLE` | **Added** | `core/ble.ts`, byte-exact against the `GoveeBLETests.swift` vectors (`test/ble.test.ts`) |
+| Encryption V1/V2 and the fail-closed session | `GoveeBLECrypto` | **Added** | `core/ble-crypto.ts` (Node crypto, hand-written RC4), the same vectors |
+| Capture decoder (DreamView members, `cmd_ver`) | `GoveeBLECapture` | **Added** | Settings › Bluetooth › Read capture… |
+| Scan, connect to one profiled light, keep-alive, idle/silence drop, 60 ms pacing | `BluetoothLights` | **Added** | `main/bluetooth.ts` runs the protocol in main. The renderer carries GATT bytes over Electron Web Bluetooth (`renderer/bluetooth-view.ts`). The person picks the light from Luma's own list (Electron `select-bluetooth-device`) |
+| Power, brightness, color, Video mode, DreamView group sync/content/area/saturation, member slots; each enabled only after readback | `BluetoothLightsView` | **Added** | Same rules as native |
+| Govee Home match by Bluetooth name | `BluetoothLightsView.accountName` | **Added** | `bleName` is now read from `deviceExt.deviceSettings` |
+
+Platform differences (Web Bluetooth instead of CoreBluetooth):
+
+- **Advertisement.** The advertisement (encryption flag, Pact) is read after the light is chosen, with `watchAdvertisements`, behind a Blink flag Luma turns on. If it can't be read, the session falls back to the `2b12` marker, and then fails closed as native does. The chooser shows no signal strength until a light is chosen.
+- **Services.** Only Govee's documented service `00010203-…-1910` (ha-govee-led-ble `transport.py`) is opened. Native discovers every service.
+- **Packet size.** The ATT MTU isn't exposed, so V2 lights assume Chromium negotiated a large one. A write the light refuses ends the connection with a message.
+- **Not hardware-verified.** Native isn't either (`docs/BLUETOOTH-DREAMVIEW.md`).
+
+## Icons
+
+| Item | Decision |
 | --- | --- |
-| **Bluetooth lights** (`GoveeBLE`, `GoveeBLECrypto`, `GoveeBLECapture`, `BluetoothLightsView`) | This does apply to Windows. Electron's Web Bluetooth could carry it without a native dependency. But the native transport has **never run against hardware** (`docs/BLUETOOTH-DREAMVIEW.md`: evidence is source and test vectors only). Shipping a second, unverified copy of the V1/V2 encryption and the device picker would add risk without evidence. **Plan:** first verify native Bluetooth on an H6097/H66A0. Then port `GoveeBLE` frames, profiles and the encryption to `desktop/src/core` using the `GoveeBLETests.swift` vectors, with a hand-written RC4 (Electron's BoringSSL may not offer it). Then add a Web Bluetooth transport with the `select-bluetooth-device` picker and the same "enabled only after readback" control rules |
+| App, window, installer and tray icon | **Reused**: copied from `macos/Luma/Assets.xcassets/AppIcon.appiconset` by `scripts/make-icons.mjs`. The sidebar brand uses it too |
+| In-app glyphs (SF Symbols) | **Can't be reused.** Apple's SF Symbols license allows them only in apps for Apple platforms. Windows keeps its open line icons, drawn to the same shapes (lightbulb, map, gear, wand, film…) |
 
 ## Tests
 
-`desktop/src/test/windows-parity.test.ts` covers:
+`desktop/src/test/windows-parity.test.ts`, `ble.test.ts` (Swift vectors) and `bluetooth.test.ts` (controller with fake GATT) cover:
 
 - the scene library (dedupe, placeholders, accent-insensitive search, room rows, skip reasons);
 - tray rooms (lights with a power switch only, Unassigned last);
 - floor-plan rules: one pin per light, bounds, strict native decode, owner-only files, re-encoding, a damaged file preserved, and the in-memory demo store;
-- DreamView draft validation.
+- DreamView draft validation;
+- the Bluetooth protocol, encryption and capture vectors, and the controller's connection order, readback gating, pacing and silence drop.
 
-The desktop suite has 279 tests, and `npm run typecheck` is clean.
+The desktop suite has 294 tests, and `npm run typecheck` is clean.
 
 ## UI evidence
 

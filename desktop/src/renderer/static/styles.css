@@ -324,3 +324,4 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .dv-areas { display: flex; flex-wrap: wrap; gap: 3px; margin: 4px 0 8px 20px; }
 .dv-areas .chip { padding: 1px 7px; min-height: 22px; }
 .dv-partners summary { cursor: pointer; font-weight: 600; }
+.brand-icon { width: 28px; height: 28px; border-radius: 7px; }

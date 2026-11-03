@@ -14,6 +14,7 @@ import { scheduleSyncBlock, scheduleSyncLine, scheduleSyncSubtitle } from './sch
 import { doorbellView, initDoorbell } from './doorbell-view.js';
 import { dreamViewPartners, floorView, initParity, paintFloor, sceneBrowser, sceneList } from './parity-view.js';
 import { advertisesScenes } from '../shared/library.js';
+import { bluetoothView, initBluetooth, leaveBluetooth } from './bluetooth-view.js';
 import { isLight, paintCommands, segmentSchema, SEGMENT_INSTANCES, type SegmentSchema } from '../shared/devices.js';
 import {
   BASIC, SCENE_ICONS, WEEKDAYS, basicCommand, brightnessRange, capOf, describeCommand, effectCapabilities, esc, friendly, fromHex, hex, icon,
@@ -22,7 +23,7 @@ import {
 
 const luma = (window as unknown as { luma: LumaBridge }).luma;
 
-type View = 'activity' | 'lights' | 'floor' | 'scenes' | 'sync' | 'automations' | 'settings' | 'about';
+type View = 'activity' | 'lights' | 'floor' | 'bluetooth' | 'scenes' | 'sync' | 'automations' | 'settings' | 'about';
 type Tab = 'light' | 'effects' | 'details';
 type SceneEditor = { kind: 'editor'; draft: LightScene; json: boolean; jsonText: string; error?: string; isNew: boolean };
 type Capture = { kind: 'capture'; name: string; icon: string; ids: string[]; error?: string };
@@ -101,7 +102,7 @@ function shell(s: AppSnapshot): string {
   const nav: Array<[View, string, string]> = [['lights', 'Lights', 'bulb'], ['floor', 'Floor plan', 'map'], ['scenes', 'Scenes', 'scenes'], ['sync', 'Sync', 'screen'], ['automations', 'Automations', 'clock'], ['activity', 'Activity', 'clock'], ['settings', 'Settings', 'gear'], ['about', 'About', 'info']];
   return `
   <nav class="sidebar" aria-label="Sections">
-    <div class="brand"><span class="orb small" data-color="#ffb347"></span><span>Luma</span>${s.demo ? '<span class="badge">Demo</span>' : ''}</div>
+    <div class="brand"><img class="brand-icon" src="luma.png" alt="" width="28" height="28"><span>Luma</span>${s.demo ? '<span class="badge">Demo</span>' : ''}</div>
     <ul>${nav.map(([v, label, ic]) => `<li><button class="nav ${state.view === v ? 'active' : ''}" data-action="view" data-view="${v}" ${state.view === v ? 'aria-current="page"' : ''}>${icon(ic)}<span>${label}</span>${v === 'activity' && s.activity.some(a => a.isError) ? `<span class="badge">${s.activity.filter(a => a.isError).length}</span>` : ''}</button></li>`).join('')}</ul>
     <div class="sidebar-foot">${s.demo ? 'Sample lights only. Nothing real is controlled and changes are not saved.' : s.cloudConnected ? 'Govee cloud connected' : 'Cloud not connected'}</div>
   </nav>
@@ -109,7 +110,7 @@ function shell(s: AppSnapshot): string {
     ${s.notice ? `<div class="notice" role="alert"><span>${esc(s.notice)}</span><button class="ghost" data-action="dismiss-notice" aria-label="Dismiss message">${icon('close')}</button></div>` : ''}
     ${syncBanner(s)}
     ${state.status ? `<div class="status ${state.status.error ? 'error' : ''}">${esc(state.status.text)}</div>` : ''}
-    ${state.view === 'lights' ? lightsView(s) : state.view === 'floor' ? floorView(s) : state.view === 'scenes' ? scenesView(s) : state.view === 'sync' ? (syncMode(s) === 'audio' ? audioSyncView(s) : syncView(s)) : state.view === 'automations' ? automationsView(s) : state.view === 'settings' ? settingsView(s) : state.view === 'activity' ? activityView(s) : aboutView(s)}
+    ${state.view === 'lights' ? lightsView(s) : state.view === 'floor' ? floorView(s) : state.view === 'bluetooth' ? bluetoothView(s) : state.view === 'scenes' ? scenesView(s) : state.view === 'sync' ? (syncMode(s) === 'audio' ? audioSyncView(s) : syncView(s)) : state.view === 'automations' ? automationsView(s) : state.view === 'settings' ? settingsView(s) : state.view === 'activity' ? activityView(s) : aboutView(s)}
   </main>`;
 }
 
@@ -568,6 +569,10 @@ function settingsView(s: AppSnapshot): string {
       <p class="hint">Your key is sent only to openapi.api.govee.com and stored with Windows DPAPI or your Linux keyring, never in plain text. Use your existing key: generating a new one disables older keys used by other apps.</p>
     </section>
     ${goveeHomeSection(s)}
+    <section class="card-block" aria-labelledby="ble-title"><h2 id="ble-title">Bluetooth lights</h2>
+      <p class="sub">Control supported Govee lights near this PC without Wi-Fi or the cloud, and read DreamView members from a Govee Home capture.</p>
+      <button data-action="view" data-view="bluetooth">Bluetooth…</button>
+    </section>
     <section class="card-block" aria-labelledby="backup-title"><h2 id="backup-title">Backup and restore</h2>
       <p class="sub">Scenes, schedules, light names and rooms in one file. It opens in Luma on Mac, iPhone and iPad too.</p>
       <div class="actions"><button data-action="backup-export" ${s.demo ? 'disabled' : ''}>Export backup…</button><button data-action="backup-import" ${s.demo || !s.canSave ? 'disabled' : ''}>Restore from backup…</button></div>
@@ -1045,7 +1050,7 @@ document.addEventListener('click', (event) => {
     case 'activity-filter': state.problemsOnly = target.dataset.problems === '1'; render(); break;
     case 'sch-preset': { const sch = state.snap?.schedules.find(x => x.id === id); if (sch) void act(() => luma.saveSchedule({ ...sch, weekdays: [...DAY_PRESETS[target.dataset.preset as keyof typeof DAY_PRESETS]] })); break; }
     case 'duplicate-scene': { const sc = state.snap?.scenes.find(x => x.id === id); if (sc) void act(() => luma.saveScene(duplicateScene(sc, uuid))); break; }
-    case 'view': state.view = target.dataset.view as View; render(); document.getElementById('main')?.focus(); break;
+    case 'view': if (state.view === 'bluetooth' && target.dataset.view !== 'bluetooth') leaveBluetooth(); state.view = target.dataset.view as View; render(); document.getElementById('main')?.focus(); break;
     case 'dismiss-notice': void luma.dismissNotice(); break;
     case 'select': selectDevice(state.selected === id ? undefined : id); break;
     case 'deselect': selectDevice(undefined); break;
@@ -1376,6 +1381,7 @@ modalHost.addEventListener('cancel', (event) => { event.preventDefault(); state.
 
 initAudioSync({ luma, snap: () => state.snap, render, act, flash, errorText, slider: syncSlider });
 initDoorbell({ luma, snap: () => state.snap, act });
+initBluetooth({ luma, snap: () => state.snap, act, render });
 initParity({ luma, snap: () => state.snap, act, render, flash, open: (id) => { state.view = 'lights'; selectDevice(id, 'light'); } });
 luma.onSnapshot((snap) => { state.snap = snap; followSync(snap); followAudio(snap); render(); });
 luma.onNavigate((target) => { if (target.deviceID) selectDevice(target.deviceID, 'light'); else if (target.tab) { state.view = target.tab as View; render(); } });

@@ -21,6 +21,7 @@ import { WebhookServer } from '../core/http';
 import { createApiHandler } from '../core/api';
 import { HomeStorage, dreamViewDrafts, emptyHome, type SecretStore } from './storage';
 import { FloorPlanStore } from './floor-plans';
+import { BluetoothController } from './bluetooth';
 import { dreamViewMemberLimit } from '../shared/library';
 import { demoDevices, demoEffects, demoReadings, demoScenes } from './demo';
 import { REGIONS } from '../shared/sync-math';
@@ -57,6 +58,8 @@ export interface HomeOptions {
   doorbellOptions?: Pick<ConstructorParameters<typeof DoorbellController>[0], 'clock' | 'fetch'>;
   /** Floor plans (main passes a store with an image encoder); in memory without images when omitted. */
   floorPlans?: FloorPlanStore;
+  /** Sends an event to the renderer (Bluetooth writes); undefined in tests and headless use. */
+  postToRenderer?(channel: string, payload?: unknown): void;
 }
 
 export class Home {
@@ -96,6 +99,7 @@ export class Home {
   readonly sync: SyncController;
   readonly scheduleSync: ScheduleSync;
   readonly doorbell: DoorbellController;
+  readonly bluetooth: BluetoothController;
 
   constructor(private readonly options: HomeOptions) {
     this.demo = options.demo;
@@ -161,6 +165,15 @@ export class Home {
       log: (text, isError) => this.log(text, isError),
       changed: () => this.emit(),
       ...options.scheduleSyncOptions,
+    });
+    this.bluetooth = new BluetoothController({
+      emit: () => this.emit(),
+      post: options.postToRenderer ?? (() => {}),
+      supported: !options.demo && !!options.postToRenderer,
+      accountName: (localName) => {
+        const entry = this.goveeHome.entries.find((e) => e.bleName?.toLowerCase() === localName.toLowerCase());
+        return entry && this.home.devices.find((d) => d.id.toLowerCase() === entry.device.toLowerCase())?.name;
+      },
     });
     this.doorbell = new DoorbellController({
       demo: this.demo, folder: options.storage?.folder, secrets: options.secrets,
@@ -255,6 +268,7 @@ export class Home {
       floorPlans: this.floorPlans.list(),
       floorPlansWritable: this.floorPlans.writable && (this.canSave || this.demo),
       dreamViewDrafts: this.home.dreamViewDrafts ?? {},
+      bluetooth: this.bluetooth.view(),
     };
   }
 
@@ -933,6 +947,7 @@ export class Home {
   }
 
   async shutdown(): Promise<void> {
+    this.bluetooth.disconnect(undefined);
     await this.doorbell.shutdown();
     clearInterval(this.scheduleTimer);
     await this.scheduleSync.stop();

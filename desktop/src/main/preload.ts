@@ -27,6 +27,17 @@ const bridge: LumaBridge = {
     ipcRenderer.on('luma:navigate', handler);
     return () => { ipcRenderer.removeListener('luma:navigate', handler); };
   },
+  bluetooth: call('bluetooth') as LumaBridge['bluetooth'],
+  onBluetoothWrite(listener) {
+    const handler = (_event: unknown, frame: number[]) => listener(frame);
+    ipcRenderer.on('luma:ble-write', handler);
+    return () => { ipcRenderer.removeListener('luma:ble-write', handler); };
+  },
+  onBluetoothDisconnect(listener) {
+    const handler = () => listener();
+    ipcRenderer.on('luma:ble-disconnect', handler);
+    return () => { ipcRenderer.removeListener('luma:ble-disconnect', handler); };
+  },
   control: call('control') as LumaBridge['control'],
   refresh: call('refresh') as LumaBridge['refresh'],
   connect: call('connect') as LumaBridge['connect'],
