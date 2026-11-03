@@ -43,10 +43,11 @@ struct RootView: View {
     private var tabs: some View {
         TabView(selection: Binding(get: { if case .page(let page) = navigation.selection { page } else { .lights } },
                                    set: { navigation.selection = .page($0) })) {
-            ForEach([Page.lights, .scenes, .automations, .screenSync, .activity, .settings], id: \.self) { page in
+            // Activity and Screen Sync live under Settings › Advanced.
+            ForEach([Page.lights, .scenes, .automations, .settings], id: \.self) { page in
                 NavigationStack { pageContent(.page(page)) }
-                    .tabItem { Label(page.rawValue, systemImage: page.icon) }
-                    .badge(badge(for: page))
+                    .tabItem { Label(page == .lights ? "Home" : page.rawValue, systemImage: page == .lights ? "house" : page.icon) }
+                    .badge(problemBadge(for: page))
                     .tag(page)
             }
         }
@@ -122,6 +123,15 @@ struct RootView: View {
             .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { sidebarFooter }
+    }
+
+    /// Tab badges count problems only (offline lights, errors).
+    private func problemBadge(for page: Page) -> Int {
+        switch page {
+        case .lights: store.devices.filter { $0.online == false }.count
+        case .settings: store.activity.filter(\.isError).count
+        default: 0
+        }
     }
 
     private func badge(for page: Page) -> Text? {

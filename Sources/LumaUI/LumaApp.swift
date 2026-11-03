@@ -80,6 +80,18 @@ struct MenuBarView: View {
         Divider()
         Button("Turn All Lights On") { store.perform(.power(true), ids: store.devices.filter { $0.supports("powerSwitch") }.map(\.id)) }.disabled(store.devices.isEmpty)
         Button("Turn All Lights Off") { store.perform(.power(false), ids: store.devices.filter { $0.supports("powerSwitch") }.map(\.id)) }.disabled(store.devices.isEmpty)
+        if store.rooms.count > 1 {
+            Section("Rooms") {
+                ForEach(store.rooms, id: \.self) { room in
+                    let lights = store.devices.filter { $0.room == room && $0.supports("powerSwitch") }
+                    Menu("\(room) · \(lights.filter { $0.power == true }.count) of \(lights.count) on") {
+                        Button("Turn On") { store.perform(.power(true), ids: lights.map(\.id)) }
+                        Button("Turn Off") { store.perform(.power(false), ids: lights.map(\.id)) }
+                    }
+                    .disabled(lights.isEmpty)
+                }
+            }
+        }
         if !store.home.scenes.isEmpty {
             Section("Scenes") {
                 ForEach(store.home.scenes) { scene in

@@ -1,0 +1,29 @@
+DEFINE SCHEMA
+    RECORD TYPE Users (
+        "___createTime" TIMESTAMP,
+        "___createdBy" REFERENCE,
+        "___etag" STRING,
+        "___modTime" TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID" REFERENCE,
+        roles LIST<INT64>,
+        GRANT WRITE TO "_creator",
+        GRANT READ TO "_world"
+    );
+    RECORD TYPE LumaMutation (
+        entity STRING,
+        field STRING,
+        counter INT64,
+        writer STRING,
+        deleted INT64,
+        value BYTES,
+        asset ASSET
+    );
+    RECORD TYPE LumaScheduleLease (
+        holder STRING,
+        nonce STRING,
+        state STRING,
+        expiresAt TIMESTAMP,
+        step INT64,
+        note STRING
+    );

@@ -36,25 +36,40 @@ struct HomeStorage {
 enum SecretStore {
     static let service = "app.luma.govee"
     static func read(_ account: String) throws -> String? {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account, kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
+        var query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account, kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne, kSecAttrSynchronizable as String: kSecAttrSynchronizableAny]
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        query[kSecAttrSynchronizable as String] = account == "govee-api-key"
+        var migrating = false
+        var status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound, account == "govee-api-key" {
+            query[kSecAttrSynchronizable as String] = false
+            migrating = true
+            status = SecItemCopyMatching(query as CFDictionary, &result)
+        }
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = result as? Data, let value = String(data: data, encoding: .utf8) else { throw error(status) }
+        // Copy to the synchronizable class before removing the legacy item.
+        // A failed copy leaves the original usable and recoverable.
+        if migrating { try? save(value, account: account) }
         return value
     }
     static func save(_ value: String, account: String) throws {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account, kSecAttrSynchronizable as String: account == "govee-api-key"]
         let data = Data(value.utf8)
         var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if status == errSecItemNotFound {
-            var item = query; item[kSecValueData as String] = data; item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            var item = query; item[kSecValueData as String] = data; item[kSecAttrAccessible as String] = account == "govee-api-key" ? kSecAttrAccessibleAfterFirstUnlock : kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             status = SecItemAdd(item as CFDictionary, nil)
         }
         guard status == errSecSuccess else { throw error(status) }
+        if account == "govee-api-key" {
+            let legacy: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account, kSecAttrSynchronizable as String: false]
+            let removal = SecItemDelete(legacy as CFDictionary)
+            guard removal == errSecSuccess || removal == errSecItemNotFound else { throw error(removal) }
+        }
     }
     static func delete(_ account: String) throws {
-        let status = SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account] as CFDictionary)
+        let status = SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account, kSecAttrSynchronizable as String: account == "govee-api-key" ? kSecAttrSynchronizableAny : false] as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw error(status) }
     }
     static func token() throws -> String {

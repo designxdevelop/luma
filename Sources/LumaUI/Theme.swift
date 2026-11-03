@@ -161,11 +161,11 @@ struct PageHeader<Actions: View>: View {
             HStack(alignment: .firstTextBaseline, spacing: 16) {
                 titles
                 Spacer(minLength: 12)
-                HStack(spacing: 8) { actions }.controlSize(.regular)
+                HStack(spacing: 8) { actions }.controlSize(.regular).fixedSize()
             }
             VStack(alignment: .leading, spacing: 12) {
                 titles
-                HStack(spacing: 8) { actions }.controlSize(.regular)
+                HStack(spacing: 8) { actions }.controlSize(.regular).fixedSize()
             }
             VStack(alignment: .leading, spacing: 12) {
                 titles
@@ -305,55 +305,69 @@ func copyToPasteboard(_ text: String) {
     #endif
 }
 
-/// Brightness control shared by light cards and the device sheet.
+/// Brightness as a wide bar: drag (or tap) anywhere to set it.
 ///
 /// Holds a local draft while dragging so telemetry or pending-state updates
-/// cannot snap the thumb back mid-drag. Non-drag edits (keyboard, scroll,
-/// accessibility) commit immediately; a drag commits once on release, and only
-/// if the freshest requested value differs.
-struct BrightnessSlider: View {
+/// cannot snap the fill back mid-drag. A drag commits once on release, and only
+/// if the freshest requested value differs; accessibility adjustments commit
+/// immediately.
+struct BrightnessBar: View {
     let store: HomeStore
     let device: LightDevice
-    var showsLabel = true
-    @State private var brightness: Double = 50
-    @State private var editingBrightness = false
+    var height: CGFloat = 64
+    @State private var draft: Int?
+    private var value: Int { draft ?? device.brightness ?? 0 }
+    private var enabled: Bool { device.supports("brightness") && device.online != false }
     var body: some View {
-        VStack(spacing: 4) {
-            if showsLabel {
-                HStack {
-                    Text("Brightness")
+        GeometryReader { proxy in
+            let fill = proxy.size.width * CGFloat(value) / 100
+            ZStack(alignment: .leading) {
+                Color.well
+                LinearGradient(colors: [device.displayColor.opacity(0.35), device.displayColor.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                    .frame(width: fill)
+                HStack(spacing: 10) {
+                    Image(systemName: "sun.max").font(.system(size: 16, weight: .medium))
+                    Text("Brightness").font(.system(size: 16, weight: .semibold))
                     Spacer()
-                    Text(editingBrightness ? "\(Int(brightness))%" : device.brightness.map { "\($0)%" } ?? "—").monospacedDigit()
-                }.font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            HStack(spacing: 8) {
-                Image(systemName: "sun.min").font(.system(size: 11)).foregroundStyle(.tertiary).accessibilityHidden(true)
-                // No `step:` — macOS draws tick marks for stepped sliders. The
-                // setter rounds instead, so every value stays a whole percent.
-                Slider(value: Binding(get: { brightness }, set: { proposed in
-                    let value = min(100, max(1, proposed.rounded()))
-                    brightness = value
-                    // Keyboard, accessibility and scroll-wheel edits may change
-                    // the binding without a mouse drag's editing-end callback.
-                    if !editingBrightness { requestBrightness(value) }
-                }), in: 1...100) { editing in
-                    editingBrightness = editing
-                    if !editing { requestBrightness(brightness) }
+                    Text(device.brightness == nil && draft == nil ? "—" : "\(value)%").font(.system(size: 22, weight: .bold)).monospacedDigit()
                 }
-                .controlSize(.small)
-                .disabled(!device.supports("brightness"))
-                .accessibilityLabel("Brightness for \(device.name)")
-                .accessibilityValue(device.brightness.map { "\($0) percent" } ?? "Unknown")
-                Image(systemName: "sun.max.fill").font(.system(size: 11)).foregroundStyle(.tertiary).accessibilityHidden(true)
+                .foregroundStyle(.primary).padding(.horizontal, 18)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.hairline))
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { draft = brightnessPercent(atX: $0.location.x, width: proxy.size.width) }
+                .onEnded { _ in if let draft { request(draft) }; draft = nil },
+                including: enabled ? .all : .none)
+        }
+        .frame(height: height)
+        .opacity(enabled ? 1 : 0.5)
+        .accessibilityElement()
+        .accessibilityLabel("Brightness for \(device.name)")
+        .accessibilityValue(device.brightness.map { "\($0) percent" } ?? "Unknown")
+        .accessibilityAdjustableAction { direction in
+            guard enabled else { return }
+            switch direction {
+            case .increment: request(min(100, value + 10))
+            case .decrement: request(max(1, value - 10))
+            @unknown default: break
             }
         }
-        .onAppear { brightness = Double(device.brightness ?? 50) }
-        .onChange(of: device.brightness) { _, value in if !editingBrightness { brightness = Double(value ?? 50) } }
+        #if os(macOS)
+        .help("Drag to set brightness")
+        #endif
     }
-    private func requestBrightness(_ value: Double) {
-        guard store.devices.first(where: { $0.id == device.id })?.brightness != Int(value) else { return }
-        store.perform(.brightness(Int(value)), ids: [device.id])
+    private func request(_ value: Int) {
+        guard store.devices.first(where: { $0.id == device.id })?.brightness != value else { return }
+        store.perform(.brightness(value), ids: [device.id])
     }
+}
+
+/// Whole-percent brightness for a point on the bar; the light's minimum is 1%.
+func brightnessPercent(atX x: CGFloat, width: CGFloat) -> Int {
+    guard width > 0 else { return 1 }
+    return min(100, max(1, Int((x / width * 100).rounded())))
 }
 
 // MARK: - Platform modifiers
@@ -414,7 +428,7 @@ enum PlatformCopy {
     static let device = "Mac"
     static let keychain = "macOS Keychain"
     static let tapVerb = "Click"
-    static let scheduleNote = "Times use this Mac’s time zone. Luma must be running (the menu bar is fine) and your Mac awake. Missed times are skipped, and a scene that’s already running blocks another from starting."
+    static let scheduleNote = "Times use this Mac’s time zone. Luma must be running (the menu bar is fine) and your Mac awake. Missed times are skipped, and a scene that’s already running blocks another from starting. With iCloud failover, the chosen primary runs it and the fallback takes over only if the primary hasn’t claimed it within 90 seconds; times then use the time zone saved with the failover setting, and runs more than 10 minutes late are skipped."
     static let scenesEmpty = "Save your lighting as scenes you can run from the menu bar, schedules, and webhooks."
     static let scenesWhere = "Run them here, from the menu bar, on a schedule, or with a webhook."
     static let storageNote = "Closing the window keeps Luma in your menu bar so schedules and webhooks keep working. Quit Luma to stop them. Scenes and schedules are saved on this Mac; your API key and webhook token stay in the macOS Keychain. Activity is also saved locally in Luma’s activity.log for troubleshooting."
@@ -422,9 +436,40 @@ enum PlatformCopy {
     static var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
     static let tapVerb = "Tap"
     static let keychain = "iOS Keychain"
-    static var scheduleNote: String { "Times use this \(device)’s time zone. iOS pauses apps in the background, so schedules and webhooks run only while Luma is open. Missed times are skipped, and a scene that’s already running blocks another from starting." }
+    static var scheduleNote: String { "Times use this \(device)’s time zone. iOS pauses apps in the background, so schedules and webhooks run only while Luma is open. Missed times are skipped, and a scene that’s already running blocks another from starting. With iCloud failover, the chosen primary runs it and the fallback takes over only if the primary hasn’t claimed it within 90 seconds; times then use the time zone saved with the failover setting, and runs more than 10 minutes late are skipped." }
     static let scenesEmpty = "Save your lighting as scenes you can run here, on a schedule, or with a webhook."
     static let scenesWhere = "Run them here, on a schedule, or with a webhook."
     static var storageNote: String { "Schedules and webhooks run only while Luma is open; iOS pauses them in the background. Scenes and schedules are saved on this \(device); your API key and webhook token stay in the iOS Keychain. Activity is also saved locally in Luma’s activity.log for troubleshooting." }
     #endif
+}
+
+// MARK: - Redesign helpers
+
+extension LightDevice {
+    /// Plain-language look for lists: "Amber · 65%", "Warm white · 40%", "Off".
+    var lookDescription: String {
+        if online == false { return "Offline" }
+        guard power != false else { return "Off" }
+        let look: String? = if let k = colorTemperature, k > 0 { whiteName(k) } else { rgb.map(colorName) }
+        return [look, brightness.map { "\($0)%" }].compactMap { $0 }.joined(separator: " · ")
+    }
+}
+
+func whiteName(_ kelvin: Int) -> String { kelvin < 3300 ? "Warm white" : kelvin < 5000 ? "Neutral white" : "Daylight" }
+
+/// A friendly hue name for an RGB value; low saturation reads as white.
+func colorName(_ rgb: Int) -> String {
+    let r = Double((rgb >> 16) & 255) / 255, g = Double((rgb >> 8) & 255) / 255, b = Double(rgb & 255) / 255
+    let hi = max(r, g, b), lo = min(r, g, b), delta = hi - lo
+    if hi < 0.08 { return "Black" }
+    if delta / hi < 0.2 { return "White" }
+    var hue: Double = hi == r ? (g - b) / delta : hi == g ? 2 + (b - r) / delta : 4 + (r - g) / delta
+    hue = (hue * 60 + 360).truncatingRemainder(dividingBy: 360)
+    let names: [(Double, String)] = [(15, "Red"), (38, "Orange"), (48, "Amber"), (68, "Yellow"), (160, "Green"), (195, "Teal"), (250, "Blue"), (290, "Purple"), (340, "Pink"), (360, "Red")]
+    return names.first { hue < $0.0 }?.1 ?? "Red"
+}
+
+/// Names straight from Govee are often the model plus an ID ("H6199_6C77"); offer to rename those.
+func looksLikeModelName(_ name: String, sku: String) -> Bool {
+    name.caseInsensitiveCompare(sku) == .orderedSame || name.range(of: #"^[A-Z]\d{4}[A-Z0-9]*([ _-][A-Z0-9]{2,})?$"#, options: .regularExpression) != nil
 }

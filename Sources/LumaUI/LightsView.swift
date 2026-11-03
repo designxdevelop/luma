@@ -1,68 +1,95 @@
 import SwiftUI
 import LumaCore
 
+enum HomeMode: String { case rooms, plan }
+
 struct LightsView: View {
     let store: HomeStore
     let room: String?
     @Binding var connecting: Bool
     @State private var selected: LightDevice?
+    @State private var naming: LightDevice?
     @State private var search = ""
+    @AppStorage("homeMode") private var mode = HomeMode.rooms
     @FocusState private var searchFocused: Bool
-    private let columns = [GridItem(.adaptive(minimum: 236, maximum: 360), spacing: 14)]
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    private var compact: Bool { sizeClass == .compact }
+    private var columns: [GridItem] {
+        compact ? [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+                : [GridItem(.adaptive(minimum: 180, maximum: 240), spacing: 14)]
+    }
+    private var showsPlan: Bool { room == nil && mode == .plan && !store.devices.isEmpty }
 
     var shown: [LightDevice] {
         store.devices.filter { (room == nil || $0.room == room) && (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.sku.localizedCaseInsensitiveContains(search) || $0.room.localizedCaseInsensitiveContains(search)) }
     }
-    /// Group by room on the overview when there's more than one room.
+    /// Lights grouped by room; a room page is one group.
     private var groups: [(room: String, lights: [LightDevice])] {
         let lights = shown
-        guard room == nil, Set(lights.map(\.room)).count > 1 else { return [(room ?? "", lights)] }
+        guard room == nil else { return [(room ?? "", lights)] }
         return Dictionary(grouping: lights, by: \.room).sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }.map { ($0.key, $0.value) }
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                PageHeader(title: room ?? "Lights", subtitle: subtitle) {
-                    if !store.devices.isEmpty {
-                        searchField
-                        powerButtons(for: shown, label: room == nil ? "all lights" : "lights in \(room!)")
-                    }
+        Group {
+            if showsPlan {
+                VStack(alignment: .leading, spacing: 14) {
+                    header
+                    FloorPlanView(store: store) { selected = $0 }
+                }
+                .pagePadding()
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        header
+                        if store.devices.isEmpty { onboarding } else { roomsContent }
+                    }.pagePadding()
+                }
+            }
+        }
+        .background { Button("Find") { searchFocused = true }.keyboardShortcut("f").opacity(0).accessibilityHidden(true) }
+        .sheet(item: $selected) { device in DeviceSheet(store: store, deviceID: device.id) }
+        .sheet(item: $naming) { device in NameRoomSheet(store: store, deviceID: device.id) }
+    }
+
+    // MARK: Header
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            PageHeader(title: room ?? "Home", subtitle: subtitle) {
+                if !store.devices.isEmpty {
+                    if !compact && !showsPlan { searchField }
+                    allPowerButton
+                }
+                if !compact {
                     Button { store.discover() } label: {
                         Label(store.scanning ? "Looking…" : "Find Lights", systemImage: "dot.radiowaves.left.and.right")
                     }
                     .disabled(store.scanning || store.demo)
                     .help(store.demo ? "Leave the demo home to find real lights." : "Look for LAN-enabled Govee lights on this Wi-Fi network")
                 }
-                if store.devices.isEmpty { onboarding }
-                else {
-                    if room == nil && !store.home.scenes.isEmpty && search.isEmpty { scenesStrip }
-                    ForEach(groups, id: \.room) { group in
-                        VStack(alignment: .leading, spacing: 10) {
-                            if groups.count > 1 {
-                                SectionHeader(title: group.room, detail: "\(group.lights.filter { $0.power == true }.count) of \(group.lights.count) on") {
-                                    powerButtons(for: group.lights, label: "lights in \(group.room)").controlSize(.small)
-                                }
-                            }
-                            LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
-                                ForEach(group.lights) { device in
-                                    LightCard(store: store, device: device, showsRoom: room == nil && groups.count == 1 && store.rooms.count > 1) { selected = device }
-                                }
-                            }
-                        }
-                    }
-                    if shown.isEmpty {
-                        EmptyState(icon: "magnifyingglass", title: "No matching lights", message: "Nothing matches “\(search)”. Try a light's name, model, or room.") {
-                            Button("Clear Search") { search = "" }
-                        }
-                    }
-                    Label("Local lights confirm changes directly. Cloud lights confirm once Govee reports back, which can take a few seconds.", systemImage: "info.circle")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            if room == nil && !store.devices.isEmpty {
+                Picker("View", selection: $mode) {
+                    Text("Rooms").tag(HomeMode.rooms)
+                    Text("Plan").tag(HomeMode.plan)
                 }
-            }.pagePadding()
+                .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 220)
+                .accessibilityLabel("Show lights by room or on the floor plan")
+            }
         }
-        .background { Button("Find") { searchFocused = true }.keyboardShortcut("f").opacity(0).accessibilityHidden(true) }
-        .sheet(item: $selected) { device in DeviceSheet(store: store, deviceID: device.id) }
+    }
+
+    private var allPowerButton: some View {
+        let lights = shown.filter { $0.supports("powerSwitch") }
+        let anyOn = lights.contains { $0.power == true }
+        return Button { store.perform(.power(!anyOn), ids: lights.map(\.id)) } label: {
+            Label(anyOn ? "All off" : "All on", systemImage: "power").fontWeight(.semibold)
+                .padding(.horizontal, 6).frame(minHeight: 32)
+        }
+        .buttonStyle(.bordered).buttonBorderShape(.capsule)
+        .disabled(lights.isEmpty)
+        .help(anyOn ? "Turn off every light shown (⌥⌘↓)" : "Turn on every light shown (⌥⌘↑)")
     }
 
     private var subtitle: String {
@@ -70,7 +97,8 @@ struct LightsView: View {
         if lights.isEmpty { return store.scanning ? "Looking for lights on your Wi-Fi…" : "Bring your Govee lights together in one place." }
         let on = lights.filter { $0.power == true }.count
         let offline = lights.filter { $0.online == false }.count
-        var parts = [on == 0 ? "All \(lights.count) off" : on == lights.count ? "All \(lights.count) on" : "\(on) of \(lights.count) on"]
+        var parts = ["\(on) of \(lights.count) \(lights.count == 1 ? "light" : "lights") on"]
+        if room == nil && store.rooms.count > 1 { parts.append("\(store.rooms.count) rooms") }
         if offline > 0 { parts.append("\(offline) offline") }
         if store.scanning { parts.append("Looking for more…") }
         return parts.joined(separator: " · ")
@@ -92,22 +120,50 @@ struct LightsView: View {
         .accessibilityLabel("Search lights")
     }
 
-    private func powerButtons(for lights: [LightDevice], label: String) -> some View {
-        let ids = lights.filter { $0.supports("powerSwitch") }.map(\.id)
-        return HStack(spacing: 6) {
-            Button { store.perform(.power(true), ids: ids) } label: { Label("All On", systemImage: "lightbulb.max") }
-                .help("Turn on \(label)").accessibilityLabel("Turn on \(label)")
-            Button { store.perform(.power(false), ids: ids) } label: { Label("All Off", systemImage: "lightbulb.slash") }
-                .help("Turn off \(label)").accessibilityLabel("Turn off \(label)")
+    // MARK: Rooms
+
+    @ViewBuilder private var roomsContent: some View {
+        if room == nil && !store.home.scenes.isEmpty && search.isEmpty { scenesStrip }
+        ForEach(groups, id: \.room) { group in
+            VStack(alignment: .leading, spacing: 10) {
+                if room == nil { roomHeader(group.room, lights: group.lights) }
+                LazyVGrid(columns: columns, alignment: .leading, spacing: compact ? 12 : 14) {
+                    ForEach(group.lights) { device in
+                        LightTile(store: store, device: device, open: { selected = device }, rename: { naming = device })
+                    }
+                }
+            }
         }
-        .labelStyle(.titleAndIcon)
-        .fixedSize()
-        .disabled(ids.isEmpty)
+        if shown.isEmpty {
+            EmptyState(icon: "magnifyingglass", title: "No matching lights", message: "Nothing matches “\(search)”. Try a light's name, model, or room.") {
+                Button("Clear Search") { search = "" }
+            }
+        }
+        Label("\(PlatformCopy.tapVerb) a light to switch it. Use › for color and brightness. Cloud lights confirm once Govee reports back.", systemImage: "info.circle")
+            .font(.system(size: 11)).foregroundStyle(.secondary)
+    }
+
+    private func roomHeader(_ name: String, lights: [LightDevice]) -> some View {
+        let ids = lights.filter { $0.supports("powerSwitch") }.map(\.id)
+        let on = lights.filter { $0.power == true }.count
+        return HStack(alignment: .center, spacing: 8) {
+            Text(name).font(.system(size: 19, weight: .bold)).accessibilityAddTraits(.isHeader)
+            Text("\(on) of \(lights.count) on").font(.system(size: 13)).foregroundStyle(.secondary).monospacedDigit()
+            Spacer(minLength: 8)
+            Toggle(isOn: Binding(get: { on > 0 }, set: { value in store.perform(.power(value), ids: ids) })) {
+                Text(on > 0 ? "On" : "Off").font(.system(size: 13, weight: .semibold)).foregroundStyle(on > 0 ? Color.lumaAccent : .secondary)
+            }
+            .toggleStyle(.switch).fixedSize()
+            .padding(.leading, 12).padding(.trailing, 4).padding(.vertical, 4)
+            .background((on > 0 ? Color.lumaAccent.opacity(0.12) : Color.primary.opacity(0.06)), in: Capsule())
+            .disabled(ids.isEmpty)
+            .accessibilityLabel("All lights in \(name)")
+        }
     }
 
     private var scenesStrip: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionHeader("Scenes", detail: PlatformCopy.tapVerb + " to set the mood")
+            Text("Set the mood").font(.system(size: 19, weight: .bold)).accessibilityAddTraits(.isHeader)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(store.home.scenes) { scene in SceneChip(store: store, scene: scene) }
@@ -116,10 +172,10 @@ struct LightsView: View {
         }
     }
 
-    @Environment(\.horizontalSizeClass) private var sizeClass
+    // MARK: First run
 
     private var onboarding: some View {
-        Card(padding: sizeClass == .compact ? 20 : 32) {
+        Card(padding: compact ? 20 : 32) {
             VStack(spacing: 28) {
                 VStack(spacing: 12) {
                     ZStack {
@@ -129,11 +185,15 @@ struct LightsView: View {
                     Text("Welcome to Luma").font(.system(size: 24, weight: .bold)).tracking(-0.4)
                     Text("Control your Govee lights from your \(PlatformCopy.device): quick power and brightness, color, scenes, schedules, and automations.")
                         .font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 440)
+                    #if os(iOS)
+                    Text("Used Luma on another device? Connect with the same Apple Account and your names, rooms, and scenes come back from iCloud.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 440)
+                    #endif
                 }
-                let layout = sizeClass == .compact ? AnyLayout(VStackLayout(spacing: 12)) : AnyLayout(HStackLayout(alignment: .top, spacing: 14))
+                let layout = compact ? AnyLayout(VStackLayout(spacing: 12)) : AnyLayout(HStackLayout(alignment: .top, spacing: 14))
                 layout {
                     step(1, icon: "cloud", title: "Connect your account", text: "Use a Govee API key to find every light on your account, including effects and segments.") {
-                        Button("Connect Account…") { connecting = true }.buttonStyle(.borderedProminent).lineLimit(1)
+                        Button("Connect Account…") { connecting = true }.buttonStyle(.borderedProminent)
                     }
                     step(2, icon: "wifi", title: "Add local control", text: "Turn on LAN Control for each light in the Govee Home app, then look for lights on this Wi-Fi.") {
                         Button(store.scanning ? "Looking…" : "Find Lights") { store.discover() }.disabled(store.scanning)
@@ -149,7 +209,7 @@ struct LightsView: View {
     private func step<Action: View>(_ n: Int, icon: String, title: String, text: String, @ViewBuilder action: () -> Action) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: icon).foregroundStyle(Color.lumaAccent).frame(width: 26, height: 26).background(Color.lumaAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                Image(systemName: icon).font(.system(size: 13, weight: .medium)).foregroundStyle(Color.lumaAccent).frame(width: 26, height: 26).background(Color.lumaAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                 Text("Step \(n)").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
             }
             Text(title).font(.system(size: 14, weight: .semibold))
@@ -173,17 +233,16 @@ private struct SceneChip: View {
             else { do { try store.runScene(scene) } catch { store.log(error.localizedDescription, error: true) } }
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: scene.symbol).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.lumaAccent)
-                    .frame(width: 30, height: 30).background(Color.lumaAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                Image(systemName: scene.symbol).font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.lumaAccent)
+                    .frame(width: 36, height: 36).background(Color.lumaAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(scene.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    Text(running ? "Running…" : "^[\(Set(scene.steps.map(\.deviceID)).count) light](inflect: true)").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(scene.name).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                    Text(running ? "Running · \(PlatformCopy.tapVerb.lowercased()) to stop" : "^[\(Set(scene.steps.map(\.deviceID)).count) light](inflect: true)").font(.system(size: 12)).foregroundStyle(running ? Color.lumaAccent : .secondary)
                 }
-                Image(systemName: running ? "stop.fill" : "play.fill").font(.system(size: 10)).foregroundStyle(running ? Color.lumaAccent : .secondary).padding(.leading, 4)
             }
-            .padding(.leading, 8).padding(.trailing, 14).padding(.vertical, 8)
-            .background(Color.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(running ? Color.lumaAccent.opacity(0.7) : hovering ? Color.primary.opacity(0.18) : Color.hairline))
+            .padding(.leading, 8).padding(.trailing, 14).frame(minHeight: 56)
+            .background(Color.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(running ? Color.lumaAccent.opacity(0.7) : hovering ? Color.primary.opacity(0.18) : Color.hairline))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -194,63 +253,109 @@ private struct SceneChip: View {
     }
 }
 
-struct LightCard: View {
+/// A light tinted with its own color. Tap switches it; › opens its controls.
+struct LightTile: View {
     let store: HomeStore
     let device: LightDevice
-    var showsRoom = false
     let open: () -> Void
+    let rename: () -> Void
     @State private var hovering = false
     private var isOn: Bool { device.power == true && device.online != false }
-    private var stateText: String {
-        if device.online == false { return "Offline" }
-        switch device.power { case true?: return device.colorTemperature.map { $0 > 0 ? "On · \($0) K" : "On" } ?? "On"; case false?: return "Off"; case nil: return "No status yet" }
+    private var canSwitch: Bool { device.supports("powerSwitch") && device.online != false }
+    private var needsName: Bool {
+        guard let own = store.home.devices.first(where: { $0.id == device.id }), own.customName == nil else { return false }
+        return looksLikeModelName(own.name, sku: own.sku)
     }
+    private var stateText: String {
+        if let status = store.controlStatus(for: device.id) { return status }
+        if device.online == false { return "Offline" }
+        switch device.power {
+        case true?: return device.brightness.map { "\($0)%" } ?? "On"
+        case false?: return "Off"
+        case nil: return "No status yet"
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Button(action: open) { LightOrb(device: device, size: 42) }
-                    .buttonStyle(.plain).help("Open controls").accessibilityLabel("Open \(device.name) controls")
-                Button(action: open) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(device.name).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(.primary).lineLimit(1)
-                        Text(showsRoom ? "\(device.room) · \(stateText)" : stateText).font(.system(size: 11.5)).foregroundStyle(device.online == false ? Color.danger : .secondary).lineLimit(1)
-                    }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                }.buttonStyle(.plain).accessibilityHint("Opens controls")
-                Toggle("Power for \(device.name)", isOn: Binding(get: { device.power ?? false }, set: { store.perform(.power($0), ids: [device.id]) }))
-                    .labelsHidden().toggleStyle(.switch).controlSize(.small).disabled(!device.supports("powerSwitch"))
+        Button { canSwitch ? store.perform(.power(!(device.power ?? false)), ids: [device.id]) : open() } label: {
+            VStack(alignment: .leading, spacing: 0) {
+                LightOrb(device: device, size: 40)
+                Spacer(minLength: 18)
+                Text(device.name).font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary).lineLimit(2).multilineTextAlignment(.leading)
+                    .padding(.trailing, needsName ? 64 : 0)
+                Text(stateText).font(.system(size: 13)).monospacedDigit()
+                    .foregroundStyle(device.online == false ? Color.danger : .secondary).lineLimit(1)
             }
-            BrightnessSlider(store: store, device: device)
-            HStack(spacing: 6) {
-                StatusPill(text: device.connection.label, icon: device.connection.icon, tint: device.connection.tint).help(device.connection.help)
-                if let status = store.controlStatus(for: device.id) {
-                    StatusPill(text: status, tint: .lumaAccent, busy: true).transition(.opacity)
+            .padding(14).frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
+            .background(background)
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(TilePressStyle())
+        .overlay(alignment: .topTrailing) {
+            Button(action: open) {
+                Image(systemName: "chevron.right").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28).background(.thinMaterial, in: Circle())
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).padding(4)
+            .help("Color, brightness, and details").accessibilityLabel("Controls for \(device.name)")
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if needsName {
+                Button(action: rename) {
+                    Text("Name it").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.lumaAccent)
+                        .padding(.horizontal, 10).frame(height: 26).background(Color.lumaAccent.opacity(0.12), in: Capsule())
+                        .frame(minHeight: 44).contentShape(Rectangle())
                 }
-                Spacer(minLength: 4)
-                Button(action: open) { Image(systemName: "slider.horizontal.3") }
-                    .buttonStyle(.borderless).foregroundStyle(.secondary)
-                    .help("Color, effects, and details").accessibilityLabel("More controls for \(device.name)")
+                .buttonStyle(.plain).padding(.trailing, 8).padding(.bottom, 2)
+                .help("Give this light a name only Luma uses").accessibilityLabel("Name \(device.name)")
             }
-            .animation(.easeOut(duration: 0.15), value: store.controlStatus(for: device.id))
         }
-        .padding(16)
-        .background {
-            ZStack {
-                Color.surface
-                if isOn { LinearGradient(colors: [device.displayColor.opacity(0.16), .clear], startPoint: .topLeading, endPoint: .center) }
-            }.clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(hovering ? Color.primary.opacity(0.16) : Color.hairline))
-        .shadow(color: .black.opacity(hovering ? 0.08 : 0.03), radius: hovering ? 8 : 3, y: hovering ? 3 : 1)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.15), value: hovering)
         .contextMenu {
-            Button("Turn On") { store.perform(.power(true), ids: [device.id]) }.disabled(!device.supports("powerSwitch"))
-            Button("Turn Off") { store.perform(.power(false), ids: [device.id]) }.disabled(!device.supports("powerSwitch"))
+            Button(device.power == true ? "Turn Off" : "Turn On", systemImage: "power") { store.perform(.power(!(device.power ?? false)), ids: [device.id]) }
+                .disabled(!device.supports("powerSwitch"))
+            Button("Open Controls", systemImage: "slider.horizontal.3", action: open)
             Divider()
-            Button("Open Controls…", action: open)
-            Button("Refresh State") { Task { await store.refresh(device) } }
+            Button("Rename…", systemImage: "pencil", action: rename)
+            Menu("Move to Room") {
+                ForEach(store.rooms.filter { $0 != device.room }, id: \.self) { name in
+                    Button(name) { store.assignRoom(name, id: device.id) }
+                }
+                Divider()
+                Button("New Room…", systemImage: "plus", action: rename)
+            }
+            Button("Refresh State", systemImage: "arrow.clockwise") { Task { await store.refresh(device) } }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(device.name), \(stateText), \(device.connection.label)")
+        .accessibilityLabel("\(device.name), \(device.room)")
+        .accessibilityValue(stateText)
+        .accessibilityHint(canSwitch ? "Switches the light \(device.power == true ? "off" : "on")" : "Opens controls")
+        .accessibilityAction(named: "Open controls", open)
+        .accessibilityAction(named: "Rename", rename)
+    }
+
+    private var background: some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let color = device.displayColor
+        return ZStack {
+            Color.surface
+            if isOn {
+                LinearGradient(colors: [color.opacity(0.42), color.opacity(0.08)], startPoint: .topLeading, endPoint: .bottomTrailing)
+            }
+        }
+        .clipShape(shape)
+        .overlay {
+            if device.online == false { shape.strokeBorder(Color.danger.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])) }
+            else { shape.strokeBorder(isOn ? color.opacity(0.45) : hovering ? Color.primary.opacity(0.16) : Color.hairline) }
+        }
+        .shadow(color: isOn ? color.opacity(0.18) : .black.opacity(0.03), radius: isOn ? 10 : 3, y: 2)
+        .animation(.easeOut(duration: 0.2), value: isOn)
+    }
+}
+
+private struct TilePressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.scaleEffect(configuration.isPressed ? 0.97 : 1).animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }

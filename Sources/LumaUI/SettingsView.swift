@@ -41,6 +41,32 @@ struct SettingsView: View {
                         }
                     }
                 }
+#if os(iOS)
+                Card {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("iCloud", systemImage: "icloud")
+                        Text(store.demo ? "Demo stays on this device." : store.iCloudStatus)
+                            .font(.subheadline).foregroundStyle(.secondary)
+                        Text("Your Govee key uses iCloud Keychain. Names, rooms, scenes and floor plans sync across devices using the same Apple Account. Light status refreshes from your lights.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Sync Now") { store.refreshICloud() }.disabled(store.demo).frame(minHeight: 44)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    SectionHeader("Advanced")
+                    Card {
+                        VStack(alignment: .leading, spacing: 0) {
+                            NavigationLink { ActivityView(store: store).background(Color.canvas) } label: {
+                                Label("Activity", systemImage: Page.activity.icon).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            }
+                            Divider()
+                            NavigationLink { ScreenSyncView(store: store, sync: store.screenSync).background(Color.canvas) } label: {
+                                Label("Screen Sync", systemImage: Page.screenSync.icon).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            }
+                        }
+                    }
+                }
+#endif
                 VStack(alignment: .leading, spacing: 10) {
                     SectionHeader("Appearance")
                     Card {

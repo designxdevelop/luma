@@ -62,7 +62,7 @@ struct AutomationsView: View {
                             Button("Every Day") { weekdays = Set(1...7) }
                             Button("Weekdays") { weekdays = Set(2...6) }
                             Button("Weekends") { weekdays = [1, 7] }
-                        }.menuStyle(.borderlessButton).fixedSize()
+                        }.menuStyle(.button).buttonStyle(.borderless).fixedSize()
                     }
                     HStack(spacing: 8) {
                         ForEach(orderedWeekdays, id: \.self) { day in
@@ -103,6 +103,7 @@ struct AutomationsView: View {
                         Label("Scene was deleted", systemImage: "exclamationmark.triangle.fill").font(.system(size: 14, weight: .medium)).foregroundStyle(Color.warning)
                     }
                     Text(daysSummary(schedule.weekdays)).font(.system(size: 12)).foregroundStyle(.secondary)
+                    failoverMenu(schedule)
                 }
                 .opacity(schedule.enabled ? 1 : 0.55)
                 Spacer(minLength: 12)
@@ -113,6 +114,41 @@ struct AutomationsView: View {
                 .opacity(schedule.enabled ? 1 : 0.55)
                 Button { store.home.schedules.removeAll { $0.id == schedule.id }; store.persist() } label: { Image(systemName: "trash") }
                     .buttonStyle(.borderless).help("Delete schedule").accessibilityLabel("Delete schedule")
+            }
+        }
+    }
+
+    /// Primary/fallback choice for same-account failover. Without it, the schedule stays on its original device.
+    private func failoverMenu(_ schedule: SceneSchedule) -> some View {
+        let coordination = store.coordinations[schedule.id]
+        let name = { (id: String?) in store.schedulerDevices.first { $0.id == id }?.name ?? "Unknown device" }
+        let summary = coordination.map { "Runs on \(name($0.primary))" + ($0.fallback.map { ", fallback \(name($0))" } ?? "") } ?? "Runs on its original device"
+        return VStack(alignment: .leading, spacing: 2) {
+            Menu(summary) {
+                Section("Primary") {
+                    ForEach(store.schedulerDevices) { device in
+                        Button(device.name) {
+                            var next = coordination ?? ScheduleCoordination(primary: device.id)
+                            next.primary = device.id
+                            if next.fallback == device.id { next.fallback = nil }
+                            store.setCoordination(next, for: schedule.id)
+                        }
+                    }
+                }
+                if let coordination {
+                    Section("Fallback if primary is offline") {
+                        Button("None") { var next = coordination; next.fallback = nil; store.setCoordination(next, for: schedule.id) }
+                        ForEach(store.schedulerDevices.filter { $0.id != coordination.primary }) { device in
+                            Button(device.name) { var next = coordination; next.fallback = device.id; store.setCoordination(next, for: schedule.id) }
+                        }
+                    }
+                    Button("Stop coordinating (run on this device)") { store.setCoordination(nil, for: schedule.id) }
+                }
+            }
+            .menuStyle(.button).buttonStyle(.borderless).fixedSize().font(.system(size: 12)).disabled(!store.coordinatedSchedulingAvailable && coordination == nil)
+            .accessibilityLabel("Schedule failover: \(summary)")
+            if let status = store.scheduleStatus[schedule.id] {
+                Text(status).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
             }
         }
     }

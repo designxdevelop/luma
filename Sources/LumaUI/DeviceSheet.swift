@@ -5,10 +5,8 @@ struct DeviceSheet: View {
     let store: HomeStore
     let deviceID: String
     @Environment(\.dismiss) private var dismiss
-    @State private var tab = Tab.light
-    @State private var room = ""
-    @State private var name = ""
-    @State private var roomMessage: String?
+    @State private var path: [Route] = []
+    @State private var mode = Mode.color
     @State private var instance = ""
     @State private var json = "1"
     @State private var effectMessage: (text: String, isError: Bool)?
@@ -17,84 +15,161 @@ struct DeviceSheet: View {
     @State private var sending = false
     @State private var refreshing = false
     @State private var showAdvanced = false
+    @State private var savingLook = false
+    @State private var lookName = ""
+    @State private var lookMessage: (text: String, isError: Bool)?
 
-    private enum Tab: String, CaseIterable, Identifiable {
-        case light = "Light", effects = "Effects", details = "Details"
-        var id: Self { self }
-    }
+    private enum Mode: String { case color = "Color", white = "White" }
+    enum Route: Hashable { case effects, name, details }
 
     var device: LightDevice? { store.devices.first { $0.id == deviceID } }
-    /// Features beyond the four basic controls, which live on the Light tab.
+    /// Features beyond the four basic controls, which live on the main page.
     private func features(_ device: LightDevice) -> [Capability] { device.capabilities.filter { !basicInstances.contains($0.instance) } }
     private var cap: Capability? { device.flatMap { features($0).first { $0.instance == instance } } }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let device {
-                header(device)
-                Picker("Section", selection: $tab) { ForEach(Tab.allCases) { Text($0.rawValue).tag($0) } }
-                    .pickerStyle(.segmented).labelsHidden().padding(.horizontal, compactSpacing(24, 16)).padding(.bottom, 16)
-                Divider()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        switch tab {
-                        case .light: lightTab(device)
-                        case .effects: effectsTab(device)
-                        case .details: detailsTab(device)
+        NavigationStack(path: $path) {
+            Group {
+                if let device {
+                    ScrollView { main(device).padding(compactSpacing(24, 16)) }
+                        .navigationDestination(for: Route.self) { route in
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 16) {
+                                    switch route {
+                                    case .effects: effectsTab(device)
+                                    case .name: NameRoomForm(store: store, deviceID: deviceID) { path.removeLast() }
+                                    case .details: detailsTab(device)
+                                    }
+                                }.padding(compactSpacing(24, 16))
+                            }
+                            .background(Color.canvas)
+                            .navigationTitle(route == .effects ? "Effects" : route == .name ? "Name & room" : "About this light")
+                            .inlineNavigationTitle()
                         }
-                    }.padding(compactSpacing(24, 16))
+                } else {
+                    EmptyState(icon: "lightbulb.slash", title: "This light is no longer available", message: "It may have been removed from your account or the network.")
+                        .frame(maxHeight: .infinity)
                 }
-            } else {
-                EmptyState(icon: "lightbulb.slash", title: "This light is no longer available", message: "It may have been removed from your account or the network.") {
-                    Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-                }.frame(maxHeight: .infinity)
             }
+            .background(Color.canvas)
+            #if os(macOS)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) } }
+            #endif
         }
-        .sheetFrame(width: 660, height: 720).background(Color.canvas)
+        .sheetFrame(width: 560, height: 720)
+        #if os(iOS)
+        // Paper 02: a grabber, no Done button; swipe down to dismiss.
+        .presentationDragIndicator(.visible)
+        #endif
         .onAppear {
             guard let device else { return }
-            room = device.room; name = device.name
+            mode = (device.colorTemperature ?? 0) > 0 || !device.supports("colorRgb") ? .white : .color
             instance = features(device).first?.instance ?? ""; resetValue()
         }
         .onChange(of: instance) { _, _ in resetValue() }
         .onChange(of: device.map { features($0).map(\.instance) }) { _, list in
             if let list, !list.contains(instance) { instance = list.first ?? "" }
         }
+        .alert("Save this look as a scene", isPresented: $savingLook) {
+            TextField("Scene name", text: $lookName)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { saveLook() }
+        } message: { Text("Saves this light's current power, brightness, and color.") }
     }
 
-    // MARK: Header
+    // MARK: Main page
 
-    private func header(_ device: LightDevice) -> some View {
-        HStack(spacing: 16) {
-            LightOrb(device: device, size: compactSpacing(52, 44))
-            VStack(alignment: .leading, spacing: 4) {
-                Text(device.name).font(.system(size: 19, weight: .semibold)).lineLimit(1).truncationMode(.tail)
-                Text("\(device.room) · \(device.sku)").font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-                HStack(spacing: 6) {
-                    StatusPill(text: device.connection.label, icon: device.connection.icon, tint: device.connection.tint).help(device.connection.help)
-                    if let status = store.controlStatus(for: deviceID) { StatusPill(text: status, tint: .lumaAccent, busy: true) }
+    @ViewBuilder private func main(_ device: LightDevice) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            header(device)
+            VStack(alignment: .leading, spacing: 6) {
+                BrightnessBar(store: store, device: device)
+                Text(device.connection == .local ? "Drag anywhere on the bar · confirmed by the light" : "Drag anywhere on the bar")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).padding(.leading, 4)
+            }
+            let color = device.supports("colorRgb"), white = device.supports("colorTemperatureK")
+            if color && white {
+                Picker("Light mode", selection: $mode) { Text("Color").tag(Mode.color); Text("White").tag(Mode.white) }
+                    .pickerStyle(.segmented).labelsHidden()
+            }
+            if color && (mode == .color || !white) { ColorCard(store: store, device: device) }
+            if white && (mode == .white || !color) { WhiteCard(store: store, device: device) }
+            Card(padding: 0) {
+                VStack(spacing: 0) {
+                    row(.effects, icon: "wand.and.stars", title: "Effects", detail: "Govee scenes, music, segments")
+                    Divider().padding(.leading, 60)
+                    row(.name, icon: "pencil", title: "Name & room", detail: "Rename it, move it to a room")
+                    Divider().padding(.leading, 60)
+                    row(.details, icon: "info.circle", title: "About this light", detail: "Model, connection, device ID, refresh")
                 }
             }
-            Spacer(minLength: 12)
+            VStack(spacing: 6) {
+                Button { lookName = device.name; savingLook = true } label: {
+                    Label("Save this look as a scene", systemImage: "plus").font(.system(size: 15, weight: .semibold)).frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.plain).foregroundStyle(Color.lumaAccent)
+                if let lookMessage { InlineMessage(text: lookMessage.text, isError: lookMessage.isError) }
+            }
+        }
+    }
+
+    private func header(_ device: LightDevice) -> some View {
+        HStack(spacing: 14) {
+            LightOrb(device: device, size: 56)
+            VStack(alignment: .leading, spacing: 3) {
+                Button { path.append(.name) } label: {
+                    HStack(spacing: 6) {
+                        Text(device.name).font(.system(size: 22, weight: .bold)).lineLimit(2).multilineTextAlignment(.leading)
+                        Image(systemName: "pencil").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                    }
+                    .frame(minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).foregroundStyle(.primary)
+                .help("Rename").accessibilityLabel("\(device.name). Rename")
+                HStack(spacing: 6) {
+                    Text(device.room).lineLimit(1)
+                    Text("·")
+                    Label(device.connection.label, systemImage: device.connection.icon).labelStyle(.titleAndIcon)
+                        .foregroundStyle(device.connection == .offline ? Color.danger : .secondary)
+                    if let status = store.controlStatus(for: deviceID) { StatusPill(text: status, tint: .lumaAccent, busy: true) }
+                }
+                .font(.system(size: 13)).foregroundStyle(.secondary).help(device.connection.help)
+            }
+            Spacer(minLength: 8)
             Toggle("Power", isOn: Binding(get: { store.devices.first { $0.id == deviceID }?.power ?? false },
-                                          set: { store.perform(.power($0), ids: [deviceID]) }))
+                                          set: { value in store.perform(.power(value), ids: [deviceID]) }))
                 .toggleStyle(.switch).labelsHidden()
                 .disabled(!device.supports("powerSwitch"))
                 .help("Turn \(device.name) on or off")
                 .accessibilityLabel("Power for \(device.name)")
-            Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-        }.padding(.horizontal, compactSpacing(24, 16)).padding(.top, 20).padding(.bottom, 16)
+        }
     }
 
-    // MARK: Light tab
-
-    @ViewBuilder private func lightTab(_ device: LightDevice) -> some View {
-        Card { BrightnessSlider(store: store, device: device) }
-        ColorCard(store: store, device: device)
-        WhiteCard(store: store, device: device)
+    private func row(_ route: Route, icon: String, title: String, detail: String) -> some View {
+        Button { path.append(route) } label: {
+            HStack(spacing: 14) {
+                Image(systemName: icon).font(.system(size: 15)).foregroundStyle(.primary)
+                    .frame(width: 32, height: 32).background(Color.well, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 15, weight: .medium)).foregroundStyle(.primary)
+                    Text(detail).font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 14).frame(minHeight: 60).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
-    // MARK: Effects tab
+    private func saveLook() {
+        let name = lookName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { lookMessage = ("Give the scene a name.", true); return }
+        do { try store.captureScene(name: name, ids: [deviceID]); lookMessage = ("Saved “\(name)” to Scenes", false) }
+        catch { lookMessage = (error.localizedDescription, true) }
+    }
+
+    // MARK: Effects
 
     @ViewBuilder private func effectsTab(_ device: LightDevice) -> some View {
         Card {
@@ -164,32 +239,9 @@ struct DeviceSheet: View {
         .help(store.cloudConnected ? "Download from your Govee account" : "Connect your Govee account in Settings first")
     }
 
-    // MARK: Details tab
+    // MARK: Details
 
     @ViewBuilder private func detailsTab(_ device: LightDevice) -> some View {
-        Card {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionHeader("Name")
-                HStack(spacing: 8) {
-                    TextField("Name", text: $name).textFieldStyle(.roundedBorder).onSubmit { saveName() }
-                        .onChange(of: name) { _, value in if value.count > 64 { name = String(value.prefix(64)) } }
-                    Button("Save") { saveName() }
-                    if let own = store.home.devices.first(where: { $0.id == deviceID }), own.customName != nil {
-                        Button("Reset") { store.rename("", id: deviceID); name = own.name }.help("Use the name \(own.name) from the light")
-                    }
-                }
-                SectionHeader("Room")
-                HStack(spacing: 8) {
-                    TextField("Room", text: $room).textFieldStyle(.roundedBorder).onSubmit { saveRoom() }
-                    Menu {
-                        ForEach(store.rooms, id: \.self) { name in Button(name) { room = name; saveRoom() } }
-                    } label: { Label("Rooms", systemImage: "chevron.down") }
-                        .menuStyle(.button).fixedSize().help("Choose an existing room")
-                    Button("Save") { saveRoom() }
-                }
-                if let roomMessage { InlineMessage(text: roomMessage, isError: false) }
-            }
-        }
         Card {
             VStack(alignment: .leading, spacing: 12) {
                 SectionHeader("About this light")
@@ -205,7 +257,7 @@ struct DeviceSheet: View {
                 LabeledContent("Device ID") {
                     HStack(spacing: 6) {
                         Text(device.id).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
-                        Button { copyToPasteboard(device.id) } label: { Image(systemName: "doc.on.doc") }
+                        Button { copyToPasteboard(device.id) } label: { Image(systemName: "doc.on.doc").frame(width: 32, height: 32) }
                             .buttonStyle(.borderless).help("Copy device ID").accessibilityLabel("Copy device ID")
                     }
                 }
@@ -219,18 +271,6 @@ struct DeviceSheet: View {
             }.help("Ask the light for its current state")
             Spacer()
         }
-    }
-
-    private func saveName() {
-        store.rename(name, id: deviceID)
-        name = device?.name ?? name
-    }
-
-    private func saveRoom() {
-        let name = room.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
-        store.assignRoom(name, id: deviceID)
-        roomMessage = "Moved to \(name)"
     }
 
     // MARK: Effect values
@@ -287,6 +327,7 @@ private struct ColorCard: View {
     let store: HomeStore
     let device: LightDevice
     @State private var custom = Color.orange
+    @State private var send: Task<Void, Never>?
     private static let presets: [(name: String, rgb: Int)] = [
         ("Red", 0xFF3B30), ("Orange", 0xFF9500), ("Yellow", 0xFFD60A), ("Green", 0x34C759),
         ("Teal", 0x00C7BE), ("Blue", 0x0A84FF), ("Purple", 0xAF52DE), ("Pink", 0xFF2D95),
@@ -294,32 +335,41 @@ private struct ColorCard: View {
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 14) {
-                SectionHeader(title: "Color", detail: colorActive ? device.rgb.map { String(format: "#%06X", $0) } : nil) {
-                    if device.supports("colorRgb") && !colorActive { Text("Not active").font(.system(size: 12)).foregroundStyle(.secondary) }
-                }
                 if device.supports("colorRgb") {
-                    HStack(spacing: compactSpacing(12, 6)) {
+                    HStack(spacing: 0) {
                         ForEach(Self.presets, id: \.rgb) { preset in
                             let selected = colorActive && device.rgb == preset.rgb
                             Button { store.perform(.rgb(preset.rgb), ids: [device.id]) } label: {
-                                Circle().fill(Color(rgb: preset.rgb)).frame(width: 28, height: 28)
+                                Circle().fill(Color(rgb: preset.rgb)).frame(width: 32, height: 32)
                                     .overlay(Circle().strokeBorder(Color.primary.opacity(0.12)))
                                     .padding(3)
                                     .overlay(Circle().strokeBorder(selected ? Color.primary : .clear, lineWidth: 2))
-                                    .contentShape(Circle())
+                                    .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
                             }
                             .buttonStyle(.plain).help(preset.name)
                             .accessibilityLabel(preset.name).accessibilityAddTraits(selected ? .isSelected : [])
                         }
-                        Spacer(minLength: 0)
                     }
-                    HStack(spacing: 10) {
-                        ColorPicker("Custom color", selection: $custom, supportsOpacity: false)
-                        Spacer()
-                        Button("Apply Color") {
-                            if let rgb = rgbValue(of: custom) { store.perform(.rgb(rgb), ids: [device.id]) }
-                        }.help("Send the chosen color to the light")
+                    Divider()
+                    // Paper 02: "Custom · Now showing". "Now showing" only once the light reports it;
+                    // while a change is unconfirmed the row shows the pending status instead.
+                    let isCustom = colorActive && !Self.presets.contains { $0.rgb == device.rgb }
+                    HStack(spacing: 12) {
+                        Circle().fill(Color(rgb: device.rgb ?? 0xFFAA66)).frame(width: 30, height: 30)
+                            .padding(3).overlay(Circle().strokeBorder(isCustom ? Color.primary : Color.primary.opacity(0.12), lineWidth: isCustom ? 2 : 1))
+                            .accessibilityHidden(true)
+                        Text("Custom").font(.body)
+                        if colorActive {
+                            Text(store.controlStatus(for: device.id) ?? "Now showing").font(.subheadline).foregroundStyle(.secondary)
+                        } else {
+                            Text("Not active").font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 4)
+                        ColorPicker("Custom color", selection: Binding(get: { custom }, set: { custom = $0; choose($0) }), supportsOpacity: false).labelsHidden()
+                            .frame(minWidth: 44, minHeight: 44)
+                            .help("Choose any color")
                     }
+                    .accessibilityElement(children: .combine)
                 } else {
                     Text("This light doesn't support color.").font(.system(size: 13)).foregroundStyle(.secondary)
                 }
@@ -328,12 +378,18 @@ private struct ColorCard: View {
         .onAppear { custom = Color(rgb: device.rgb ?? 0xFFAA66) }
     }
     /// White mode reports a temperature; a zero or missing one means color mode.
+    /// Only the person's picks reach here (not onAppear). Picker drags fire continuously; send the color it settles on.
+    private func choose(_ color: Color) {
+        send?.cancel()
+        guard let rgb = rgbValue(of: color), rgb != device.rgb else { return }
+        send = Task { try? await Task.sleep(for: .milliseconds(250)); if !Task.isCancelled { store.perform(.rgb(rgb), ids: [device.id]) } }
+    }
     private var colorActive: Bool { device.rgb != nil && (device.colorTemperature ?? 0) <= 0 }
 }
 
 // MARK: - White
 
-/// Kelvin slider follows `BrightnessSlider`'s draft pattern: a local draft while
+/// Kelvin slider follows `BrightnessBar`'s draft pattern: a local draft while
 /// dragging, immediate commits for non-drag edits, and a release commit only
 /// if the freshest requested value differs. A missing or zero temperature means
 /// the light is in color mode: the draft keeps its last usable value and nothing
@@ -371,19 +427,19 @@ private struct WhiteCard: View {
                             let value = Int(clamped(Double(preset.kelvin)))
                             let selected = activeKelvin == value
                             Button { kelvin = Double(value); store.perform(.kelvin(value), ids: [device.id]) } label: {
-                                HStack(spacing: 4) {
-                                    Text(preset.name).fontWeight(.medium)
-                                    Text("\(value) K").monospacedDigit().opacity(0.75)
+                                VStack(spacing: 2) {
+                                    Text(preset.name).font(.system(size: 14, weight: .semibold))
+                                    Text("\(value) K").font(.system(size: 12)).monospacedDigit().opacity(0.75)
                                 }
-                                .font(.system(size: 12)).foregroundStyle(selected ? Color.white : Color.primary)
-                                .padding(.horizontal, 10).padding(.vertical, 6)
-                                .background(selected ? Color.lumaAccentFill : Color.well, in: Capsule())
-                                .contentShape(Capsule())
+                                .lineLimit(1).minimumScaleFactor(0.8)
+                                .foregroundStyle(selected ? Color.white : Color.primary)
+                                .frame(maxWidth: .infinity, minHeight: 52)
+                                .background(selected ? Color.lumaAccentFill : Color.well, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain).help("\(preset.name) white, \(value) K")
                             .accessibilityLabel("\(preset.name), \(value) kelvin").accessibilityAddTraits(selected ? .isSelected : [])
                         }
-                        Spacer(minLength: 0)
                     }
                     VStack(spacing: 4) {
                         // No `step:` — it draws tick marks. Round to 50 K in the setter.
@@ -430,4 +486,169 @@ private func capabilityTitle(_ instance: String) -> String {
     if let title = titles[instance] { return title }
     let text = instance.replacingOccurrences(of: "Toggle", with: "").replacingOccurrences(of: "([a-z])([A-Z])", with: "$1 $2", options: .regularExpression)
     return text.prefix(1).uppercased() + text.dropFirst()
+}
+
+// MARK: - Name & room
+
+/// Standalone sheet for long-press Rename…/Move to room and the "Name it" chip.
+struct NameRoomSheet: View {
+    let store: HomeStore
+    let deviceID: String
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            ScrollView { NameRoomForm(store: store, deviceID: deviceID) { dismiss() }.padding(compactSpacing(24, 16)) }
+                .background(Color.canvas)
+                .navigationTitle("Name & room").inlineNavigationTitle()
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+        }
+        .sheetFrame(width: 480, height: 560)
+    }
+}
+
+/// Local-only name (max 64 characters) and room. Saves on Save; Cancel leaves both alone.
+struct NameRoomForm: View {
+    let store: HomeStore
+    let deviceID: String
+    let done: () -> Void
+    @State private var name = ""
+    @State private var room = ""
+    @State private var addingRoom = false
+    @State private var newRoom = ""
+    @FocusState private var nameFocused: Bool
+    static let limit = 64
+    private var own: LightDevice? { store.home.devices.first { $0.id == deviceID } }
+    private var saveDisabled: Bool { name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && own?.customName == nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("NAME").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    TextField("Name", text: $name).font(.system(size: 17, weight: .semibold)).textFieldStyle(.plain).focused($nameFocused)
+                        .onSubmit(save).accessibilityLabel("Light name")
+                    Text("\(name.count)/\(Self.limit)").font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
+                        .accessibilityLabel("\(name.count) of \(Self.limit) characters")
+                    if !name.isEmpty {
+                        Button { name = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary).frame(width: 32, height: 32) }
+                            .buttonStyle(.plain).accessibilityLabel("Clear name")
+                    }
+                }
+                .padding(.horizontal, 14).frame(minHeight: 50)
+                .background(Color.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(nameFocused ? Color.lumaAccent : Color.hairline, lineWidth: nameFocused ? 1.5 : 1))
+                .onChange(of: name) { _, value in if value.count > Self.limit { name = String(value.prefix(Self.limit)) } }
+                if let own {
+                    Label { Text("Only Luma uses this name. Govee Home still calls it **\(own.name)**.") } icon: { Image(systemName: "info.circle") }
+                        .font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if own.customName != nil {
+                        Button { store.rename("", id: deviceID); name = own.name } label: {
+                            Label("Use original name", systemImage: "arrow.counterclockwise").font(.system(size: 14, weight: .semibold)).frame(minHeight: 44)
+                        }
+                        .buttonStyle(.plain).foregroundStyle(Color.lumaAccent)
+                        .help("Go back to \(own.name)")
+                    }
+                }
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                Text("ROOM").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                FlowRow(spacing: 8) {
+                    ForEach(Array(Set(store.rooms + [room]).filter { !$0.isEmpty }).sorted(), id: \.self) { option in
+                        let selected = option == room
+                        Button { room = option } label: {
+                            Label { Text(option) } icon: { Image(systemName: selected ? "checkmark" : roomSymbol(option)) }
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(selected ? Color.white : Color.primary)
+                                .padding(.horizontal, 14).frame(minHeight: 44)
+                                .background(selected ? Color.lumaAccentFill : Color.surface, in: Capsule())
+                                .overlay(Capsule().strokeBorder(selected ? Color.clear : Color.hairline))
+                        }
+                        .buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
+                    }
+                    Button { addingRoom = true } label: {
+                        Label("New room", systemImage: "plus").font(.system(size: 15, weight: .semibold))
+                            .padding(.horizontal, 14).frame(minHeight: 44)
+                            .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text("Rooms group your lights on Home and let you switch a whole room at once.")
+                    .font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            #if os(macOS)
+            Button(action: save) { Text("Save").fontWeight(.semibold).frame(maxWidth: .infinity, minHeight: 36) }
+                .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                .disabled(saveDisabled)
+            #endif
+        }
+        #if os(iOS)
+        // Paper 04: Save sits in the navigation bar on iPhone and iPad.
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).fontWeight(.semibold).disabled(saveDisabled) } }
+        #endif
+        .onAppear {
+            guard let own else { return }
+            name = own.customName ?? own.name; room = own.room
+        }
+        .alert("New room", isPresented: $addingRoom) {
+            TextField("Room name", text: $newRoom)
+            Button("Cancel", role: .cancel) { newRoom = "" }
+            Button("Add") {
+                let value = newRoom.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty { room = String(value.prefix(Self.limit)) }
+                newRoom = ""
+            }
+        } message: { Text("Rooms are just names. Type one to group lights.") }
+    }
+
+    private func save() {
+        store.rename(name, id: deviceID)
+        if !room.isEmpty, room != own?.room { store.assignRoom(room, id: deviceID) }
+        done()
+    }
+}
+
+/// Wraps children onto new lines, left-aligned.
+struct FlowRow: Layout {
+    var spacing: CGFloat = 8
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(proposal.width ?? .infinity, subviews)
+        return CGSize(width: rows.map(\.width).max() ?? 0, height: rows.map(\.height).reduce(0, +) + spacing * CGFloat(max(rows.count - 1, 0)))
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(bounds.width, subviews) {
+            var x = bounds.minX
+            for index in row.items {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+    private func arrange(_ width: CGFloat, _ subviews: Subviews) -> [(items: [Int], width: CGFloat, height: CGFloat)] {
+        var rows: [(items: [Int], width: CGFloat, height: CGFloat)] = []
+        for (index, subview) in subviews.enumerated() {
+            let size = subview.sizeThatFits(.unspecified)
+            if let last = rows.last, last.width + spacing + size.width <= width {
+                rows[rows.count - 1].items.append(index)
+                rows[rows.count - 1].width += spacing + size.width
+                rows[rows.count - 1].height = max(last.height, size.height)
+            } else {
+                rows.append(([index], size.width, size.height))
+            }
+        }
+        return rows
+    }
+}
+
+extension View {
+    /// Inline titles for pushed sheet pages on iOS; the Mac has no title display modes.
+    @ViewBuilder func inlineNavigationTitle() -> some View {
+        #if os(iOS)
+        navigationBarTitleDisplayMode(.inline)
+        #else
+        self
+        #endif
+    }
 }

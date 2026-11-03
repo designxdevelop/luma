@@ -176,49 +176,66 @@ struct ScenesView: View {
         let total = scene.steps.reduce(0) { $0 + $1.delayMilliseconds }
         var summary = "\(lights) \(lights == 1 ? "light" : "lights") · \(scene.steps.count) \(scene.steps.count == 1 ? "step" : "steps")"
         if total > 0 { summary += " · \(formatSeconds(total))" }
-        return Card(padding: 16) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: scene.symbol).font(.system(size: 17)).foregroundStyle(Color.lumaAccent)
-                        .frame(width: 36, height: 36)
-                        .background(Color.lumaAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(scene.name).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                        Text(summary).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    Spacer(minLength: 4)
-                    Menu { sceneActions(scene) } label: { Image(systemName: "ellipsis.circle").font(.system(size: 15)) }
+        let colors = swatchKeys(for: scene).map(swatchColor)
+        return Card(padding: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                // Paper 06: a banner of the scene's own colors, with the icon tile overlapping its bottom edge.
+                LinearGradient(colors: colors.count > 1 ? colors : [colors.first ?? Color.lumaAccent.opacity(0.35), (colors.first ?? Color.lumaAccent).opacity(0.15)],
+                               startPoint: .leading, endPoint: .trailing)
+                    .frame(height: 56)
+                    .overlay(alignment: .topTrailing) {
+                        Menu { sceneActions(scene) } label: {
+                            Image(systemName: "ellipsis").font(.system(size: 14, weight: .bold)).foregroundStyle(.primary)
+                                .frame(width: 30, height: 30).background(.ultraThinMaterial, in: Circle())
+                                .frame(width: 44, height: 44).contentShape(Rectangle())
+                        }
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                         .help("More actions")
                         .accessibilityLabel("More actions for \(scene.name)")
-                }
-                HStack(spacing: 5) {
-                    ForEach(swatchKeys(for: scene), id: \.self) { key in
-                        Circle().fill(swatchColor(key)).frame(width: 14, height: 14)
-                            .overlay(Circle().strokeBorder(Color.primary.opacity(0.15)))
                     }
-                    Spacer(minLength: 0)
-                }
-                .frame(height: 14).accessibilityHidden(true)
-                HStack {
-                    if running {
-                        StatusPill(text: "Running", tint: .lumaAccent, busy: true)
-                        Spacer(minLength: 8)
-                        Button("Stop", systemImage: "stop.fill") { store.stopScene() }
-                            .controlSize(.small).accessibilityLabel("Stop \(scene.name)")
-                    } else {
-                        Button("Run", systemImage: "play.fill") { run(scene) }
-                            .buttonStyle(.borderedProminent).controlSize(.small)
-                            .disabled(store.runningSceneID != nil)
-                            .help(store.runningSceneID != nil ? "Another scene is running" : "Run this scene")
-                            .accessibilityLabel("Run \(scene.name)")
-                        Spacer(minLength: 0)
+                    .overlay(alignment: .bottomLeading) {
+                        Image(systemName: scene.symbol).font(.system(size: 17)).foregroundStyle(Color.lumaAccent)
+                            .frame(width: 44, height: 44)
+                            .background(Color.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
+                            .offset(x: 16, y: 22)
+                            .accessibilityHidden(true)
                     }
+                    .zIndex(1)
+                // Title and Run/Stop share a row; at large Dynamic Type the button drops below.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) { sceneTitle(scene, summary: summary, running: running); Spacer(minLength: 8); runButton(scene, running: running) }
+                    VStack(alignment: .leading, spacing: 10) { sceneTitle(scene, summary: summary, running: running); runButton(scene, running: running) }
                 }
+                .padding(.horizontal, 16).padding(.top, 30).padding(.bottom, 16)
             }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(running ? Color.lumaAccent : .clear, lineWidth: 1.5))
         .contextMenu { sceneActions(scene) }
+    }
+
+    private func sceneTitle(_ scene: LightScene, summary: String, running: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(scene.name).font(.headline).lineLimit(2)
+            if running { Text("Running…").font(.subheadline.weight(.semibold)).foregroundStyle(Color.lumaAccent) }
+            else { Text(summary).font(.subheadline).foregroundStyle(.secondary).lineLimit(2) }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private func runButton(_ scene: LightScene, running: Bool) -> some View {
+        if running {
+            Button("Stop", systemImage: "stop.fill") { store.stopScene() }
+                .buttonStyle(.borderedProminent).tint(.primary).buttonBorderShape(.capsule).frame(minHeight: 44)
+                .accessibilityLabel("Stop \(scene.name)")
+        } else {
+            Button("Run", systemImage: "play.fill") { run(scene) }
+                .buttonStyle(.bordered).buttonBorderShape(.capsule).frame(minHeight: 44)
+                .disabled(store.runningSceneID != nil)
+                .help(store.runningSceneID != nil ? "Another scene is running" : "Run this scene")
+                .accessibilityLabel("Run \(scene.name)")
+        }
     }
 
     @ViewBuilder private func sceneActions(_ scene: LightScene) -> some View {
@@ -441,11 +458,11 @@ struct SceneEditor: View {
                 Text("Edit Scene").font(.system(size: 20, weight: .bold)).accessibilityAddTraits(.isHeader)
                 Text("Steps run from top to bottom. Add a wait to pause before a step.").font(.system(size: 13)).foregroundStyle(.secondary)
             }
-            HStack(alignment: .top, spacing: 20) {
+            sceneEditorLayout {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Name").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
                     TextField("Scene name", text: $name).textFieldStyle(.roundedBorder).accessibilityLabel("Scene name")
-                }.frame(width: 240)
+                }.frame(maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Symbol").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
                     SymbolGrid(selection: $symbol)
@@ -473,6 +490,14 @@ struct SceneEditor: View {
             }
         }
         .padding(24).sheetFrame(width: 720, height: 620).background(Color.canvas)
+    }
+
+    private var sceneEditorLayout: AnyLayout {
+#if os(macOS)
+        AnyLayout(HStackLayout(alignment: .top, spacing: 20))
+#else
+        AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+#endif
     }
 
     // MARK: Steps
@@ -610,6 +635,15 @@ private struct StepRow: View {
                             .help("This light isn't connected anymore (\(step.deviceID)). Delete this step or the scene won't run.")
                     }
                     Spacer(minLength: 8)
+#if os(iOS)
+                    Menu {
+                        Button("Move Up", systemImage: "chevron.up", action: onMoveUp).disabled(!canMoveUp)
+                        Button("Move Down", systemImage: "chevron.down", action: onMoveDown).disabled(!canMoveDown)
+                        Button("Delete Step", systemImage: "trash", role: .destructive, action: onDelete)
+                    } label: {
+                        Image(systemName: "ellipsis.circle").frame(width: 44, height: 44)
+                    }.accessibilityLabel("Actions for step \(number)")
+#else
                     HStack(spacing: 2) {
                         Button { onMoveUp() } label: { Image(systemName: "chevron.up") }
                             .disabled(!canMoveUp).help("Move up").accessibilityLabel("Move step \(number) up")
@@ -618,10 +652,13 @@ private struct StepRow: View {
                         Button(role: .destructive) { onDelete() } label: { Image(systemName: "trash") }
                             .help("Delete step").accessibilityLabel("Delete step \(number)")
                     }.buttonStyle(.borderless)
+#endif
                 }
-                HStack(spacing: 12) {
+                stepEditorLayout {
                     commandEditor
+#if os(macOS)
                     Spacer(minLength: 8)
+#endif
                     HStack(spacing: 6) {
                         Text("Wait before").font(.system(size: 12)).foregroundStyle(.secondary)
                         Stepper(value: delaySeconds, in: 0...60, step: 0.5) {
@@ -636,6 +673,14 @@ private struct StepRow: View {
                 }
             }
         }
+    }
+
+    private var stepEditorLayout: AnyLayout {
+#if os(macOS)
+        AnyLayout(HStackLayout(spacing: 12))
+#else
+        AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+#endif
     }
 
     @ViewBuilder private var commandEditor: some View {

@@ -39,6 +39,19 @@ import LumaCore
         #expect(store.runs.first?.status == "cancelled")
         #expect(store.devices.first { $0.id == "demo-floor" }?.power == true)
     }
+    @Test func delayedDemoSceneStaysRunningAndBlocksOtherRunsUntilStopped() async throws {
+        let store = HomeStore(demo: true); defer { store.shutdown() }
+        let slow = LightScene(name: "Slow", steps: [.init(deviceID: "demo-floor", command: .power(false), delayMilliseconds: 10000)])
+        let other = LightScene(name: "Other", steps: [.init(deviceID: "demo-floor", command: .power(true))])
+        try store.runScene(slow)
+        await Task.yield()
+        // The scene card shows Running/Stop for `slow` and a disabled Run for every other scene in this state.
+        #expect(store.runningSceneID == slow.id && store.runs.first?.status == "running")
+        #expect(throws: (any Error).self) { try store.runScene(other) }
+        store.stopScene()
+        for _ in 0..<100 where store.runningSceneID != nil { await Task.yield() }
+        #expect(store.runningSceneID == nil && store.runs.first?.status == "cancelled")
+    }
     @Test func customNameOverlaysWithoutLosingTheDeviceName() {
         let store = HomeStore(demo: true); defer { store.shutdown() }
         store.rename("  Reading nook  ", id: "demo-floor")
