@@ -86,11 +86,13 @@ fun LumaTheme(content: @Composable () -> Unit) {
     val scheme = if (dark) darkColorScheme(
         primary = LumaColors.accentFill, onPrimary = Color.White, secondary = Color(0xFFFFA347),
         background = Color(0xFF161618), surface = Color(0xFF161618), surfaceContainer = Color(0xFF202023),
-        surfaceContainerHigh = Color(0xFF2A2A2E), surfaceContainerLow = Color(0xFF202023), error = Color(0xFFFF6961),
+        surfaceContainerHigh = Color(0xFF2A2A2E), surfaceContainerLow = Color(0xFF202023), surfaceContainerHighest = Color(0xFF333338), error = Color(0xFFFF6961),
+        primaryContainer = Color(0xFF4A2A10), onPrimaryContainer = Color(0xFFFFD7B3), secondaryContainer = Color(0xFF4A2A10), onSecondaryContainer = Color(0xFFFFD7B3),
     ) else lightColorScheme(
         primary = LumaColors.accentFill, onPrimary = Color.White, secondary = Color(0xFFA84C00),
         background = Color(0xFFF5F5F7), surface = Color(0xFFF5F5F7), surfaceContainer = Color.White,
-        surfaceContainerHigh = Color(0xFFF0F0F2), surfaceContainerLow = Color.White, error = LumaColors.danger,
+        surfaceContainerHigh = Color(0xFFF0F0F2), surfaceContainerLow = Color.White, surfaceContainerHighest = Color(0xFFE6E6EA), error = LumaColors.danger,
+        primaryContainer = Color(0xFFF8E1CC), onPrimaryContainer = Color(0xFF5A2600), secondaryContainer = Color(0xFFF8E1CC), onSecondaryContainer = Color(0xFF5A2600),
     )
     MaterialTheme(colorScheme = scheme, content = content)
 }

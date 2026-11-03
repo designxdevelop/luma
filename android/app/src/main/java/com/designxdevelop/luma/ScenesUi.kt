@@ -135,7 +135,7 @@ fun AutomationsScreen(store: HomeStore, modifier: Modifier) {
     }) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
             item { Header("Automations", "Run a scene at a time of day.") }
-            item { Banner("Schedules run while Luma is open or recently used. Android can stop Luma in the background, so a run may be missed; keep a computer running Luma for schedules that must not be missed.") }
+            item { Banner("Schedules run while Luma is open or recently used. Android can stop Luma in the background, so a run may be missed.") }
             if (scenes.isEmpty()) item { Banner("Save a scene first, then schedule it.") }
             items(store.home.schedules, key = { it.id }) { s ->
                 val scene = scenes.firstOrNull { it.id == s.sceneID }

@@ -297,7 +297,7 @@ private fun EffectsDialog(store: HomeStore, d: LightDevice, onDismiss: () -> Uni
                 if (shown.isEmpty()) Text(if (all.isEmpty()) "No effects loaded yet." else "No matches.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 LazyColumn(Modifier.height(320.dp)) {
                     items(shown, key = { it.id }) { o ->
-                        Row(Modifier.fillMaxWidth().height(48.dp).clickable { store.perform(o.command, listOf(d.id)) }, verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.fillMaxWidth().height(48.dp).clickable { store.perform(o.command, listOf(d.id)); store.message = "${o.name} sent to ${d.displayName}." }, verticalAlignment = Alignment.CenterVertically) {
                             Text(o.name, Modifier.weight(1f)); Text(o.kind.title, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
