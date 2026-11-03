@@ -214,10 +214,13 @@ struct LightsView: View {
                 }
                 let layout = compact ? AnyLayout(VStackLayout(spacing: 12)) : AnyLayout(HStackLayout(alignment: .top, spacing: 14))
                 layout {
-                    step(1, icon: "cloud", title: "Connect your account", text: "Use a Govee API key to find every light on your account, including effects and segments.") {
-                        Button("Connect Account…") { connecting = true }.buttonStyle(.borderedProminent)
+                    step(1, icon: "cloud", title: "Connect your account", text: "A free Govee API key adds cloud actions like effects and segments, and controls your lights when you're not on the same network.") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Button("Connect Account…") { connecting = true }.buttonStyle(.borderedProminent)
+                            Link("Get a free API key ↗", destination: Links.goveeAPIKey).font(.system(size: 12)).tint(Color.lumaAccent)
+                        }
                     }
-                    step(2, icon: "wifi", title: "Add local control", text: "Turn on LAN Control for each light in the Govee Home app, then look for lights on this Wi-Fi.") {
+                    step(2, icon: "wifi", title: "Add local control", text: "No API key needed. Turn on LAN Control for each light in the Govee Home app, then look for lights on this Wi-Fi.") {
                         Button(store.scanning ? "Looking…" : "Find Lights") { store.discover() }.disabled(store.scanning)
                     }
                     step(3, icon: "sparkles", title: "Just looking?", text: "Explore a demo home with sample lights. Nothing real is controlled.") {

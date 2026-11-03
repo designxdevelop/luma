@@ -72,6 +72,8 @@ enum Appearance: String, CaseIterable, Identifiable {
 enum Links {
     static let source = URL(string: "https://github.com/designxdevelop/luma")!
     static let issues = URL(string: "https://github.com/designxdevelop/luma/issues")!
+    /// Govee issues keys in the Govee Home app (Profile › Settings › Apply for API Key) and emails them.
+    static let goveeAPIKey = URL(string: "https://developer.govee.com/reference/apply-you-govee-api-key")!
     static let attribution = "Luma is an open-source project built by Design X Develop LLC."
     static let warranty = "Provided as is, without warranty."
     static var version: String {

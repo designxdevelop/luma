@@ -134,7 +134,7 @@ function lightsView(s: AppSnapshot): string {
         </div>
       </header>
       ${s.devices.length ? `<label class="block" for="light-search">Search lights</label><input id="light-search" type="search" data-action="search" value="${esc(state.search)}" placeholder="Search lights">${filtered.length === 0 ? '<p class="hint">No matching lights.</p>' : ''}` : ''}
-      ${s.devices.length === 0 ? `<div class="empty"><span class="orb large" data-color="#ffb347"></span><h2>Bring your lights in</h2><p>Connect your Govee account in Settings, or enable <strong>LAN Control</strong> for each light in the Govee Home app and choose Discover.</p><button class="primary" data-action="view" data-view="settings">Open Settings</button> <button data-action="explore-demo">Explore Demo</button></div>` : ''}
+      ${s.devices.length === 0 ? `<div class="empty"><span class="orb large" data-color="#ffb347"></span><h2>Bring your lights in</h2><p>Enable <strong>LAN Control</strong> for each light in the Govee Home app and choose Discover. No API key needed for lights on this Wi-Fi.</p><p>A free Govee API key adds cloud actions and controls your lights when you’re not on the same network.</p><button class="primary" data-action="view" data-view="settings">Connect API key</button> <button data-action="link" data-link="apikey">Get a free API key</button> <button data-action="explore-demo">Explore Demo</button></div>` : ''}
       ${rooms.map((room) => {
         const devices = filtered.filter((d) => d.room === room);
         return `<section class="room" aria-label="${esc(room)}">
@@ -543,7 +543,7 @@ function settingsView(s: AppSnapshot): string {
     <section class="card-block" aria-labelledby="acct-title"><h2 id="acct-title">Govee account</h2>
       ${s.demo ? '<p class="hint">Demo mode: account connection is disabled. Start Luma without --demo on Windows or Linux to connect.</p>' : ''}
       ${!s.demo && !s.platformSecretsAvailable ? '<p class="hint warn">Secure storage (Windows DPAPI, or GNOME Keyring/KWallet on Linux) is unavailable, so Luma will not store an API key.</p>' : ''}
-      <p class="sub">${s.cloudConnected ? 'Connected.' : s.hasSavedKey ? 'A saved key is stored encrypted for your OS account.' : 'Paste your existing Govee developer API key.'}</p>
+      <p class="sub">${s.cloudConnected ? 'Connected.' : s.hasSavedKey ? 'A saved key is stored encrypted for your OS account.' : 'LAN Control works without a key for lights on the same Wi-Fi. You need a free Govee API key for cloud actions and to control lights when you’re not on their network.'}</p>
       <form class="row" data-form="connect">
         <label for="api-key">API key</label>
         <input id="api-key" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="Govee API key" value="" ${s.demo || s.busy ? 'disabled' : ''}>
@@ -554,6 +554,7 @@ function settingsView(s: AppSnapshot): string {
         ${s.hasSavedKey || s.cloudConnected ? '<button class="danger" data-action="disconnect">Disconnect and remove key</button>' : ''}
         <button class="ghost" data-action="link" data-link="apikey">How to get an API key</button>
       </div>
+      ${s.cloudConnected || s.hasSavedKey ? '' : '<p class="hint">No key yet? In the Govee Home app, open Profile › Settings › Apply for API Key. Govee emails it to you, usually within minutes.</p>'}
       <p class="hint">Your key is sent only to openapi.api.govee.com and stored with Windows DPAPI or your Linux keyring, never in plain text. Use your existing key: generating a new one disables older keys used by other apps.</p>
     </section>
     ${goveeHomeSection(s)}

@@ -247,7 +247,11 @@ struct ConnectionSheet: View {
                 #else
                 SecureField("Paste your API key", text: $key).textFieldStyle(.roundedBorder).onSubmit { if !key.isEmpty { connect(saved: false) } }
                 #endif
-                Link("Get a key in the Govee Home app ↗", destination: URL(string: "https://developer.govee.com/reference/apply-you-govee-api-key")!).font(.system(size: 12)).tint(Color.lumaAccent)
+                Text("LAN Control works without a key for lights on the same Wi-Fi. You need a free Govee API key for cloud actions and to control lights when you're not on their network.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text("No key yet? In the Govee Home app, open Profile › Settings › Apply for API Key. Govee emails it to you, usually within minutes.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Link("How to get a Govee API key ↗", destination: Links.goveeAPIKey).font(.system(size: 12)).tint(Color.lumaAccent)
             }
             Label("Your key is stored in the \(PlatformCopy.keychain) and sent only to Govee's official API.", systemImage: "lock.shield")
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
