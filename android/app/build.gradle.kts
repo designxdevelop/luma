@@ -16,7 +16,7 @@ android {
         versionName = "1.0"
     }
     // Play upload key, kept outside the repo (see docs/PLAY.md). Without it, release builds are unsigned.
-    val uploadKeystore = System.getenv("LUMA_UPLOAD_KEYSTORE")?.let(::file)?.takeIf { it.exists() }
+    val uploadKeystore = System.getenv("LUMA_UPLOAD_KEYSTORE")?.takeIf { it.isNotBlank() }?.let(::file)?.takeIf { it.isFile }
     signingConfigs {
         if (uploadKeystore != null) create("upload") {
             storeFile = uploadKeystore
