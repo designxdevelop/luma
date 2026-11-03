@@ -92,7 +92,8 @@ export function minuteKey(date: Date): string {
 /** True only during the scheduled local minute, once. Missed minutes (asleep/closed) are skipped. */
 export function shouldRun(schedule: SceneSchedule, date: Date): boolean {
   return schedule.enabled && date.getHours() === schedule.hour && date.getMinutes() === schedule.minute
-    && schedule.weekdays.includes(date.getDay() + 1) && schedule.lastRunMinute !== minuteKey(date);
+    && schedule.weekdays.includes(date.getDay() + 1) && schedule.lastRunMinute !== minuteKey(date)
+    && !((schedule.pausedUntil ?? 0) > date.getTime());
 }
 
 /** Next local occurrence strictly after `from`, or undefined when disabled/no weekdays. DST-safe via local Date math. */
@@ -120,5 +121,6 @@ export function validateSchedule(input: unknown, sceneIDs: string[]): SceneSched
     sceneID: s.sceneID, hour, minute,
     weekdays: (weekdays as number[]).sort((a, b) => a - b),
     enabled: s.enabled !== false,
+    ...(safeInt(s.pausedUntil, 1) !== undefined ? { pausedUntil: s.pausedUntil as number } : {}),
   };
 }

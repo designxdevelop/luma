@@ -1,0 +1,143 @@
+{
+  "exportedAt" : "2026-11-02T15:40:26Z",
+  "format" : "luma-home-backup",
+  "lights" : [
+    {
+      "id" : "demo-floor",
+      "room" : "Living room",
+      "sku" : "Demo lamp"
+    },
+    {
+      "customName" : "Sofa glow",
+      "id" : "demo-strip",
+      "room" : "Living room",
+      "sku" : "Demo strip"
+    },
+    {
+      "id" : "demo-desk",
+      "room" : "Office",
+      "sku" : "Demo light bars"
+    },
+    {
+      "id" : "demo-bed",
+      "room" : "Bedroom",
+      "sku" : "Demo bulb"
+    },
+    {
+      "id" : "demo-tv",
+      "room" : "Living room",
+      "sku" : "Demo TV backlight"
+    }
+  ],
+  "scenes" : [
+    {
+      "id" : "02600992-2E2D-41F1-BA37-1DB982E6572A",
+      "name" : "Evening unwind",
+      "steps" : [
+        {
+          "command" : {
+            "instance" : "powerSwitch",
+            "type" : "devices.capabilities.on_off",
+            "value" : 1
+          },
+          "delayMilliseconds" : 0,
+          "deviceID" : "demo-floor",
+          "id" : "7FFB7701-4C4B-47ED-A4EA-2DC1C5B76544"
+        },
+        {
+          "command" : {
+            "instance" : "brightness",
+            "type" : "devices.capabilities.range",
+            "value" : 35
+          },
+          "delayMilliseconds" : 0,
+          "deviceID" : "demo-floor",
+          "id" : "A45C7A28-3526-44D9-8DF5-0069AB7646A7"
+        },
+        {
+          "command" : {
+            "instance" : "colorRgb",
+            "type" : "devices.capabilities.color_setting",
+            "value" : 16756324
+          },
+          "delayMilliseconds" : 0,
+          "deviceID" : "demo-floor",
+          "id" : "AF39AE74-C3FB-4882-8EE1-6817E5FB95A3"
+        },
+        {
+          "command" : {
+            "instance" : "powerSwitch",
+            "type" : "devices.capabilities.on_off",
+            "value" : 1
+          },
+          "delayMilliseconds" : 0,
+          "deviceID" : "demo-strip",
+          "id" : "1F22D147-5D05-4FBC-B4BA-C5BF99B5F206"
+        },
+        {
+          "command" : {
+            "instance" : "brightness",
+            "type" : "devices.capabilities.range",
+            "value" : 35
+          },
+          "delayMilliseconds" : 0,
+          "deviceID" : "demo-strip",
+          "id" : "0E425ED3-3A0F-4482-9A50-F3658E6CCE29"
+        },
+        {
+          "command" : {
+            "instance" : "colorRgb",
+            "type" : "devices.capabilities.color_setting",
+            "value" : 16756324
+          },
+          "delayMilliseconds" : 0,
+          "deviceID" : "demo-strip",
+          "id" : "B3AADF01-E307-4D74-A4D5-504B3EFB0FA5"
+        }
+      ],
+      "symbol" : "moon.stars"
+    },
+    {
+      "id" : "39C3CBFB-803F-424D-BF68-E8DB053B584E",
+      "name" : "Focus time",
+      "steps" : [
+        {
+          "command" : {
+            "instance" : "powerSwitch",
+            "type" : "devices.capabilities.on_off",
+            "value" : 1
+          },
+          "delayMilliseconds" : 0,
+          "deviceID" : "demo-desk",
+          "id" : "9FCE8357-B8B5-4FF9-B94E-7DBBC151C837"
+        },
+        {
+          "command" : {
+            "instance" : "colorTemperatureK",
+            "type" : "devices.capabilities.color_setting",
+            "value" : 4500
+          },
+          "delayMilliseconds" : 0,
+          "deviceID" : "demo-desk",
+          "id" : "A4F2C0DC-5997-4E5F-85E9-1E9F6456FF36"
+        }
+      ],
+      "symbol" : "sun.max"
+    }
+  ],
+  "schedules" : [
+    {
+      "enabled" : true,
+      "hour" : 7,
+      "id" : "FB327F99-6BFC-41BD-ACAD-278B06DC5EF2",
+      "minute" : 30,
+      "sceneID" : "02600992-2E2D-41F1-BA37-1DB982E6572A",
+      "weekdays" : [
+        2,
+        3,
+        4
+      ]
+    }
+  ],
+  "version" : 1
+}

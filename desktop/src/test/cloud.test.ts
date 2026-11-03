@@ -40,7 +40,7 @@ function setup(replies: Array<HttpLike | (() => Promise<HttpLike>) | Error>) {
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-test('devices: exact request, light filtering, verbatim capabilities', async () => {
+test('devices: exact request, non-lights tagged with their type, verbatim capabilities', async () => {
   const caps = [{ type: 'devices.capabilities.range', instance: 'brightness', parameters: { dataType: 'INTEGER', range: { min: 1, max: 100, precision: 1 } } }];
   const { cloud, calls } = setup([ok({ data: [
     { device: 'A', sku: 'H6008', deviceName: 'Desk', type: 'devices.types.light', capabilities: caps },
@@ -50,6 +50,7 @@ test('devices: exact request, light filtering, verbatim capabilities', async () 
   const lights = await cloud.devices();
   assert.deepEqual(lights, [
     { id: 'A', sku: 'H6008', name: 'Desk', room: 'Unassigned', capabilities: caps },
+    { id: 'B', sku: 'H7001', name: 'H7001', room: 'Unassigned', capabilities: [], deviceType: 'devices.types.socket' },
     { id: 'C', sku: 'H6159', name: 'H6159', room: 'Unassigned', capabilities: [] },
   ]);
   assert.equal(calls.length, 1);

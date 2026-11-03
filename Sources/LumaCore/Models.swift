@@ -51,6 +51,9 @@ public struct LightDevice: Codable, Sendable, Identifiable, Equatable {
     public var name: String
     /// User-set label that survives cloud and LAN refreshes; `name` stays the device's own.
     public var customName: String?
+    /// Govee's device type for appliances and sensors (`devices.types.heater`…); nil for lights.
+    /// Bulk light actions skip anything that isn't a light (`DeviceReadings.isLight`).
+    public var deviceType: String?
     public var room: String
     public var ip: String?
     public var capabilities: [Capability]
@@ -58,16 +61,20 @@ public struct LightDevice: Codable, Sendable, Identifiable, Equatable {
     public var brightness: Int?
     public var rgb: Int?
     public var colorTemperature: Int?
+    /// Last reported `dreamViewToggle` state; nil when the light never reported it.
+    public var dreamView: Bool?
     public var online: Bool?
     public var lastSeen: Date?
     public var isDemo: Bool
     public init(id: String, sku: String, name: String, room: String = "Unassigned", ip: String? = nil,
                 capabilities: [Capability] = [], power: Bool? = nil, brightness: Int? = nil, rgb: Int? = nil,
-                colorTemperature: Int? = nil, online: Bool? = nil, lastSeen: Date? = nil, isDemo: Bool = false, customName: String? = nil) {
+                colorTemperature: Int? = nil, online: Bool? = nil, lastSeen: Date? = nil, isDemo: Bool = false, customName: String? = nil,
+                dreamView: Bool? = nil, deviceType: String? = nil) {
         self.id = id; self.sku = sku; self.name = name; self.room = room; self.ip = ip
         self.capabilities = capabilities; self.power = power; self.brightness = brightness
         self.rgb = rgb; self.colorTemperature = colorTemperature; self.online = online
-        self.lastSeen = lastSeen; self.isDemo = isDemo; self.customName = customName
+        self.lastSeen = lastSeen; self.isDemo = isDemo; self.customName = customName; self.dreamView = dreamView
+        self.deviceType = deviceType
     }
     public func supports(_ instance: String) -> Bool { ip != nil && ["powerSwitch", "brightness", "colorRgb", "colorTemperatureK"].contains(instance) || capabilities.contains { $0.instance == instance } }
 }
@@ -115,14 +122,17 @@ public struct SceneSchedule: Codable, Sendable, Identifiable, Equatable {
     public var minute: Int
     public var weekdays: [Int]
     public var enabled: Bool
+    /// Runs before this instant are skipped (Pause). Shared through schedule sync.
+    public var pausedUntil: Date?
     public var lastRunMinute: String?
-    public init(id: UUID = UUID(), sceneID: UUID, hour: Int, minute: Int, weekdays: [Int] = Array(1...7), enabled: Bool = true, lastRunMinute: String? = nil) {
+    public init(id: UUID = UUID(), sceneID: UUID, hour: Int, minute: Int, weekdays: [Int] = Array(1...7), enabled: Bool = true, lastRunMinute: String? = nil, pausedUntil: Date? = nil) {
         self.id = id; self.sceneID = sceneID; self.hour = hour; self.minute = minute
-        self.weekdays = weekdays; self.enabled = enabled; self.lastRunMinute = lastRunMinute
+        self.weekdays = weekdays; self.enabled = enabled; self.lastRunMinute = lastRunMinute; self.pausedUntil = pausedUntil
     }
     public func shouldRun(at date: Date, calendar: Calendar = .current) -> Bool {
         let c = calendar.dateComponents([.hour, .minute, .weekday], from: date)
         return enabled && c.hour == hour && c.minute == minute && weekdays.contains(c.weekday ?? 0) && lastRunMinute != minuteKey(date, calendar: calendar)
+            && !(pausedUntil.map { $0 > date } ?? false)
     }
     public func minuteKey(_ date: Date, calendar: Calendar = .current) -> String {
         let c = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)

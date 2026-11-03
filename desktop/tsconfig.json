@@ -14,5 +14,5 @@
     "skipLibCheck": true,
     "sourceMap": false
   },
-  "include": ["src/shared/**/*.ts", "src/core/**/*.ts", "src/main/**/*.ts", "src/test/**/*.ts"]
+  "include": ["src/shared/**/*.ts", "src/core/**/*.ts", "src/main/**/*.ts", "src/bridge/**/*.ts", "src/test/**/*.ts"]
 }

@@ -33,13 +33,13 @@ The watch never contacts lights or Govee itself: watchOS doesn't allow the UDP s
 ## What's different on iOS
 
 - **Screen Sync uses the camera.** iOS doesn't let apps read other apps' screens without a ReplayKit broadcast extension. Instead, choose **Use Camera** and point the back camera at a TV or monitor; frames go through the same region, smoothing, and LAN pipeline as on the Mac. Frames are reduced on the device to a coarse color grid and never saved or uploaded. Capture pauses when Luma leaves the foreground.
-- **Foreground only.** iOS suspends apps in the background, so schedules, running scenes, and the webhook server work only while Luma is open. There is no menu bar equivalent.
+- **Background limits.** Schedules and the webhook server require Luma to stay open. Siri/Shortcuts can launch Luma for a room action or scene; long scenes may be interrupted when iOS suspends the app. There is no menu bar equivalent.
 - **LAN discovery on a real device** sends a multicast scan to `239.255.255.250`. iOS requires Apple's [multicast networking entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.networking.multicast) for that; until this app has it, discovery works in the Simulator but not on hardware. Cloud control works everywhere. iOS asks for Local Network permission the first time Luma talks to lights.
 
 ## Not yet
 
 - ReplayKit broadcast extension for whole-screen sync.
-- Watch complications, widgets, Shortcuts/App Intents, Live Activities.
+- Watch complications, widgets, Live Activities.
 - App Store or TestFlight distribution.
 
 ## Local activity diagnostics

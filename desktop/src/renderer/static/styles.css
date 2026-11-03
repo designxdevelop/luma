@@ -222,6 +222,8 @@ dialog::backdrop { background: rgb(0 0 0 / 35%); }
 /* ---------- automations ---------- */
 .schedules { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 .schedule { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; box-shadow: var(--shadow); }
+.schedule .sync-line { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+code.pairing { user-select: all; overflow-wrap: anywhere; }
 .weekdays { display: inline-flex; gap: 3px; }
 .day { min-height: 28px; padding: 2px 8px; font-size: 12.5px; border-radius: 999px; }
 .next { color: var(--muted); font-size: 12.5px; flex: 1; min-width: 140px; }
@@ -275,3 +277,20 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
   .content { padding: 16px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* Room adjust, readings and the segment painter */
+.room-adjust { margin: 0 0 10px; }
+.room-adjust summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.readings { margin: 4px 0 6px; }
+.seg.paint.painted { background: var(--orb); color: #fff; text-shadow: 0 0 2px rgba(0, 0, 0, .7); border-color: transparent; }
+.seg.paint.painted[aria-pressed=true] { box-shadow: 0 0 0 2px var(--accent); }
+
+/* Audio Sync live meter: heights come from --level, set through CSSOM (CSP forbids inline styles). */
+.audio-meter { display: grid; gap: 10px; margin: 12px 0 4px; }
+.audio-meter-level { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.audio-meter-level span { display: block; height: 100%; width: var(--level, 0%); background: var(--accent); transition: width 60ms linear; }
+.audio-bands { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; align-items: end; }
+.audio-band { display: grid; grid-template-rows: 56px auto; gap: 4px; text-align: center; }
+.audio-band span { align-self: end; display: block; height: var(--level, 0%); min-height: 2px; border-radius: 3px 3px 0 0; background: color-mix(in srgb, var(--accent) 75%, transparent); transition: height 60ms linear; }
+.audio-band small { color: var(--muted); font-size: 11px; }
+@media (prefers-reduced-motion: reduce) { .audio-meter-level span, .audio-band span { transition: none; } }

@@ -7,7 +7,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { Capability, CapabilityCommand, JSONValue, LightDevice, LightScene, SavedHome, SceneSchedule, SceneStep } from '../shared/types';
+import type { Capability, CapabilityCommand, DreamViewDraft, JSONValue, LightDevice, LightScene, SavedHome, SceneSchedule, SceneStep } from '../shared/types';
 import { DEFAULT_SYNC_SETTINGS, REGIONS, validateSettings } from '../shared/sync-math';
 import { isObject, repairStepIDs, safeInt } from '../core/model';
 
@@ -30,14 +30,23 @@ export class HomeStorage {
 
   save(home: SavedHome): void {
     if (this.unreadable) throw invalidHome();
+    this.write(this.file, home);
+  }
+
+  /** A safety copy beside home.json (for example before a restore), replaced each time. Owner-only. */
+  saveCopy(home: SavedHome, name: 'home-before-restore.json'): void {
+    this.write(join(this.folder, name), home);
+  }
+
+  private write(file: string, home: SavedHome): void {
     // Reconstruct known fields only: accidental runtime fields/secrets are not serialized.
     const data = JSON.stringify(decodeHome(home), null, 2);
     if (Buffer.byteLength(data) > HOME_LIMIT) throw invalidHome();
     mkdirSync(this.folder, { recursive: true, mode: 0o700 });
-    const temp = `${this.file}.${randomUUID()}.tmp`;
+    const temp = `${file}.${randomUUID()}.tmp`;
     try {
       writeFileSync(temp, data, { mode: 0o600, flag: 'wx' });
-      renameSync(temp, this.file);
+      renameSync(temp, file);
     } finally {
       if (existsSync(temp)) unlinkSync(temp);
     }
@@ -83,6 +92,8 @@ function device(v: unknown): LightDevice {
       return { type: text(raw.type, 128), instance: text(raw.instance, 128), ...(raw.parameters === undefined ? {} : { parameters: json(raw.parameters) }) };
     }),
   };
+  if (v.customName !== undefined) result.customName = text(v.customName, 64);
+  if (v.deviceType !== undefined) result.deviceType = text(v.deviceType, 128);
   if (v.power !== undefined) {
     if (typeof v.power !== 'boolean') throw invalidHome();
     result.power = v.power;
@@ -96,7 +107,8 @@ function device(v: unknown): LightDevice {
   // Addresses, liveness and demo flags are deliberately never restored or saved.
   return result;
 }
-function scene(v: unknown): LightScene {
+/** Structural scene decoder (no light lookup): also used for backup restore. Throws on any malformed field. */
+export function scene(v: unknown): LightScene {
   if (!isObject(v)) throw invalidHome();
   let total = 0;
   const result: LightScene = {
@@ -111,7 +123,7 @@ function scene(v: unknown): LightScene {
   // Repair only local legacy identifiers. Import and execution retain strict duplicate rejection.
   return repairStepIDs(result);
 }
-function schedule(v: unknown): SceneSchedule {
+export function schedule(v: unknown): SceneSchedule {
   if (!isObject(v)) throw invalidHome();
   const hour = safeInt(v.hour, 0, 23), minute = safeInt(v.minute, 0, 59);
   if (hour === undefined || minute === undefined || typeof v.enabled !== 'boolean') throw invalidHome();
@@ -120,8 +132,23 @@ function schedule(v: unknown): SceneSchedule {
     if (n === undefined) throw invalidHome();
     return n;
   });
+  const pausedUntil = v.pausedUntil === undefined ? undefined : safeInt(v.pausedUntil, 1);
   return { id: text(v.id, 64), sceneID: text(v.sceneID, 64), hour, minute, weekdays: [...new Set(weekdays)], enabled: v.enabled,
+    ...(pausedUntil === undefined ? {} : { pausedUntil }),
     ...(v.lastRunMinute === undefined ? {} : { lastRunMinute: text(v.lastRunMinute, 80) }) };
+}
+/** Native DreamView drafts, shape-checked so a re-exported backup always decodes on the Mac. */
+export function dreamViewDrafts(v: unknown): Record<string, DreamViewDraft> {
+  if (!isObject(v) || Object.keys(v).length > 1000) throw invalidHome();
+  return Object.fromEntries(Object.entries(v).map(([id, draft]) => {
+    if (id.length > 128 || !isObject(draft)) throw invalidHome();
+    const members = list(draft.members ?? [], 64).map((m) => {
+      if (!isObject(m)) throw invalidHome();
+      const areas = list(m.areas ?? [], 10).map((a) => { const n = safeInt(a, 1, 10); if (n === undefined) throw invalidHome(); return n; });
+      return { deviceID: text(m.deviceID, 128), areas };
+    });
+    return [id, { members }];
+  }));
 }
 function decodeHome(v: unknown): SavedHome {
   if (!isObject(v) || v.version !== 1) throw invalidHome();
@@ -137,6 +164,7 @@ function decodeHome(v: unknown): SavedHome {
       if (!isObject(raw) || typeof raw.region !== 'string' || !REGIONS.includes(raw.region as never) || typeof raw.included !== 'boolean') throw invalidHome();
       return { id: text(raw.id, 128), region: raw.region as (typeof REGIONS)[number], included: raw.included };
     })),
+    ...(v.dreamViewDrafts === undefined ? {} : { dreamViewDrafts: dreamViewDrafts(v.dreamViewDrafts) }),
   };
 }
 

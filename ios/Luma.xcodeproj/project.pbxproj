@@ -223,7 +223,9 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Screen Sync reads small color samples from the camera when you point it at a TV or monitor. Nothing is recorded or uploaded.";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Luma finds and controls supported Govee lights near you over Bluetooth, only when you choose a light.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Luma finds and controls Govee lights with LAN Control on your Wi-Fi network.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Audio Sync listens to music around you and turns it into light colors and brightness. Audio is analyzed on this device and never recorded or uploaded.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -252,7 +254,9 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Screen Sync reads small color samples from the camera when you point it at a TV or monitor. Nothing is recorded or uploaded.";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Luma finds and controls supported Govee lights near you over Bluetooth, only when you choose a light.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Luma finds and controls Govee lights with LAN Control on your Wi-Fi network.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Audio Sync listens to music around you and turns it into light colors and brightness. Audio is analyzed on this device and never recorded or uploaded.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";

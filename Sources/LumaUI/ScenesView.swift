@@ -30,6 +30,7 @@ private func friendlyTitle(for instance: String) -> String {
     case "snapshot": "Saved snapshot"
     case "gradientToggle": "Gradient"
     case "nightlightToggle": "Nightlight"
+    case "dreamViewToggle": "DreamView sync"
     default: humanized(instance)
     }
 }
@@ -89,6 +90,7 @@ struct ScenesView: View {
     @State private var importing = false
     @State private var exporting: SceneFile?
     @State private var showExporter = false
+    @State private var browsingGovee = false
 
     var body: some View {
         let scenes = store.home.scenes
@@ -105,16 +107,18 @@ struct ScenesView: View {
                         .help(store.devices.isEmpty ? "Connect your lights first" : "Save your current lighting as a scene")
                 }
                 if let errorText { InlineMessage(text: errorText) }
-                if store.runningSceneID != nil { runningBanner }
+                if store.runningSceneID != nil { runningBanner } else if let point = store.restorePoint { restoreBanner(point) }
                 if scenes.isEmpty { emptyState } else { sceneGrid(scenes) }
+                if !store.sceneCapableLights.isEmpty || store.loadedSceneCount > 0 { goveeScenesCard }
                 if !store.runs.isEmpty { recentRuns }
-                Text("Scenes run their steps in order, with optional pauses in between. Stopping a scene skips the remaining steps, but it doesn't undo anything already sent to your lights.")
+                Text("Scenes run their steps in order, with optional pauses in between. Stopping a scene skips the remaining steps. After a scene, Restore puts each light's power, brightness, and color back to how they were before it ran.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             .pagePadding()
         }
         .sheet(isPresented: $showNew) { NewSceneSheet(store: store) }
         .sheet(item: $editor) { SceneEditor(store: store, scene: $0) }
+        .sheet(isPresented: $browsingGovee) { GoveeSceneBrowser(store: store) }
         .confirmationDialog(deleting.map { "Delete “\($0.name)”?" } ?? "Delete scene?",
                             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                             titleVisibility: .visible, presenting: deleting) { scene in
@@ -150,6 +154,64 @@ struct ScenesView: View {
             }
         }
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.lumaAccent.opacity(0.4)))
+    }
+
+    /// Govee's built-in and DIY scenes live on each light (Effects tab); this downloads them all at once.
+    private var goveeScenesCard: some View {
+        Card(padding: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: "wand.and.stars").font(.system(size: 18)).foregroundStyle(Color.lumaAccent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Govee scenes").font(.system(size: 13, weight: .semibold))
+                    Text(goveeScenesDetail).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                if !store.sceneCapableLights.isEmpty {
+                    Button { Task { await store.loadAllDeviceScenes() } } label: {
+                        HStack(spacing: 6) {
+                            if store.sceneLoadProgress != nil { ProgressView().controlSize(.small) }
+                            Text(store.loadedSceneCount == 0 ? "Load for All Lights" : "Refresh All")
+                        }
+                    }
+                    .disabled(!store.cloudConnected || store.sceneLoadProgress != nil)
+                    .help(store.cloudConnected ? "Download each light's built-in and DIY scenes from Govee" : "Connect your Govee account in Settings first")
+                }
+                if store.loadedSceneCount > 0 {
+                    Button("Browse", systemImage: "magnifyingglass") { browsingGovee = true }
+                        .buttonStyle(.borderedProminent)
+                        .help("Search Govee scenes by room or light and apply one with a tap")
+                }
+            }
+        }
+    }
+    private var goveeScenesDetail: String {
+        let lights = store.sceneCapableLights.count
+        if let progress = store.sceneLoadProgress { return "Loading \(progress.done) of \(progress.total) lights…" }
+        if store.loadedSceneCount == 0 { return "\(lights) of your lights have Govee's built-in scenes. Load them, then browse and apply one with a tap." }
+        return "\(store.loadedSceneCount) built-in and DIY scenes loaded. Browse by room or light and tap one to apply it."
+    }
+
+    private func restoreBanner(_ point: LightScene) -> some View {
+        let count = Set(point.steps.map(\.deviceID)).count
+        return Card(padding: 12) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "arrow.uturn.backward.circle").font(.system(size: 18)).foregroundStyle(Color.lumaAccent)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(point.name).font(.system(size: 13, weight: .semibold))
+                        Text("Put \(count) \(count == 1 ? "light" : "lights") back to \(count == 1 ? "its" : "their") power, brightness, and color from before the scene. Effects and DreamView aren't undone.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button("Dismiss") { store.restorePoint = nil }
+                    Button("Restore", systemImage: "arrow.uturn.backward") {
+                        do { try store.restoreBeforeScene(); errorText = nil } catch { errorText = error.localizedDescription }
+                    }.buttonStyle(.borderedProminent).fixedSize().help("Restore the lights to how they were before the last scene")
+                }
+            }
+        }
     }
 
     private var emptyState: some View {
@@ -716,6 +778,9 @@ private struct StepRow: View {
                 }
                 .accessibilityLabel("White temperature for step \(number)")
             }
+        case "dreamViewToggle":
+            Text("DreamView sync \(command.value.number == 0 ? "off" : "on")").foregroundStyle(.secondary)
+                .help("Starts or stops the DreamView group set up in Govee Home")
         default:
             Text(friendlyTitle(for: command.instance)).foregroundStyle(.secondary)
                 .help("Set with the Advanced JSON editor (\(command.instance))")

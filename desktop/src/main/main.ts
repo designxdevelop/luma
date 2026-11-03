@@ -4,7 +4,7 @@
 // Electron entry point: window, tray, secure storage (Windows DPAPI via safeStorage),
 // and a sender-validated IPC surface for the sandboxed renderer.
 
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, session, shell, Tray, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerSaveBlocker, safeStorage, session, shell, Tray, type IpcMainInvokeEvent } from 'electron';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,8 +12,10 @@ import { pathToFileURL } from 'node:url';
 import { Home } from './home';
 import { createCaptureAdapter } from './capture';
 import { stopOnRendererLoss } from './sync';
+import { audioSupportFor } from './audio-capture';
 import { LINUX_PROFILE_DIR, linuxCaptureSwitches, linuxRevalidatesSources, linuxSecretsAvailable, linuxSessionType } from './linux-platform';
 import { HomeStorage, type SecretStore } from './storage';
+import { BACKUP_LIMIT } from './backup';
 import { LumaError, message, power } from '../core/model';
 
 const demo = process.argv.includes('--demo');
@@ -30,6 +32,12 @@ let demoProfile: string | undefined;
 // Connected mode runs on Windows and Linux, each with its own profile folder so it can
 // never share a data directory with the macOS Luma app (both are named "Luma").
 const linux = process.platform === 'linux';
+// 'prevent-app-suspension' keeps the system from idle sleep (screen may still turn off); it can't stop a lid close or manual sleep.
+let awakeBlocker: number | undefined;
+function keepAwake(on: boolean): void {
+  if (on && awakeBlocker === undefined) awakeBlocker = powerSaveBlocker.start('prevent-app-suspension');
+  if (!on && awakeBlocker !== undefined) { powerSaveBlocker.stop(awakeBlocker); awakeBlocker = undefined; }
+}
 const unsupported = !demo && process.platform !== 'win32' && !linux;
 const linuxSession = linux ? linuxSessionType(process.env) : 'unknown';
 /** Removes throwaway profiles left by demo processes that were killed before cleanup. */
@@ -98,6 +106,8 @@ let home: Home;
 let capture: ReturnType<typeof createCaptureAdapter>;
 /** Real screen capture: connected mode on Windows or Linux. Demo always uses synthetic frames. */
 const captureReal = !demo && (process.platform === 'win32' || linux);
+/** Audio Sync always captures real audio (demo too: only the lights are simulated). */
+const audioSupport = audioSupportFor(process.platform);
 let window: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let quitting = false;
@@ -130,8 +140,9 @@ function createWindow(): BrowserWindow {
   });
   win.on('closed', () => { if (window === win) window = undefined; });
   // A hidden or minimized window pauses Screen Sync rather than sampling in the background.
-  win.on('hide', () => home.sync.pause());
-  win.on('minimize', () => home.sync.pause());
+  // Audio Sync keeps running from the tray (music plays with Luma closed); the tray shows it.
+  win.on('hide', () => { if (home.sync.kind !== 'audio') home.sync.pause(); });
+  win.on('minimize', () => { if (home.sync.kind !== 'audio') home.sync.pause(); });
   // Reload, navigation, crash or hang orphans the session (even paused): revoke and stop, no restore.
   stopOnRendererLoss(win.webContents, () => { capture.revoke(); void home.sync.stop('The Luma window reloaded or stopped responding.'); });
   void win.loadURL(rendererURL());
@@ -160,7 +171,8 @@ function buildTray(): void {
     tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }));
     tray.on('click', () => openWindow());
   }
-  tray.setToolTip(`${demo ? 'Luma (Demo)' : 'Luma'}${home.sync.active ? ` · Screen Sync ${home.sync.phase === 'paused' ? 'paused' : 'live'}` : ''}`);
+  const syncLabel = home.sync.kind === 'audio' ? 'Audio Sync' : 'Screen Sync';
+  tray.setToolTip(`${demo ? 'Luma (Demo)' : 'Luma'}${home.sync.active ? ` · ${syncLabel} ${home.sync.phase === 'paused' ? 'paused' : 'live'}` : ''}`);
   const snapshot = home.snapshot();
   const rooms = [...new Set(snapshot.devices.map((d) => d.room))].sort();
   const run = (fn: () => unknown) => () => { try { void Promise.resolve(fn()).catch((e) => home.log(message(e), true)); } catch (e) { home.log(message(e), true); } };
@@ -183,9 +195,9 @@ function buildTray(): void {
     { label: 'Stop scene', enabled: !!snapshot.runningSceneID, click: run(() => home.stopScene()) },
     ...(home.sync.active ? [
       { type: 'separator' as const },
-      { label: `Screen Sync: ${snapshot.sync.phase === 'paused' ? 'paused' : 'live'}`, enabled: false },
-      { label: 'Pause Screen Sync', enabled: snapshot.sync.phase === 'running' || snapshot.sync.phase === 'starting', click: run(() => home.sync.pause()) },
-      { label: 'Stop Screen Sync', enabled: snapshot.sync.phase !== 'stopping', click: run(() => { capture.revoke(); return home.sync.stop('Stopped from the tray.', true); }) },
+      { label: `${syncLabel}: ${snapshot.sync.phase === 'paused' ? 'paused' : 'live'}`, enabled: false },
+      { label: `Pause ${syncLabel}`, enabled: snapshot.sync.phase === 'running' || snapshot.sync.phase === 'starting', click: run(() => home.sync.pause()) },
+      { label: `Stop ${syncLabel}`, enabled: snapshot.sync.phase !== 'stopping', click: run(() => { capture.revoke(); return home.sync.stop('Stopped from the tray.', true); }) },
     ] : []),
     { type: 'separator' },
     { label: 'Settings', click: () => openWindow({ tab: 'settings' }) },
@@ -213,6 +225,22 @@ function registerIPC(): void {
     });
   };
   handle('snapshot', () => home.snapshot());
+  handle('scheduleSync', async (action, arg) => {
+    const sync = home.scheduleSync;
+    switch (action) {
+      case 'runHere': return sync.becomeRunner();
+      case 'pair': return sync.pair(str(arg, 256));
+      case 'off': return sync.turnOff();
+      case 'syncNow': return sync.syncNow();
+      case 'takeOver': return sync.takeOver(false);
+      case 'forceTakeOver': return sync.takeOver(true);
+      case 'keepAwake': return sync.setKeepAwake(arg === true);
+      case 'rotate': return sync.rotatePairing();
+      case 'dismiss': return sync.dismissNotices();
+      case 'copyCode': { const code = sync.view().runner?.pairingCodes.find((c) => c === arg); if (!code) throw new LumaError('Pairing code not found.'); clipboard.writeText(code); return; }
+      default: throw new LumaError('Unknown schedule sync action.');
+    }
+  });
   handle('setAppearance', (value) => { home.setAppearance(value); nativeTheme.themeSource = home.snapshot().appearance; });
   handle('setSyncAssignments', (value) => home.setSyncAssignments(value));
   handle('clearActivity', () => home.clearActivity());
@@ -254,10 +282,15 @@ function registerIPC(): void {
     // Only the live session's renderer may end it; reason text is ours, chosen from a fixed set.
     if (!home.sync.ownsToken(token)) return;
     capture.revoke();
-    const reasons: Record<string, string> = { ended: 'The shared screen or window closed.', muted: 'Capture was interrupted (locked, hidden or unavailable source).', denied: 'Screen capture was not allowed.', worker: 'Frame analysis stopped responding.', hidden: 'The window was hidden.' };
+    const reasons: Record<string, string> = home.sync.kind === 'audio'
+      ? { ended: 'The audio device or capture ended.', denied: 'Audio capture was not allowed or is unavailable.', 'no-audio': 'No computer audio track was provided. Choose Default input and route your output to it.', worker: 'Audio analysis stopped.', hidden: 'The window was hidden.' }
+      : { ended: 'The shared screen or window closed.', muted: 'Capture was interrupted (locked, hidden or unavailable source).', denied: 'Screen capture was not allowed.', worker: 'Frame analysis stopped responding.', hidden: 'The window was hidden.' };
     return home.sync.stop(reasons[str(reason, 16)] ?? 'Capture stopped.');
   });
   handle('syncSettings', (settings) => home.setSyncSettings(settings));
+  handle('audioStart', (source, lights, options) => capture.startAudio(source, lights, options));
+  handle('audioLevels', (token, generation, seq, levels) => home.sync.levels(token, generation, seq, levels));
+  handle('audioOptions', (options) => home.sync.setAudio(options));
   handle('openExternal', (key) => {
     const url = LINKS[str(key) as keyof typeof LINKS];
     if (!url) throw new LumaError('Unknown link.');
@@ -267,6 +300,27 @@ function registerIPC(): void {
     const { name, json } = home.exportScene(str(id));
     const result = await dialog.showSaveDialog(window!, { defaultPath: `${name.replace(/[^\w -]+/g, '').trim() || 'scene'}.luma-scene.json`, filters: [{ name: 'Luma scene', extensions: ['json'] }] });
     if (!result.canceled && result.filePath) { writeFileSync(result.filePath, json); home.log(`Exported ${name}.`); }
+  });
+  handle('goveeSignIn', (email, password, code) => home.goveeSignIn(str(email), str(password, 256), code === undefined ? undefined : str(code, 16)));
+  handle('goveeImport', () => home.goveeImport());
+  handle('goveeApplyRooms', (ids) => home.goveeApplyRooms(Array.isArray(ids) ? ids.slice(0, 1000).map((i) => str(i)) : []));
+  handle('goveeSignOut', () => home.goveeSignOut());
+  handle('roomAction', (room, action) => home.roomAction(str(room, 160), action));
+  handle('controlBatch', (id, commands) => home.controlBatch(str(id), commands));
+  handle('restoreBeforeScene', () => { home.restoreBeforeScene(); });
+  handle('doorbell', (action, arg, arg2) => home.doorbell.command(action, arg, arg2));
+  handle('copyCompatibilityReport', () => { clipboard.writeText(home.compatibilityReport()); home.log('Compatibility report copied. It lists models and features only: no names, IDs or addresses.'); });
+  handle('exportBackup', async () => {
+    const json = home.exportBackup();
+    const result = await dialog.showSaveDialog(window!, { defaultPath: `Luma home ${new Date().toISOString().slice(0, 10)}.luma-backup.json`, filters: [{ name: 'Luma home backup', extensions: ['json'] }] });
+    if (!result.canceled && result.filePath) { writeFileSync(result.filePath, json, { mode: 0o600 }); home.log('Exported a home backup (scenes, schedules, names and rooms; no keys or tokens).'); }
+  });
+  handle('importBackup', async () => {
+    const result = await dialog.showOpenDialog(window!, { properties: ['openFile'], filters: [{ name: 'Luma home backup', extensions: ['json'] }] });
+    const file = result.filePaths[0];
+    if (result.canceled || !file) return undefined;
+    if (statSync(file).size > BACKUP_LIMIT) throw new LumaError('That backup is too large.');
+    return home.restoreBackup(readFileSync(file, 'utf8'));
   });
   handle('importScene', async () => {
     const result = await dialog.showOpenDialog(window!, { properties: ['openFile'], filters: [{ name: 'Luma scene', extensions: ['json'] }] });
@@ -307,9 +361,11 @@ if (unsupported) {
       secrets: demo ? undefined : new SafeSecretStore(),
       copyToClipboard: (text) => clipboard.writeText(text),
       captureSupported: captureReal,
+      syncOptions: { audioSupport },
+      scheduleSyncOptions: { keepAwake },
     });
     nativeTheme.themeSource = home.snapshot().appearance;
-    capture = createCaptureAdapter({ real: captureReal, revalidate: !linux || linuxRevalidatesSources(linuxSession), sync: home.sync, window: () => window, rendererURL });
+    capture = createCaptureAdapter({ real: captureReal, revalidate: !linux || linuxRevalidatesSources(linuxSession), sync: home.sync, window: () => window, rendererURL, audioSupport });
     registerIPC();
     let queued = false;
     home.subscribe(() => {
@@ -317,7 +373,11 @@ if (unsupported) {
       queued = true;
       setTimeout(() => {
         queued = false;
-        if (window && !window.isDestroyed()) window.webContents.send('luma:snapshot-changed', home.snapshot());
+        if (window && !window.isDestroyed()) {
+          // A live Audio Sync session must keep analyzing while the window is hidden in the tray.
+          window.webContents.setBackgroundThrottling(!(home.sync.active && home.sync.kind === 'audio'));
+          window.webContents.send('luma:snapshot-changed', home.snapshot());
+        }
         buildTray();
       }, 50);
     });
@@ -325,6 +385,8 @@ if (unsupported) {
     openWindow();
     // Reconnect with the saved encrypted key; the webhook server always starts off.
     if (!demo && home.hasSavedHome && home.snapshot().hasSavedKey) void home.reconnect().catch(() => {});
+    // The schedule runner's LAN server starts with the app when this computer runs shared schedules.
+    void home.scheduleSync.start();
   });
   // A terminated demo/run still cleans up its throwaway profile through before-quit.
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { quitting = true; app.quit(); });

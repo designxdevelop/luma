@@ -12,6 +12,7 @@
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSLocalNetworkUsageDescription</key><string>Luma discovers and controls your Govee lights on your home network.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key><string>Luma connects to the Govee lights you choose to control their lighting and DreamView settings.</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSSupportsAutomaticTermination</key><false/>
 </dict></plist>

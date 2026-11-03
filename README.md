@@ -14,7 +14,7 @@ Screen Sync processes frames locally, with explicit source selection, region map
 
 | Platform | Implementation | Source and instructions | Verification status |
 | --- | --- | --- | --- |
-| macOS 14+ | Native SwiftUI / Swift / ScreenCaptureKit | [Mac guide](MACOS.md), `Sources/`, `Tests/` | 133 automated tests and synthetic Screen Sync UI checks; basic cloud/LAN controls tested with hardware |
+| macOS 14+ | Native SwiftUI / Swift / ScreenCaptureKit | [Mac guide](MACOS.md), `Sources/`, `Tests/` | 148 automated tests and synthetic Screen Sync UI checks; basic cloud/LAN controls tested with hardware |
 | iOS / iPadOS 17+, watchOS 10+ | Native SwiftUI, shares the Mac app's code (`Sources/LumaUI`); the watch relays through the iPhone | [iOS guide](IOS.md), `ios/` | Builds in CI; demo mode checked in the iOS Simulator; Screen Sync uses the camera; not yet tested with hardware |
 | Windows 11 x64 | Electron / TypeScript | [Desktop guide](desktop/README.md), `desktop/` | Unsigned installer built; 204 portable contracts pass; actual Windows runtime, installer, DPAPI, capture, and light response still need testing |
 | Linux x64 / arm64 | Electron / TypeScript | [Linux guide](desktop/docs/LINUX.md), `desktop/` | Archives built; 204 contracts on Linux and 19 synthetic arm64 app checks; real X11/Wayland capture and keyring integration still need testing |
@@ -46,6 +46,18 @@ npm run demo
 Build an unsigned Windows installer with `npm run dist:win`, or Linux archives with `npm run dist:linux`, from `desktop/`. Build outputs are ignored by Git. These are development builds; signing and notarization are not configured.
 
 Connect with your own Govee developer API key through the app. For compatible local lights, enable **LAN Control** in Govee Home and discover them on the same network. Credentials and personal home data stay outside this repository. Screen Sync and the webhook listener start off; enable them explicitly in the app.
+
+**DreamView TV sync** (native Mac and iOS app). A TV backlight that reports Govee's cloud `dreamViewToggle` gets a **DreamView TV sync** card: Start/Stop the group you set up in Govee Home, and **Save Movie Scene** (power on, then sync on). Group members, Movie/Game, All/Part, and saturation stay in Govee Home; Luma does not read or change them.
+
+**Govee Home sign-in** (native Mac and iOS app, optional, read-only). Your API key already imports lights, names, and features; rooms, DreamView groups, and Govee Home automations aren't in Govee's public API. Settings › **Sign In to Govee Home…** uses the Govee Home app's private email sign-in (with the emailed code when Govee asks), keeps only the session token in the Keychain, and reads the device list, control groups, and automations. A preview lists room changes (lights you moved in Luma start unselected; unknown lights are listed, never created), your DreamView groups, and your automations. The last import is saved with your home, so Luma schedules that run at the same minute as an enabled Govee automation on the same light stay flagged until you sign out. **Import Saved File…** accepts a saved device-list response instead. Govee publishes no contract for this API and can change it; there is no token refresh, so sign in again when it expires.
+
+**DreamView partners.** The DreamView card shows the group from your Govee Home account (name and the light count Govee reports) and a separate **Luma draft** of members and screen areas, labelled *Not sent to lights*. Luma can't yet read which lights are in the group or their command versions, and the TV backlights report Bluetooth encryption support that a writer would have to handle, so Apply stays disabled.
+
+**Govee scenes, one tap** (native). Scenes › Govee scenes › **Browse** (or a light's Effects tab) lists each light's built-in, DIY, and snapshot scenes with search. Tap one to send it; pick a room to apply a scene name to every light there that lists it. Nothing is saved unless you choose **Save as Luma Scene**. The list is what Govee's public API returns for the model, which can be shorter than Govee Home's.
+
+**Siri and Shortcuts** (native iPhone and iPad, and the Mac app built with Xcode; the `scripts/build-app.sh` package doesn't include them). Say "Turn on Bedroom in Luma", "Turn off the Office lights in Luma", "Set Bedroom brightness in Luma", "Change Bedroom color in Luma", "Run Movie night in Luma", or "Apply a scene to Bedroom in Luma", or use the same actions in the Shortcuts app. Rooms are looked up when the action runs, so a light you add to a room is included without editing any shortcut. Actions run in Luma in the background through the Govee cloud (LAN only when Luma is already open and has found the light). See [verification](docs/VERIFICATION.md#siri-shortcuts-and-one-tap-govee-scenes-2026-11-02) for what was tested.
+
+**Also in the native app:** room brightness and white, **Restore** after a scene, whole-home **Export/Restore Backup**, and a redacted **Compatibility Report** for issues. See [Govee Home parity and roadmap](docs/PARITY.md).
 
 ## Issues and pull requests
 

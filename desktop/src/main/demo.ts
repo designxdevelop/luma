@@ -4,7 +4,7 @@
 // Synthetic demo home. These are invented sample lights; nothing here is a real
 // device, inventory or capture, and demo mode never touches the network.
 
-import type { Capability, LightDevice, LightScene } from '../shared/types';
+import type { Capability, DeviceReading, LightDevice, LightScene } from '../shared/types';
 import { brightness, kelvin, power, rgb } from '../core/model';
 
 const basic = (white: [number, number] = [2000, 9000]): Capability[] => [
@@ -42,7 +42,24 @@ export function demoDevices(): LightDevice[] {
     { id: 'demo-desk', sku: 'Demo light bars', name: 'Desk lights', room: 'Office', capabilities: [...basic([2700, 6500]), effects[0]!, effects[4]!], power: true, brightness: 80, rgb: 0, colorTemperature: 4500, online: true, lastSeen: now, isDemo: true },
     { id: 'demo-bed', sku: 'Demo bulb', name: 'Bedside', room: 'Bedroom', capabilities: basic([2200, 6500]), power: false, brightness: 25, rgb: 0xffc58b, colorTemperature: 0, online: true, lastSeen: now, isDemo: true },
     { id: 'demo-porch', sku: 'Demo outdoor', name: 'Porch', room: 'Outside', capabilities: basic(), power: false, brightness: 50, rgb: 0xffffff, colorTemperature: 0, online: false, lastSeen: now - 3_600_000, isDemo: true },
+    { id: 'demo-tv', sku: 'Demo TV backlight', name: 'TV backlight', room: 'Living room', capabilities: [...basic(), dreamView], power: true, brightness: 70, rgb: 0x6a8cff, colorTemperature: 0, dreamView: false, online: true, lastSeen: now, isDemo: true },
+    { id: 'demo-thermo', sku: 'Demo hygrometer', name: 'Nursery climate', room: 'Bedroom', deviceType: 'devices.types.thermometer', capabilities: climate, online: true, lastSeen: now, isDemo: true },
   ];
+}
+
+const dreamView: Capability = { type: 'devices.capabilities.toggle', instance: 'dreamViewToggle', parameters: { dataType: 'ENUM', options: [{ name: 'on', value: 1 }, { name: 'off', value: 0 }] } };
+const climate: Capability[] = [
+  { type: 'devices.capabilities.property', instance: 'sensorTemperature', parameters: { dataType: 'INTEGER', unit: 'unit.temperature.celsius' } },
+  { type: 'devices.capabilities.property', instance: 'sensorHumidity', parameters: { dataType: 'INTEGER', unit: 'unit.percent' } },
+];
+
+/** Synthetic readings for the demo hygrometer. */
+export function demoReadings(): Record<string, DeviceReading[]> {
+  const readAt = Date.now();
+  return { 'demo-thermo': [
+    { instance: 'sensorTemperature', label: 'Temperature', text: '21.5 °C', readAt },
+    { instance: 'sensorHumidity', label: 'Humidity', text: '46%', readAt },
+  ] };
 }
 
 export function demoScenes(): LightScene[] {

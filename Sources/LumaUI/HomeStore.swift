@@ -35,6 +35,15 @@ struct ActivityEntry: Identifiable {
     var busy = false
     var scanning = false
     var cloudConnected = false
+    /// A Govee Home sign-in token is in the Keychain (read-only device-list import).
+    var accountSignedIn = false
+    /// Last account or file import, by Luma light ID. In memory only: BLE identity isn't saved.
+    var accountEntries: [String: GoveeHomeImport.Entry] = [:]
+    /// Govee Home control groups and automations from the last signed-in import, saved with the home.
+    var accountGroups: [GoveeHomeImport.HomeGroup] = [] { didSet { if !demo { home.goveeHomeGroups = accountGroups.isEmpty ? nil : accountGroups } } }
+    var accountAutomations: [GoveeHomeImport.Automation] = [] { didSet { if !demo { home.goveeHomeAutomations = accountAutomations.isEmpty ? nil : accountAutomations } } }
+    /// Each light's last known state from just before the most recent scene run.
+    var restorePoint: LightScene?
     var webhookRunning = false
     var webhookStatus = "Stopped"
     var webhookToken = ""
@@ -45,11 +54,15 @@ struct ActivityEntry: Identifiable {
     var demo: Bool
     var canSave = true
     let screenSync: ScreenSync
+    /// Shared schedules: run here (Mac), or pair with the computer that runs them.
+    private(set) var scheduleSync: ScheduleSyncController
     private let storage: HomeStorage
     private let screenSyncDefaults: UserDefaults?
     private var shuttingDown = false
-    private var cloud: GoveeCloud?
-    private let lan = GoveeLAN()
+    private(set) var cloud: GoveeCloud?
+    let lan = GoveeLAN()
+    /// Doorbell alert: settings, light I/O, Alexa relay poll, and its webhook routes.
+    let doorbell = DoorbellAlertController()
     private let server = WebhookServer()
     private var timerTask: Task<Void, Never>?
     private var sceneTask: Task<Void, Never>?
@@ -60,7 +73,7 @@ struct ActivityEntry: Identifiable {
     private var commandWorkers: [String: Task<Void, Never>] = [:]
     private var inFlightControls: [String: QueuedControl] = [:]
     private var confirmationTasks: [ControlKey: Task<Void, Never>] = [:]
-    private var deviceRevisions: [String: UInt64] = [:]
+    var deviceRevisions: [String: UInt64] = [:]
     private var recentConfirmations: [ControlKey: RecentConfirmation] = [:]
 
     // Requested values are a display overlay. Persistence and API telemetry keep
@@ -82,20 +95,40 @@ struct ActivityEntry: Identifiable {
         pendingControls.keys.contains { $0.deviceID == deviceID }
             || !(commandQueues[deviceID]?.isEmpty ?? true)
             || inFlightControls[deviceID] != nil
+            || doorbell.isAlerting(deviceID)
     }
     var rooms: [String] { Array(Set(devices.map(\.room))).sorted() }
     /// Waits for the launch-time cloud reconnect, so early requests have a route.
-    func ready() async { await reconnectTask?.value }
+    /// Resolves once the client exists, not after the state sweep that follows,
+    /// so a cold-launch Siri or watch request isn't held behind every light's read.
+    func ready() async {
+        // ponytail: 50 ms poll; a continuation list if more callers ever wait here.
+        while cloud == nil, reconnecting, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(50)) }
+    }
+    private var reconnecting = false
+    /// Operations whose caller was already resumed when the light or cloud accepted them.
+    private var resumedOnAccept: Set<UUID> = []
     var poweredCount: Int { devices.filter { $0.power == true }.count }
+    /// Devices bulk actions (All On, rooms, watch, webhooks) may touch: never appliances or sensors.
+    var lights: [LightDevice] { devices.filter { DeviceReadings.isLight(type: $0.deviceType) } }
+    /// Last cloud readings per device, in memory only.
+    var readings: [String: (list: [DeviceReadings.Reading], at: Date)] = [:]
+
+    /// The app's one store, shared by its window, the watch relay, and Siri / Shortcuts
+    /// actions. Created on first use, which may be a background launch with no window.
+    /// Tests build their own stores and must not touch this: it reads the real home and Keychain.
+    static let shared = HomeStore()
 
     init(demo demoOverride: Bool? = nil, cloud: GoveeCloud? = nil, screenSyncDefaults: UserDefaults? = .standard) {
         let isDemo = demoOverride ?? CommandLine.arguments.contains("--demo")
         demo = isDemo
         storage = HomeStorage(demo: false)
+        scheduleSync = ScheduleSyncController(folder: isDemo ? nil : storage.folder)
         self.screenSyncDefaults = screenSyncDefaults
         screenSync = ScreenSync(defaults: isDemo ? nil : screenSyncDefaults)
         self.cloud = cloud
         cloudConnected = cloud != nil
+        if !isDemo { accountSignedIn = (try? SecretStore.read(Self.accountTokenKey)) != nil }
         do { home = try storage.load() }
         catch { canSave = false; notice = "Your saved home could not be read. It has been preserved at \(storage.folder.path)." }
         if let data = try? Data(contentsOf: storage.folder.appending(path: "schedule-owners.json")),
@@ -104,12 +137,15 @@ struct ActivityEntry: Identifiable {
            let saved = try? JSONDecoder().decode([UUID: ScheduleCoordination].self, from: data) { coordinations = saved }
         schedulerDevices = [thisSchedulerDevice]
         for i in home.devices.indices { home.devices[i].ip = nil; home.devices[i].online = nil }
+        accountGroups = home.goveeHomeGroups ?? []; accountAutomations = home.goveeHomeAutomations ?? []
         if demo { loadDemo() }
         do { floorPlans = try floorPlanStorage.load() }
         catch { canSaveFloorPlans = false; log("Could not read floor plans. Existing files have been preserved.", error: true) }
-        if !isDemo && cloud == nil {
+        if !isDemo && !home.devices.isEmpty && cloud == nil {
+            reconnecting = true
             reconnectTask = Task { [weak self] in
                 guard let self else { return }
+                defer { self.reconnecting = false }
                 do {
                     guard let key = try SecretStore.read("govee-api-key"), !Task.isCancelled else { return }
                     await self.connectCloud(key: key)
@@ -154,6 +190,27 @@ struct ActivityEntry: Identifiable {
         } else if !isDemo {
             iCloudStatus = "iCloud sync needs a signed build with Luma's iCloud container."
         }
+        attachScheduleSync(scheduleSync)
+        if !isDemo && canSave { scheduleSync.start() }
+        doorbell.attach(self)
+    }
+
+    /// Connects schedule sync to this home. Tests attach one with in-memory secrets.
+    func attachScheduleSync(_ sync: ScheduleSyncController) {
+        if sync !== scheduleSync { scheduleSync.stop() }
+        scheduleSync = sync
+        sync.scenes = { [weak self] in self?.home.scenes ?? [] }
+        sync.schedules = { [weak self] in self?.home.schedules ?? [] }
+        sync.apply = { [weak self] scenes, schedules in
+            guard let self else { return }
+            self.home.scenes = scenes; self.home.schedules = schedules; self.persist()
+        }
+        sync.run = { [weak self] id in
+            guard let self, let scene = self.home.scenes.first(where: { $0.id == id }) else { throw LumaError.message("Scheduled scene no longer exists.") }
+            return try self.runScene(scene)
+        }
+        sync.runStatus = { [weak self] id in self?.runs.first { $0.id == id }?.status }
+        sync.log = { [weak self] message, error in self?.log(message, error: error) }
     }
 
     func log(_ message: String, error: Bool = false) {
@@ -167,6 +224,8 @@ struct ActivityEntry: Identifiable {
     }
     func persist() {
         guard canSave, !demo else { return }
+        // Every scene/schedule edit, from any view, becomes a shared change here.
+        scheduleSync.reconcile()
         do { try storage.save(home); configurationSync?.changed() } catch { log("Could not save home: \(error.localizedDescription)", error: true) }
     }
 
@@ -295,18 +354,20 @@ struct ActivityEntry: Identifiable {
                 case "brightness": incoming.brightness = nil
                 case "colorRgb": incoming.rgb = nil
                 case "colorTemperatureK": incoming.colorTemperature = nil
+                case "dreamViewToggle": incoming.dreamView = nil
                 default: break
                 }
             }
         }
         if let i = index {
             var d = home.devices[i]
-            if !incoming.capabilities.isEmpty { d.capabilities = mergedCapabilities(d.capabilities, incoming.capabilities); d.name = incoming.name }
+            if !incoming.capabilities.isEmpty { d.capabilities = mergedCapabilities(d.capabilities, incoming.capabilities); d.name = incoming.name; d.deviceType = incoming.deviceType }
             d.ip = incoming.ip ?? d.ip
             if !incoming.sku.isEmpty { d.sku = incoming.sku }
             if incoming.online != false {
                 d.power = incoming.power ?? d.power; d.brightness = incoming.brightness ?? d.brightness
                 d.rgb = incoming.rgb ?? d.rgb; d.colorTemperature = incoming.colorTemperature ?? d.colorTemperature
+                d.dreamView = incoming.dreamView ?? d.dreamView
             }
             d.online = incoming.online ?? d.online; d.lastSeen = incoming.lastSeen ?? d.lastSeen
             home.devices[i] = d
@@ -332,12 +393,16 @@ struct ActivityEntry: Identifiable {
             else if let cloud {
                 let revision = deviceRevisions[device.id, default: 0]
                 let reported = home.devices.first { $0.id == device.id } ?? device
-                merge(try await cloud.state(for: reported), stateRevision: revision); persist()
+                let (state, values) = try await cloud.stateAndReadings(for: reported)
+                readings[device.id] = values.isEmpty ? nil : (values, Date())
+                merge(state, stateRevision: revision); persist()
             }
             else { throw LumaError.message("Connect cloud or discover LAN lights to refresh state.") }
         } catch { log(error.localizedDescription, error: true) }
     }
-    func send(_ command: CapabilityCommand, to id: String) async throws {
+    /// `resumeOnAccept` returns once LAN or the cloud accepted the write; readback
+    /// then continues in the background. Siri and one-click scene apply use it.
+    func send(_ command: CapabilityCommand, to id: String, resumeOnAccept: Bool = false) async throws {
         let operationID = UUID()
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
@@ -345,6 +410,7 @@ struct ActivityEntry: Identifiable {
                 do {
                     var operation = try prepare(command, deviceID: id, coalescible: false, operationID: operationID)
                     operation.completion = continuation
+                    operation.resumeOnAccept = resumeOnAccept
                     enqueue(operation)
                 } catch { continuation.resume(throwing: error) }
             }
@@ -360,6 +426,8 @@ struct ActivityEntry: Identifiable {
         // Every UI, scene, schedule and webhook write passes here. Screen Sync
         // releases the light before the write is queued, so it never fights it.
         screenSync.yield(deviceID)
+        // The same write takes the light out of a running doorbell alert; it is not restored.
+        doorbell.yield(deviceID)
         let operation = QueuedControl(id: operationID, deviceID: deviceID, command: command, coalescible: coalescible)
         deviceRevisions[deviceID, default: 0] += 1
         confirmationTasks.removeValue(forKey: operation.key)?.cancel()
@@ -389,10 +457,12 @@ struct ActivityEntry: Identifiable {
                 let next = queue.removeFirst()
                 self.commandQueues[operation.deviceID] = queue
                 self.inFlightControls[operation.deviceID] = next
-                do { try await self.transmit(next); next.completion?.resume() }
-                catch {
+                do {
+                    try await self.transmit(next)
+                    if self.resumedOnAccept.remove(next.id) == nil { next.completion?.resume() }
+                } catch {
                     self.fail(next, message: error.localizedDescription)
-                    next.completion?.resume(throwing: error)
+                    if self.resumedOnAccept.remove(next.id) == nil { next.completion?.resume(throwing: error) }
                 }
                 self.inFlightControls.removeValue(forKey: operation.deviceID)
             }
@@ -404,14 +474,20 @@ struct ActivityEntry: Identifiable {
         let command = operation.command
         let id = operation.deviceID
         if pendingControls[operation.key]?.id == operation.id { pendingControls[operation.key]?.phase = .sending }
+        func accepted() {
+            guard operation.resumeOnAccept, resumedOnAccept.insert(operation.id).inserted else { return }
+            operation.completion?.resume()
+        }
         let route: String
         var usedLAN = false
         if device.isDemo { route = "Demo" }
         else if device.ip != nil && ["powerSwitch", "brightness", "colorRgb", "colorTemperatureK"].contains(command.instance) && (command.instance != "colorTemperatureK" || (2000...9000).contains(command.value.number ?? 0)) {
             try lan.start(onDevice: { [weak self] incoming in self?.merge(incoming); self?.persist() }, onError: { [weak self] message in self?.log(message, error: true) })
             try lan.control(device: device, command: command); route = "LAN sent; awaiting status"; usedLAN = true
+            accepted()
         } else if let cloud {
             try await cloud.control(device: device, command: command); route = "Cloud accepted"
+            accepted()
             submitted(operation, cloud: cloud)
             do {
                 for _ in 0..<2 {
@@ -439,11 +515,13 @@ struct ActivityEntry: Identifiable {
                 home.devices[i].rgb = command.value.number.map(Int.init)
                 home.devices[i].colorTemperature = 0
             case "colorTemperatureK": home.devices[i].colorTemperature = command.value.number.map(Int.init)
+            case "dreamViewToggle": home.devices[i].dreamView = command.value.number == 1
             default: break
             }
         }
         if device.isDemo {
             if pendingControls[operation.key]?.id == operation.id { pendingControls.removeValue(forKey: operation.key) }
+            accepted()
         } else if usedLAN { submitted(operation) }
         log("\(device.name): \(command.instance) · \(route)")
         if let ip = device.ip { try? lan.requestStatus(ip: ip) }
@@ -466,7 +544,7 @@ struct ActivityEntry: Identifiable {
         try startLAN()
         for command in commands { try lan.control(device: device, command: command) }
     }
-    private func startLAN() throws {
+    func startLAN() throws {
         try lan.start(onDevice: { [weak self] incoming in self?.merge(incoming); self?.persist() }, onError: { [weak self] message in self?.log(message, error: true) })
     }
     func perform(_ command: CapabilityCommand, ids: [String]) {
@@ -477,7 +555,10 @@ struct ActivityEntry: Identifiable {
     }
     private func submitted(_ operation: QueuedControl, cloud: GoveeCloud? = nil) {
         guard pendingControls[operation.key]?.id == operation.id else { return }
-        guard ["powerSwitch", "brightness", "colorRgb", "colorTemperatureK"].contains(operation.command.instance) else {
+        // DreamView is confirmed only on lights that have reported it; otherwise an
+        // unqueryable toggle would always end in a confirmation timeout.
+        let reportsDreamView = operation.command.instance == "dreamViewToggle" && home.devices.first { $0.id == operation.deviceID }?.dreamView != nil
+        guard reportsDreamView || ["powerSwitch", "brightness", "colorRgb", "colorTemperatureK"].contains(operation.command.instance) else {
             pendingControls.removeValue(forKey: operation.key); return
         }
         pendingControls[operation.key]?.phase = .confirming
@@ -552,6 +633,106 @@ struct ActivityEntry: Identifiable {
         home.devices[i].room = trimmed.isEmpty ? "Unassigned" : trimmed
         persist()
     }
+    // MARK: Govee Home account
+
+    static let accountTokenKey = "govee-home-token"
+    private static let accountExpiryKey = "govee-home-token-expires"
+    private static let accountClientKey = "govee-home-client-id"
+    /// Tests swap in a stub session.
+    var accountSession: URLSession = .shared
+
+    private func account() throws -> GoveeAccount {
+        // One stable client ID: a new one per sign-in makes Govee email a code every time.
+        let id = try SecretStore.read(Self.accountClientKey) ?? {
+            let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            try SecretStore.save(id, account: Self.accountClientKey); return id
+        }()
+        return GoveeAccount(clientID: id, session: accountSession)
+    }
+
+    /// Returns false when Govee emailed a code and wants sign-in repeated with it.
+    /// The password and code are never stored or logged.
+    func signInToGoveeHome(email: String, password: String, code: String?) async throws -> Bool {
+        guard !demo else { throw LumaError.message("Leave the demo to sign in to Govee Home.") }
+        switch try await account().login(email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password, code: code) {
+        case .needsCode: return false
+        case .signedIn(let session):
+            try SecretStore.save(session.token, account: Self.accountTokenKey)
+            if let expires = session.expires { try SecretStore.save(String(expires.timeIntervalSince1970), account: Self.accountExpiryKey) }
+            else { try SecretStore.delete(Self.accountExpiryKey) }
+            accountSignedIn = true
+            log("Signed in to Govee Home.")
+            return true
+        }
+    }
+
+    /// Reads the device list and returns a preview. Never changes the home by itself.
+    func previewGoveeHomeImport() async throws -> GoveeHomeImport.Plan {
+        guard let token = try SecretStore.read(Self.accountTokenKey) else { accountSignedIn = false; throw GoveeAccount.SessionExpired() }
+        if let expires = try SecretStore.read(Self.accountExpiryKey).flatMap(Double.init), Date(timeIntervalSince1970: expires) < .now {
+            signOutOfGoveeHome(); throw GoveeAccount.SessionExpired()
+        }
+        do {
+            let account = try account()
+            var plan = try previewImport(try await account.deviceList(token: token))
+            // Groups and automations are extras: a failure there keeps the room import.
+            do { plan.groups = try GoveeHomeImport.parseGroups(try await account.groups(token: token)) }
+            catch let error as GoveeAccount.SessionExpired { throw error } catch { plan.unavailable.append("DreamView groups") }
+            do { plan.automations = try GoveeHomeImport.parseAutomations(try await account.automations(token: token)) }
+            catch let error as GoveeAccount.SessionExpired { throw error } catch { plan.unavailable.append("automations") }
+            accountGroups = plan.groups; accountAutomations = plan.automations; persist()
+            return plan
+        } catch let error as GoveeAccount.SessionExpired { signOutOfGoveeHome(); throw error }
+    }
+
+    /// Refreshes only the DreamView/control groups, for the DreamView card.
+    func refreshAccountGroups() async throws {
+        guard let token = try SecretStore.read(Self.accountTokenKey) else { accountSignedIn = false; throw GoveeAccount.SessionExpired() }
+        do { accountGroups = try GoveeHomeImport.parseGroups(await account().groups(token: token)); persist() }
+        catch let error as GoveeAccount.SessionExpired { signOutOfGoveeHome(); throw error }
+    }
+
+    /// The account's DreamView group whose main light is this one, if imported.
+    func dreamViewGroup(for controllerID: String) -> GoveeHomeImport.HomeGroup? {
+        accountGroups.first { $0.isDreamView && $0.mainDevice?.caseInsensitiveCompare(controllerID) == .orderedSame }
+    }
+
+    var scheduleConflicts: [GoveeHomeImport.Conflict] {
+        GoveeHomeImport.conflicts(accountAutomations, schedules: home.schedules, scenes: home.scenes, devices: home.devices)
+    }
+
+    func previewImport(_ data: Data) throws -> GoveeHomeImport.Plan {
+        let plan = GoveeHomeImport.plan(try GoveeHomeImport.parse(data), devices: home.devices)
+        accountEntries = plan.matched
+        return plan
+    }
+
+    func signOutOfGoveeHome() {
+        do {
+            try SecretStore.delete(Self.accountTokenKey); try SecretStore.delete(Self.accountExpiryKey)
+            accountSignedIn = false; accountEntries = [:]; accountGroups = []; accountAutomations = []; persist()
+            log("Signed out of Govee Home.")
+        } catch { log(error.localizedDescription, error: true) }
+    }
+
+    func dreamViewDraft(for controllerID: String) -> DreamViewDraft { home.dreamViewDrafts?[controllerID] ?? DreamViewDraft() }
+    func saveDreamViewDraft(_ draft: DreamViewDraft, for controllerID: String) {
+        var drafts = home.dreamViewDrafts ?? [:]
+        drafts[controllerID] = draft.members.isEmpty ? nil : draft
+        home.dreamViewDrafts = drafts.isEmpty ? nil : drafts
+        persist()
+    }
+
+    /// Applies the rows a person kept selected in the Govee Home import preview.
+    func applyRoomImport(_ changes: [GoveeHomeImport.RoomChange]) {
+        var applied = 0
+        for change in changes {
+            guard let i = home.devices.firstIndex(where: { $0.id == change.deviceID }) else { continue }
+            home.devices[i].room = change.goveeRoom; applied += 1
+        }
+        guard applied > 0 else { return }
+        persist(); log("Imported Govee Home rooms for \(applied) light\(applied == 1 ? "" : "s").")
+    }
     func saveScene(_ scene: LightScene) throws {
         try CommandValidation.validateScene(scene, devices: devices)
         if let i = home.scenes.firstIndex(where: { $0.id == scene.id }) { home.scenes[i] = scene }
@@ -559,6 +740,10 @@ struct ActivityEntry: Identifiable {
         persist(); log("Saved scene: \(scene.name).")
     }
     func captureScene(name: String, ids: [String]) throws {
+        try saveScene(.init(name: name, steps: snapshotSteps(ids)))
+    }
+    /// Steps that put lights back to their last known state. Unknown power is skipped.
+    func snapshotSteps(_ ids: some Collection<String>) -> [SceneStep] {
         var steps: [SceneStep] = []
         for device in home.devices where ids.contains(device.id) {
             if let power = device.power { steps.append(.init(deviceID: device.id, command: .power(power))) }
@@ -567,11 +752,16 @@ struct ActivityEntry: Identifiable {
             if let k = device.colorTemperature, k > 0, device.supports("colorTemperatureK") { steps.append(.init(deviceID: device.id, command: .kelvin(k))) }
             else if let rgb = device.rgb, device.supports("colorRgb") { steps.append(.init(deviceID: device.id, command: .rgb(rgb))) }
         }
-        try saveScene(.init(name: name, steps: steps))
+        return steps
     }
-    @discardableResult func runScene(_ scene: LightScene) throws -> UUID {
+    @discardableResult func runScene(_ scene: LightScene, saveRestorePoint: Bool = true) throws -> UUID {
         guard runningSceneID == nil else { throw LumaError.message("A scene is already running. Stop it before starting another.") }
         try CommandValidation.validateScene(scene, devices: devices)
+        if saveRestorePoint {
+            // Taken before any step is sent. Non-light steps (DreamView, effects) aren't undone.
+            let steps = snapshotSteps(Set(scene.steps.map(\.deviceID)))
+            restorePoint = steps.isEmpty ? nil : LightScene(name: "Before \(scene.name)", symbol: "arrow.uturn.backward", steps: steps)
+        }
         let runID = UUID()
         runs.insert(.init(id: runID, sceneID: scene.id, name: scene.name, status: "running", startedAt: Date()), at: 0)
         if runs.count > 100 { runs.removeLast(runs.count - 100) }
@@ -596,17 +786,103 @@ struct ActivityEntry: Identifiable {
         if let i = runs.firstIndex(where: { $0.id == id }) { runs[i].status = status; runs[i].finishedAt = Date(); runs[i].error = error }
     }
     func stopScene() { sceneTask?.cancel(); scheduleCoordinator?.cancel() }
+    /// Sends the lights back to how they were before the last scene ran. One level: restoring doesn't save a new point.
+    func restoreBeforeScene() throws {
+        guard let point = restorePoint else { return }
+        try runScene(point, saveRestorePoint: false)
+        restorePoint = nil
+    }
+
+    /// Room white: each light gets the temperature clamped to its own advertised range.
+    func performWhite(_ kelvin: Int, ids: [String]) {
+        for device in home.devices where ids.contains(device.id) && device.supports("colorTemperatureK") {
+            perform(.kelvin(Self.clampedKelvin(kelvin, for: device)), ids: [device.id])
+        }
+    }
+
+    // MARK: Backup
+
+    /// Scenes, schedules, names, rooms, and DreamView drafts. No keys, tokens, IPs, or webhook settings.
+    func backup() -> HomeBackup {
+        HomeBackup(exportedAt: Date(), scenes: home.scenes, schedules: home.schedules,
+                   lights: home.devices.filter { !$0.isDemo }.map { .init(id: $0.id, sku: $0.sku, customName: $0.customName, room: $0.room) },
+                   dreamViewDrafts: home.dreamViewDrafts)
+    }
+
+    /// Replaces scenes, schedules, and drafts; applies names and rooms only to lights Luma
+    /// already knows (same ID and model). The current home is saved beside home.json first.
+    @discardableResult func restore(_ backup: HomeBackup) throws -> HomeBackup.Result {
+        guard backup.format == HomeBackup.formatName, backup.version <= HomeBackup.currentVersion else {
+            throw LumaError.message("That isn't a Luma home backup this version can read.")
+        }
+        guard runningSceneID == nil else { throw LumaError.message("Stop the running scene before restoring.") }
+        if !demo { try scheduleSync.assertMayReplaceAll() }
+        if !demo { try storage.saveCopy(home, named: "home-before-restore.json") }
+        var result = HomeBackup.Result()
+        for label in backup.lights {
+            guard let i = home.devices.firstIndex(where: { $0.id == label.id && $0.sku.caseInsensitiveCompare(label.sku) == .orderedSame }) else { result.lightsNotFound += 1; continue }
+            home.devices[i].customName = label.customName; home.devices[i].room = label.room; result.lightsUpdated += 1
+        }
+        let sceneIDs = Set(backup.scenes.map(\.id))
+        home.scenes = backup.scenes
+        home.schedules = backup.schedules.filter { sceneIDs.contains($0.sceneID) }
+        let known = Set(home.devices.map(\.id))
+        home.dreamViewDrafts = backup.dreamViewDrafts?.filter { known.contains($0.key) }
+        result.scenes = home.scenes.count; result.schedules = home.schedules.count
+        result.scenesWithMissingLights = home.scenes.filter { $0.steps.contains { !known.contains($0.deviceID) } }.count
+        persist(); log("Restored backup: \(result.scenes) scenes, \(result.schedules) schedules, \(result.lightsUpdated) lights.")
+        return result
+    }
     func loadDeviceScenes(_ device: LightDevice, diy: Bool) async {
-        guard let cloud else { log("Connect Govee cloud to load device effects.", error: true); return }
-        do {
-            let caps = try await cloud.scenes(for: device, diy: diy)
-            if let i = home.devices.firstIndex(where: { $0.id == device.id }) {
-                home.devices[i].capabilities = mergedCapabilities(home.devices[i].capabilities, caps)
-            }
-            persist(); log("Loaded \(diy ? "DIY" : "dynamic") effects for \(device.name).")
-        } catch { log(error.localizedDescription, error: true) }
+        guard cloud != nil else { log("Connect Govee cloud to load device effects.", error: true); return }
+        do { try await fetchScenes(device, diy: diy); persist(); log("Loaded \(diy ? "DIY" : "dynamic") effects for \(device.name).") }
+        catch { log(error.localizedDescription, error: true) }
+    }
+    private func fetchScenes(_ device: LightDevice, diy: Bool) async throws {
+        guard let cloud else { return }
+        let caps = try await cloud.scenes(for: device, diy: diy)
+        if let i = home.devices.firstIndex(where: { $0.id == device.id }) {
+            // The DIY endpoint is the whole DIY list: replace it so a DIY scene deleted
+            // in Govee Home disappears instead of lingering as an option Govee rejects.
+            // Built-in lists still merge: the device list and scene endpoint each carry part.
+            if diy { home.devices[i].capabilities.removeAll { cap in caps.contains { $0.id == cap.id } } }
+            home.devices[i].capabilities = mergedCapabilities(home.devices[i].capabilities, caps)
+        }
+    }
+
+    /// Lights whose model advertises Govee's built-in scenes (`lightScene`) or DIY scenes.
+    var sceneCapableLights: [LightDevice] { home.devices.filter { !$0.isDemo && ($0.supports("lightScene") || $0.supports("diyScene")) } }
+    /// Built-in plus DIY scene options already downloaded, across all lights.
+    var loadedSceneCount: Int {
+        home.devices.reduce(0) { total, device in
+            total + device.capabilities.filter { ["lightScene", "diyScene"].contains($0.instance) }.reduce(0) { $0 + ($1.parameters?["options"]?.array?.count ?? 0) }
+        }
+    }
+    var sceneLoadProgress: (done: Int, total: Int)?
+
+    /// Downloads every light's built-in and DIY scene lists, one light at a time so a
+    /// large home stays under Govee's per-minute limit. A failing light is skipped.
+    func loadAllDeviceScenes(spacing: Duration = .milliseconds(700)) async {
+        guard cloud != nil, sceneLoadProgress == nil else { return }
+        let lights = sceneCapableLights
+        sceneLoadProgress = (0, lights.count)
+        var failed: [String] = []
+        for (index, device) in lights.enumerated() {
+            do {
+                if device.supports("lightScene") { try await fetchScenes(device, diy: false); try await Task.sleep(for: spacing) }
+                if device.supports("diyScene") { try await fetchScenes(device, diy: true); try await Task.sleep(for: spacing) }
+            } catch is CancellationError { break }
+            catch { failed.append(device.customName ?? device.name) }
+            sceneLoadProgress = (index + 1, lights.count)
+        }
+        sceneLoadProgress = nil
+        persist()
+        let skipped = failed.isEmpty ? "." : ". Couldn't load: \(failed.joined(separator: ", "))."
+        log("Loaded Govee scenes for \(lights.count - failed.count) of \(lights.count) lights" + skipped, error: !failed.isEmpty)
     }
     func tickSchedules(now: Date = Date()) {
+        // Shared schedules run only on the selected computer; a paired device never runs them.
+        if scheduleSync.tick(now) { return }
         // Coordinated schedules never run on the legacy path, even offline.
         for i in home.schedules.indices where coordinations[home.schedules[i].id] == nil && (scheduleOwners[home.schedules[i].id] == nil || scheduleOwners[home.schedules[i].id] == installationID) && home.schedules[i].shouldRun(at: now) {
             let schedule = home.schedules[i]
@@ -653,6 +929,7 @@ struct ActivityEntry: Identifiable {
     func handle(_ request: WebhookRequest) async -> WebhookResponse {
         let path = request.path.split(separator: "?")[0].split(separator: "/").map { String($0).removingPercentEncoding ?? String($0) }
         do {
+            if let response = doorbell.handle(request, path: path) { return response }
             if request.method == "GET", path == ["health"] { return .init(status: 200, json: .object(["status": .string("ok"), "demo": .bool(demo)])) }
             if request.method == "GET", path == ["v1", "devices"] { return .init(status: 200, body: try JSONEncoder.pretty.encode(home.devices)) }
             if request.method == "GET", path == ["v1", "scenes"] { return .init(status: 200, body: try JSONEncoder.pretty.encode(home.scenes)) }
@@ -687,7 +964,7 @@ struct ActivityEntry: Identifiable {
     func accepted(_ runID: UUID) -> WebhookResponse {
         .init(status: 202, json: .object(["accepted": .bool(true), "runID": .string(runID.uuidString), "statusURL": .string("/v1/runs/\(runID.uuidString)"), "note": .string("Commands run asynchronously. Completed means submitted, not hardware-confirmed.")]))
     }
-    func shutdown() { configurationSync?.stop(); scheduleCoordinator?.cancel(); shuttingDown = true; screenSync.shutdown(); server.stop(); if demo && webhookCertificate != nil { try? WebhookTLS.delete(demo: true) }; lan.stop(); timerTask?.cancel(); sceneTask?.cancel(); scanTask?.cancel(); reconnectTask?.cancel(); stopCommands() }
+    func shutdown() { doorbell.shutdown(); configurationSync?.stop(); scheduleCoordinator?.cancel(); shuttingDown = true; scheduleSync.stop(); screenSync.shutdown(); server.stop(); if demo && webhookCertificate != nil { try? WebhookTLS.delete(demo: true) }; lan.stop(); timerTask?.cancel(); sceneTask?.cancel(); scanTask?.cancel(); reconnectTask?.cancel(); stopCommands() }
     func loadDemo() {
         configurationSync?.stop(); configurationSync = nil
         // Explore Demo can enter from a real home with a chosen or running
@@ -698,16 +975,41 @@ struct ActivityEntry: Identifiable {
             .init(id: "demo-floor", sku: "Demo lamp", name: "Corner glow", room: "Living room", capabilities: caps, power: true, brightness: 65, rgb: 0xFFB66A, online: true, isDemo: true),
             .init(id: "demo-strip", sku: "Demo strip", name: "Behind the sofa", room: "Living room", capabilities: caps, power: true, brightness: 42, rgb: 0xCA8BFF, online: true, isDemo: true),
             .init(id: "demo-desk", sku: "Demo light bars", name: "Desk lights", room: "Office", capabilities: caps, power: true, brightness: 80, rgb: 0x89CBD2, online: true, isDemo: true),
-            .init(id: "demo-bed", sku: "Demo bulb", name: "Bedside", room: "Bedroom", capabilities: caps, power: false, brightness: 25, rgb: 0xFFC58B, online: true, isDemo: true)
+            .init(id: "demo-bed", sku: "Demo bulb", name: "Bedside", room: "Bedroom", capabilities: caps, power: false, brightness: 25, rgb: 0xFFC58B, online: true, isDemo: true),
+            // Documented cloud toggle shape, so the DreamView card can be explored without a TV.
+            .init(id: "demo-tv", sku: "Demo TV backlight", name: "TV backlight", room: "Living room",
+                  capabilities: caps + [Capability(type: "devices.capabilities.toggle", instance: DreamView.instance, parameters: .object(["dataType": .string("ENUM"), "options": .array([.object(["name": .string("on"), "value": .number(1)]), .object(["name": .string("off"), "value": .number(0)])])]))],
+                  power: true, brightness: 70, rgb: 0x7FA8FF, online: true, isDemo: true, dreamView: false)
         ]
+        // Sample Govee scene lists in the documented shape, so the scene browser and
+        // Siri's Govee scene action can be tried without an account.
+        func sceneList(_ instance: String, _ names: [String], base: Int) -> Capability {
+            Capability(type: "devices.capabilities.dynamic_scene", instance: instance, parameters: .object(["dataType": .string("ENUM"), "options": .array(names.enumerated().map { i, name in
+                .object(["name": .string(name), "value": instance == "lightScene" ? .object(["id": .number(Double(base + i)), "paramId": .number(Double(base + 100 + i))]) : .number(Double(base + i))])
+            })]))
+        }
+        let builtIn = ["Sunrise", "Sunset", "Aurora", "Candlelight", "Ocean", "Forest", "Fireplace", "Rainbow", "Starry Sky", "Reading", "Movie", "Romantic"]
+        for id in ["demo-floor", "demo-strip", "demo-bed"] {
+            guard let i = home.devices.firstIndex(where: { $0.id == id }) else { continue }
+            home.devices[i].capabilities.append(sceneList("lightScene", id == "demo-bed" ? Array(builtIn.prefix(6)) : builtIn, base: 1000))
+        }
+        if let i = home.devices.firstIndex(where: { $0.id == "demo-strip" }) { home.devices[i].capabilities.append(sceneList("diyScene", ["Party Pulse", "Slow Fade"], base: 5000)) }
         home.scenes = [LightScene(name: "Evening unwind", symbol: "moon.stars", steps: home.devices.prefix(2).flatMap { [.init(deviceID: $0.id, command: .power(true)), .init(deviceID: $0.id, command: .brightness(35)), .init(deviceID: $0.id, command: .rgb(0xFFAE64))] }), LightScene(name: "Focus time", symbol: "sun.max", steps: [.init(deviceID: "demo-desk", command: .power(true)), .init(deviceID: "demo-desk", command: .kelvin(4500))])]
+        // Sample Govee Home data, as a signed-in import would show it.
+        accountGroups = [.init(id: 1, name: "Living Room Dream View", enabled: true, reportedLightCount: 3, mainDevice: "demo-tv", mainSKU: "Demo TV backlight", isDreamView: true)]
+        accountAutomations = [.init(id: 1, name: "Good Morning", enabled: true, times: [.init(hour: 7, minute: 0)], repeatDays: Array(1...7),
+                                    targets: [.init(sku: "Demo light bars", name: "Desk lights", isDreamView: false)])]
         log("Demo home loaded. These are sample lights; no real devices are controlled.")
+        doorbell.attach(self)
     }
     func leaveDemo() {
         screenSync.usePreferences(screenSyncDefaults); stopWebhooks(); stopScene(); stopCommands(); webhookToken = ""; demo = false
+        restorePoint = nil
         do { home = try storage.load(); for i in home.devices.indices { home.devices[i].ip = nil; home.devices[i].online = nil } }
         catch { canSave = false; log("Saved home could not be loaded. Your file was preserved.", error: true) }
+        accountGroups = home.goveeHomeGroups ?? []; accountAutomations = home.goveeHomeAutomations ?? []
         log("Demo closed. Connect your Govee account or discover LAN lights.")
+        doorbell.attach(self)
     }
 }
 

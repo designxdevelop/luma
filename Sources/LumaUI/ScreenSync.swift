@@ -11,10 +11,20 @@ import LumaCore
 /// Content the user explicitly chose. Holding a source never captures anything;
 /// only `ScreenSync.start()` creates a session from it.
 struct ScreenSource {
-    enum Kind { case display, window, camera, sample }
+    enum Kind { case display, window, camera, sample, systemAudio, microphone }
+    enum Session { case frames(() -> any ScreenCaptureSession), levels(() -> any AudioCaptureSession) }
     let name: String
     let kind: Kind
-    let makeSession: () -> any ScreenCaptureSession
+    let session: Session
+    init(name: String, kind: Kind, makeSession: @escaping () -> any ScreenCaptureSession) {
+        self.name = name; self.kind = kind; session = .frames(makeSession)
+    }
+    private init(name: String, kind: Kind, session: Session) { self.name = name; self.kind = kind; self.session = session }
+    /// An Audio Sync source: its session yields `AudioLevels` instead of color grids.
+    static func audio(name: String, kind: Kind, _ make: @escaping () -> any AudioCaptureSession) -> ScreenSource {
+        ScreenSource(name: name, kind: kind, session: .levels(make))
+    }
+    var isAudio: Bool { if case .levels = session { true } else { false } }
 }
 
 /// Counters for the current session. Reset on a fresh start, kept across pause.
@@ -43,8 +53,14 @@ protocol ScreenCaptureSession: AnyObject {
 /// Screen Sync session state. Off by default and never restored at launch.
 /// Streams whole-device RGB and brightness to local lights through a
 /// latest-only path that bypasses HomeStore's queued, confirmed controls.
+///
+/// Audio Sync is a second kind of the same session (`mode == .audio`): its source yields
+/// `AudioLevels`, `AudioMapper` turns them into per-light targets, and the same mixer lanes,
+/// exclusivity, manual-control yield, restore and readback apply unchanged.
 @Observable final class ScreenSync {
     enum Phase: Equatable { case idle, starting, running, paused }
+    /// What the session follows. Persisted; switching is only possible while idle.
+    enum Mode: String, CaseIterable { case screen, audio }
 
     private(set) var phase = Phase.idle
     private(set) var source: ScreenSource?
@@ -61,6 +77,11 @@ protocol ScreenCaptureSession: AnyObject {
     private(set) var preview: [String: LightTarget] = [:]
     /// Smoothed region colors, for the on-page color map.
     private(set) var regionPreview: RegionColors?
+    private(set) var mode: Mode
+    /// Audio Sync style and sensitivity. Persisted separately from `settings`.
+    var audioOptions: AudioSyncOptions { didSet { save() } }
+    /// Latest analysis from real capture, for the meter. Nil when no audio is arriving.
+    private(set) var audioLevels: AudioLevels?
 
     private(set) var stats = ScreenSyncStats()
 
@@ -76,7 +97,11 @@ protocol ScreenCaptureSession: AnyObject {
     @ObservationIgnored private var supersededBase = 0
     @ObservationIgnored var readback: (LightDevice) async -> Void = { _ in }
     @ObservationIgnored private var mixer: ScreenSyncMixer
-    @ObservationIgnored private var session: (any ScreenCaptureSession)?
+    @ObservationIgnored private var mapper = AudioMapper()
+    @ObservationIgnored private var audioTargets: [String: LightTarget] = [:]
+    @ObservationIgnored private var lastLevelsAt: Double?
+    @ObservationIgnored private var lastAudioStep: Double?
+    @ObservationIgnored private var stopSession: (() -> Void)?
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private(set) var generation: UInt64 = 0
     @ObservationIgnored private var defaults: UserDefaults?
@@ -97,6 +122,31 @@ protocol ScreenCaptureSession: AnyObject {
         mixer = ScreenSyncMixer(settings: settings)
         let raw = defaults?.dictionary(forKey: "screenSync.regions") as? [String: String] ?? [:]
         regions = raw.compactMapValues(ScreenRegion.init(rawValue:))
+        let audio = Self.audioPreferences(defaults)
+        mode = audio.0; audioOptions = audio.1
+    }
+
+    private static func audioPreferences(_ defaults: UserDefaults?) -> (Mode, AudioSyncOptions) {
+        let mode = defaults?.string(forKey: "screenSync.mode").flatMap(Mode.init(rawValue:)) ?? .screen
+        var options = defaults?.data(forKey: "audioSync.options").flatMap { try? JSONDecoder().decode(AudioSyncOptions.self, from: $0) } ?? AudioSyncOptions()
+        let range = AudioSyncOptions.sensitivityRange
+        options.sensitivity = options.sensitivity.isFinite ? min(max(options.sensitivity, range.lowerBound), range.upperBound) : 1
+        return (mode, options)
+    }
+
+    /// "Screen Sync" or "Audio Sync", for messages and the activity log.
+    var title: String { (source?.isAudio ?? (mode == .audio)) ? "Audio Sync" : "Screen Sync" }
+
+    /// Switches between following the screen and following audio. Idle only; the chosen
+    /// source is forgotten because it belongs to the other kind.
+    func setMode(_ mode: Mode) {
+        guard !isActive, mode != self.mode else { return }
+        self.mode = mode
+        source = nil; message = nil; permissionDenied = false
+        #if os(macOS)
+        ScreenSourcePicker.shared.deactivate()
+        #endif
+        save()
     }
 
     // MARK: Source and session
@@ -106,13 +156,29 @@ protocol ScreenCaptureSession: AnyObject {
     func chooseSource() {
         guard !isActive else { return }
         message = nil; permissionDenied = false
+        // Audio Sync always listens to real audio, also in the demo home (only the lights
+        // are simulated there). There is no synthetic audio source.
+        if mode == .audio {
+            #if os(iOS)
+            select(.microphone)
+            #else
+            presentPicker(audio: true)
+            #endif
+            return
+        }
         if store?.demo == true { select(.sample); return }
         #if os(iOS)
         // iOS can't read other apps' screens without a broadcast extension; the
         // camera pointed at a TV or monitor is the source instead.
         select(.camera)
         #else
-        ScreenSourcePicker.shared.present { [weak self] result in
+        presentPicker(audio: false)
+        #endif
+    }
+
+    #if os(macOS)
+    private func presentPicker(audio: Bool) {
+        ScreenSourcePicker.shared.present(audio: audio) { [weak self] result in
             guard let self, !self.isActive else { return }
             switch result {
             case .picked(let source): self.select(source)
@@ -122,12 +188,13 @@ protocol ScreenCaptureSession: AnyObject {
                 if self.source == nil { ScreenSourcePicker.shared.deactivate() }
             }
         }
-        #endif
     }
+    #endif
 
     func select(_ source: ScreenSource) {
         guard !isActive else { return }
         self.source = source; message = nil; permissionDenied = false
+        mode = source.isAudio ? .audio : .screen
     }
 
     /// Starts or resumes capture from the chosen source. Explicit user action only.
@@ -135,27 +202,37 @@ protocol ScreenCaptureSession: AnyObject {
         guard let source, phase == .idle || phase == .paused else { return }
         if phase == .idle {
             stats = ScreenSyncStats(); supersededBase = mixer.superseded
-            snapshots = [:]
+            snapshots = [:]; mapper = AudioMapper()
             for id in regions.keys { snapshot(id) }
         }
         cancelReadbacks()
         generation &+= 1
         let g = generation
         phase = .starting; message = nil; permissionDenied = false; pauseReason = nil
-        let session = source.makeSession()
-        self.session = session
+        let onEnd: @MainActor (ScreenCaptureEnd) -> Void = { [weak self] end in self?.ended(end, generation: g) }
+        let stopSession: () -> Void
         do {
-            try await session.start(onFrame: { [weak self] grid, capturedAt in self?.receive(grid, generation: g, capturedAt: capturedAt) },
-                                    onEnd: { [weak self] end in self?.ended(end, generation: g) })
+            switch source.session {
+            case .frames(let make):
+                let session = make()
+                stopSession = { session.stop() }
+                self.stopSession = stopSession
+                try await session.start(onFrame: { [weak self] grid, capturedAt in self?.receive(grid, generation: g, capturedAt: capturedAt) }, onEnd: onEnd)
+            case .levels(let make):
+                let session = make()
+                stopSession = { session.stop() }
+                self.stopSession = stopSession
+                try await session.start(onLevels: { [weak self] levels in self?.receive(levels, generation: g) }, onEnd: onEnd)
+            }
         } catch {
             guard g == generation else { return }
             ended(error as? ScreenCaptureEnd ?? .failed(error.localizedDescription), generation: g)
             return
         }
-        guard g == generation else { session.stop(); return }
+        guard g == generation else { stopSession(); return }
         phase = .running
         startTicker(g)
-        store?.log("Screen Sync started.")
+        store?.log("\(title) started.")
     }
 
     /// Stops capture but keeps the source, so Resume needs no new choice.
@@ -163,13 +240,13 @@ protocol ScreenCaptureSession: AnyObject {
         guard phase == .starting || phase == .running else { return }
         halt()
         phase = .paused; pauseReason = reason
-        store?.log(reason.map { "Screen Sync: \($0)" } ?? "Screen Sync paused.")
+        store?.log(reason.map { "\(title): \($0)" } ?? "\(title) paused.")
     }
 
     /// Ends the session and forgets the source. Lights keep their last color.
     func stop() {
         guard isActive || source != nil else { return }
-        let wasActive = isActive
+        let wasActive = isActive, title = title
         let restored = wasActive && settings.restore ? restoreLights() : []
         // An immediate readback could catch a light before it applies the restore
         // and record the streamed color as confirmed; ask once it has settled.
@@ -183,8 +260,8 @@ protocol ScreenCaptureSession: AnyObject {
             }
         }
         if wasActive {
-            store?.log(restored.isEmpty ? "Screen Sync stopped. Lights keep their last synced color and brightness."
-                                        : "Screen Sync stopped. Restored \(restored.count) \(restored.count == 1 ? "light" : "lights") to their earlier color and brightness.")
+            store?.log(restored.isEmpty ? "\(title) stopped. Lights keep their last synced color and brightness."
+                                        : "\(title) stopped. Restored \(restored.count) \(restored.count == 1 ? "light" : "lights") to their earlier color and brightness.")
         }
     }
 
@@ -239,7 +316,7 @@ protocol ScreenCaptureSession: AnyObject {
     private func halt(refreshLights: Bool = true) {
         generation &+= 1
         ticker?.cancel(); ticker = nil
-        session?.stop(); session = nil
+        stopSession?(); stopSession = nil
         // Streamed colors were never recorded as confirmed; ask local lights
         // what they now show so the Lights page catches up.
         if refreshLights, let store, phase == .running {
@@ -251,6 +328,7 @@ protocol ScreenCaptureSession: AnyObject {
         mixer.reset()
         regionPreview = nil
         latestCapture = nil
+        mapper.reset(); audioTargets = [:]; audioLevels = nil; lastLevelsAt = nil; lastAudioStep = nil
     }
 
     private func requestReadback(_ device: LightDevice) {
@@ -277,6 +355,8 @@ protocol ScreenCaptureSession: AnyObject {
         settings = defaults?.data(forKey: "screenSync.settings").flatMap { try? JSONDecoder().decode(ScreenSyncSettings.self, from: $0) }?.clamped() ?? ScreenSyncSettings()
         let raw = defaults?.dictionary(forKey: "screenSync.regions") as? [String: String] ?? [:]
         regions = raw.compactMapValues(ScreenRegion.init(rawValue:))
+        let audio = Self.audioPreferences(defaults)
+        mode = audio.0; audioOptions = audio.1
         self.defaults = defaults
     }
 
@@ -286,19 +366,28 @@ protocol ScreenCaptureSession: AnyObject {
     static let permissionMessage = "macOS didn't allow Luma to capture your screen."
     #endif
 
+    static func permissionMessage(for kind: ScreenSource.Kind?) -> String {
+        switch kind {
+        case .microphone: "iOS didn't allow Luma to use the microphone."
+        case .systemAudio: "macOS didn't allow Luma to capture audio."
+        default: permissionMessage
+        }
+    }
+
     private func ended(_ end: ScreenCaptureEnd, generation g: UInt64) {
         guard g == generation else { return }
         let keepsSource = end == .permissionDenied
-        let source = self.source
+        let source = self.source, title = title
         reset()
         if keepsSource { self.source = source }
         switch end {
-        case .userStopped: message = "Screen Sync stopped from the macOS menu bar."
-        case .permissionDenied: permissionDenied = true; message = Self.permissionMessage
-        case .sourceGone: message = "The window or display you chose is no longer available. Choose it again to continue."
-        case .failed(let text): message = "Screen Sync stopped: \(text)"
+        case .userStopped: message = "\(title) stopped from the macOS menu bar."
+        case .permissionDenied: permissionDenied = true; message = Self.permissionMessage(for: source?.kind)
+        case .sourceGone: message = source?.isAudio == true ? "The audio source you chose is no longer available. Choose it again to continue."
+                                                            : "The window or display you chose is no longer available. Choose it again to continue."
+        case .failed(let text): message = "\(title) stopped: \(text)"
         }
-        store?.log(message ?? "Screen Sync stopped.", error: { if case .failed = end { true } else { false } }())
+        store?.log(message ?? "\(title) stopped.", error: { if case .failed = end { true } else { false } }())
     }
 
     // MARK: Frames and streaming
@@ -320,6 +409,37 @@ protocol ScreenCaptureSession: AnyObject {
             guard self.generation == g else { return }
             self.tick(now: self.elapsed)
         }
+    }
+
+    /// Audio Sync analysis from real capture. Maps to per-light targets at once and streams
+    /// them; the ticker keeps rate-limited lights converging between analyses.
+    func receive(_ levels: AudioLevels, generation g: UInt64, now: Double? = nil) {
+        guard g == generation, phase == .starting || phase == .running else { return }
+        let now = now ?? elapsed
+        audioLevels = levels; lastLevelsAt = now
+        stats.analyzed += 1
+        stepAudio(levels, now: now)
+        if phase == .running { tick(now: now) }
+    }
+
+    /// No analysis for this long means capture delivered nothing (some sources go quiet
+    /// with the music): the meter shows no signal and lights ease to the floor.
+    static let signalTimeout = 0.25
+    private static let silence = AudioLevels(level: 0, bands: Array(repeating: 0, count: AudioLevels.bandCount))!
+
+    /// Bass → treble order for Spectrum: every included light that can sync, by name then ID.
+    /// A light taken over by hand keeps its band, so the others don't shift.
+    var audioOrder: [String] {
+        (store?.devices ?? []).filter { regions[$0.id] != nil && $0.screenSyncIssue == nil }
+            .sorted { ($0.name, $0.id) < ($1.name, $1.id) }.map(\.id)
+    }
+
+    private func stepAudio(_ levels: AudioLevels, now: Double) {
+        let dt = lastAudioStep.map { now - $0 } ?? 0.05
+        lastAudioStep = now
+        let order = audioOrder
+        let targets = mapper.step(levels, count: order.count, settings: settings, options: audioOptions, dt: dt)
+        audioTargets = Dictionary(uniqueKeysWithValues: zip(order, targets))
     }
 
     private var elapsed: Double {
@@ -351,7 +471,17 @@ protocol ScreenCaptureSession: AnyObject {
 
     func tick(now: Double) {
         guard phase == .running, let store else { return }
-        let updates = mixer.tick(now: now, lights: streamingLights)
+        let updates: [StreamUpdate]
+        if source?.isAudio == true {
+            if let last = lastLevelsAt, now - last > Self.signalTimeout {
+                audioLevels = nil
+                stepAudio(Self.silence, now: now)
+            }
+            let lights = streamingLights
+            updates = mixer.tick(now: now, targets: audioTargets.filter { lights[$0.key] != nil })
+        } else {
+            updates = mixer.tick(now: now, lights: streamingLights)
+        }
         if regionPreview != mixer.smoothed { regionPreview = mixer.smoothed }
         if stats.superseded != mixer.superseded - supersededBase { stats.superseded = mixer.superseded - supersededBase }
         for update in updates {
@@ -431,16 +561,26 @@ protocol ScreenCaptureSession: AnyObject {
         #endif
         for (center, name, reason) in events {
             let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.pause(reason: reason) }
+                MainActor.assumeIsolated { self?.systemPause(name, reason: reason) }
             }
             observers.append((center, token))
         }
+    }
+
+    func systemPause(_ event: Notification.Name, reason: String) {
+        // Displays sleeping during music don't stop Audio Sync; it doesn't use the picture.
+        #if os(macOS)
+        if event == NSWorkspace.screensDidSleepNotification && source?.isAudio == true { return }
+        #endif
+        pause(reason: reason)
     }
 
     private func save() {
         guard let defaults, store?.demo != true else { return }
         if let data = try? JSONEncoder().encode(settings) { defaults.set(data, forKey: "screenSync.settings") }
         defaults.set(regions.mapValues(\.rawValue), forKey: "screenSync.regions")
+        defaults.set(mode.rawValue, forKey: "screenSync.mode")
+        if let data = try? JSONEncoder().encode(audioOptions) { defaults.set(data, forKey: "audioSync.options") }
     }
 }
 

@@ -25,6 +25,7 @@ export function kelvinToHex(k: number): string {
 /** The color shown in a light's orb. */
 export function orbColor(d: LightDevice): string | undefined {
   if (d.power === false || d.online === false) return undefined;
+  if (d.deviceType && d.deviceType !== 'devices.types.light' && d.power === undefined) return undefined; // sensors don't glow
   if (d.colorTemperature && d.colorTemperature > 0) return kelvinToHex(d.colorTemperature);
   if (d.rgb !== undefined) return hex(d.rgb);
   return '#ffd9a0';
@@ -68,7 +69,8 @@ export function brightnessRange(d: LightDevice | undefined): [number, number] {
 
 /** Non-basic, user-controllable capabilities shown on the Effects tab. */
 export function effectCapabilities(d: LightDevice): Capability[] {
-  return d.capabilities.filter((c) => !BASIC.includes(c.instance) && !c.type.endsWith('.online') && !c.type.endsWith('.event'));
+  // DreamView has its own Start/Stop block; properties are shown as readings.
+  return d.capabilities.filter((c) => !BASIC.includes(c.instance) && c.instance !== 'dreamViewToggle' && !c.type.endsWith('.online') && !c.type.endsWith('.event') && !c.type.endsWith('.property'));
 }
 
 export function friendly(instance: string): string {

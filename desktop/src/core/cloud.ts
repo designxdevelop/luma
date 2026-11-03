@@ -5,8 +5,9 @@
 // GoveeCloud instance (a single account queue) and is paced; commands are never retried.
 
 import { randomUUID } from 'node:crypto';
-import type { Capability, CapabilityCommand, JSONValue, LightDevice } from '../shared/types';
+import type { Capability, CapabilityCommand, DeviceReading, JSONValue, LightDevice } from '../shared/types';
 import { LumaError, isObject, safeInt } from './model';
+import { parseReadings } from './readings';
 
 export interface HttpLike { status: number; headers: { get(name: string): string | null }; text(): Promise<string> }
 export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body?: string; redirect?: 'error'; signal?: AbortSignal }) => Promise<HttpLike>;
@@ -17,7 +18,7 @@ export interface CloudOptions {
   timeoutMs?: number;
 }
 
-type DeviceState = Partial<Pick<LightDevice, 'power' | 'brightness' | 'rgb' | 'colorTemperature' | 'online' | 'lastSeen'>>;
+export type DeviceState = Partial<Pick<LightDevice, 'power' | 'brightness' | 'rgb' | 'colorTemperature' | 'online' | 'lastSeen' | 'dreamView'>> & { readings?: DeviceReading[] };
 
 const BASE_URL = 'https://openapi.api.govee.com/router/api/v1/';
 const ACCOUNT_SPACING_MS = 84;
@@ -59,13 +60,15 @@ export class GoveeCloud {
     const lights: LightDevice[] = [];
     for (const row of root.data) {
       if (!isObject(row) || typeof row.device !== 'string' || typeof row.sku !== 'string') throw new LumaError('Govee returned a device without an ID or model.');
-      if (typeof row.type === 'string' && row.type !== 'devices.types.light') continue;
+      // Appliances and sensors are listed too, tagged with their type so bulk light actions skip them.
+      const type = typeof row.type === 'string' && row.type !== 'devices.types.light' && /^[\w.-]{1,128}$/.test(row.type) ? row.type : undefined;
       lights.push({
         id: row.device,
         sku: row.sku,
         name: typeof row.deviceName === 'string' && row.deviceName !== '' ? row.deviceName : row.sku,
         room: 'Unassigned',
         capabilities: row.capabilities === undefined ? [] : decodeCapabilities(row.capabilities),
+        ...(type ? { deviceType: type } : {}),
       });
     }
     return lights;
@@ -92,8 +95,11 @@ export class GoveeCloud {
         case 'brightness': { const n = safeInt(v, 0, 100); if (n !== undefined) out.brightness = n; break; }
         case 'colorRgb': { const n = safeInt(v, 0, 0xffffff); if (n !== undefined) out.rgb = n; break; }
         case 'colorTemperatureK': { const n = safeInt(v, 0, 10000); if (n !== undefined && (n === 0 || n >= 1000)) out.colorTemperature = n; break; }
+        case 'dreamViewToggle': { const n = safeInt(v, 0, 1); if (n !== undefined) out.dreamView = n === 1; break; }
       }
     }
+    const readings = parseReadings(reported, device.capabilities, this.now());
+    if (readings.length) out.readings = readings;
     return out;
   }
 

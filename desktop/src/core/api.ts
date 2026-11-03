@@ -18,6 +18,8 @@ export interface AutomationHost {
   runs(): AutomationRun[];
   /** Validates the whole scene (throws LumaError) and starts it; throws LumaError(409) if busy. Returns the run ID without awaiting completion. */
   runScene(scene: LightScene): string;
+  /** /v1/alerts/doorbell[/…]: the doorbell alert's own routes. */
+  doorbell?(method: string, rest: string[], body: Buffer): HttpResponse;
 }
 
 const NOTE = 'Commands run asynchronously. Completed means submitted, not hardware-confirmed. Cancelling does not undo commands already sent.';
@@ -96,6 +98,7 @@ export function createApiHandler(host: AutomationHost): (req: HttpRequest) => Pr
     try {
       let segments: string[];
       try { segments = req.path.split('/').slice(1).map(decodeURIComponent); } catch { throw new LumaError('Malformed percent-encoding in path.'); }
+      if (host.doorbell && segments.slice(0, 3).join('/') === 'v1/alerts/doorbell') return host.doorbell(req.method, segments.slice(3), req.body);
       let pathMatched = false;
       for (const route of routes) {
         if (route.pattern.length !== segments.length) continue;

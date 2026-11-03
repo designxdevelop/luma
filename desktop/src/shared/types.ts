@@ -23,7 +23,12 @@ export interface CapabilityCommand {
 export interface LightDevice {
   id: string;
   sku: string;
+  /** Display name: the user's `customName` when set, else the device's own. */
   name: string;
+  /** User-set label that survives cloud refreshes (matches the native app's `customName`). */
+  customName?: string;
+  /** Govee's device type (e.g. devices.types.heater). Undefined or devices.types.light means a light. */
+  deviceType?: string;
   room: string;
   ip?: string;
   capabilities: Capability[];
@@ -33,9 +38,21 @@ export interface LightDevice {
   /** 0 means the light is in RGB mode. */
   colorTemperature?: number;
   online?: boolean;
+  /** Last reported cloud `dreamViewToggle` (1 = DreamView sync running). Never persisted. */
+  dreamView?: boolean;
   /** Epoch milliseconds. */
   lastSeen?: number;
   isDemo?: boolean;
+}
+
+/** One reported value that has no dedicated control (sensor readings, appliance modes). In memory only. */
+export interface DeviceReading {
+  instance: string;
+  label: string;
+  /** Display text: number with its advertised unit, an option name, or compact JSON. */
+  text: string;
+  /** Epoch milliseconds when Luma read it. */
+  readAt: number;
 }
 
 export interface SceneStep {
@@ -61,6 +78,8 @@ export interface SceneSchedule {
   /** 1 = Sunday … 7 = Saturday (matches the Mac app). */
   weekdays: number[];
   enabled: boolean;
+  /** Epoch ms. Runs before this instant are skipped (Pause); shared through schedule sync. */
+  pausedUntil?: number;
   lastRunMinute?: string;
 }
 
@@ -88,7 +107,12 @@ export interface SavedHome {
   appearance?: 'system' | 'light' | 'dark';
   syncSettings?: SyncSettings;
   syncAssignments?: SyncAssignment[];
+  /** Native DreamView partner drafts, kept only so a backup round trip through Windows/Linux doesn't lose them. Never sent. */
+  dreamViewDrafts?: Record<string, DreamViewDraft>;
 }
+
+/** Matches the native DreamViewDraft: member light IDs with screen areas 1…10. */
+export interface DreamViewDraft { members: Array<{ deviceID: string; areas: number[] }> }
 
 export type ControlPhase = 'queued' | 'sending' | 'confirming';
 
@@ -162,6 +186,10 @@ export interface SyncView {
   synthetic: boolean;
   /** Real capture is available (connected mode on Windows). */
   captureSupported: boolean;
+  /** Screen or Audio Sync; meaningful while a session exists. */
+  kind: SyncKind;
+  audio: AudioOptions;
+  audioSupport: AudioSupport;
   lights: SyncLightView[];
   eligibility: Array<{ id: string; name: string; eligible: boolean; reason?: string }>;
   settings: SyncSettings;
@@ -170,6 +198,25 @@ export interface SyncView {
 }
 
 export interface SyncGrant { token: string; generation: number; synthetic: boolean }
+
+/** What a sync session follows: a captured screen/window, or captured computer audio. */
+export type SyncKind = 'screen' | 'audio';
+/** System audio = loopback of what the computer plays; input = the default recording device. */
+export type AudioSource = 'system' | 'input';
+export interface AudioOptions {
+  /** pulse: all lights share one color and brightness; spectrum: lights spread bass → treble. */
+  style: 'pulse' | 'spectrum';
+  /** 0.5 … 2, gain applied after automatic level adjustment. */
+  sensitivity: number;
+}
+export interface AudioSupport {
+  /** Loopback capture of computer audio (Windows; attempted, unverified, on Linux). */
+  system: boolean;
+  systemExperimental: boolean;
+  /** The default recording device (a microphone, line-in, or a routed monitor/loopback device). */
+  input: boolean;
+}
+export interface AudioGrant { token: string; generation: number; source: AudioSource }
 
 /** Everything the renderer needs to draw. Secrets are only ever masked here. */
 export interface AppSnapshot {
@@ -205,11 +252,100 @@ export interface AppSnapshot {
   sync: SyncView;
   appearance: 'system' | 'light' | 'dark';
   syncAssignments: SyncAssignment[];
+  /** Readings by device ID, from the last cloud state read. */
+  readings: Record<string, DeviceReading[]>;
+  /** Set while "Restore lights" can undo the last scene (name of the restore point). */
+  restorePoint?: string;
+  goveeHome: GoveeHomeView;
+  scheduleSync: ScheduleSyncView;
+  doorbell: DoorbellView;
 }
 
+/** What one computer reported when it ran (or skipped) a shared schedule. Observed, not settings. */
+export interface ScheduleRunReport { scheduleID: string; occurrence: string; at: number; status: string; detail?: string }
+
+/** Schedule sync as the renderer shows it. Never contains a token except inside pairing codes. */
+export interface ScheduleSyncView {
+  available: boolean;
+  role: 'off' | 'runner' | 'paired';
+  deviceName: string;
+  /** False when this computer must not run schedules (paired, handed off, or waiting for the old runner). */
+  mayExecute: boolean;
+  timeZone: string;
+  notices: string[];
+  runner?: {
+    status: string; pairingCodes: string[]; keepAwake: boolean;
+    clients: Array<{ id: string; name: string; platform: string; lastSeen: number }>;
+    runs: ScheduleRunReport[]; retiredTo?: string; waitingFor?: string;
+  };
+  paired?: {
+    host: string; runnerName: string; runnerPlatform?: string; runnerTimeZone?: string; runnerExecuting: boolean;
+    lastSync?: number; lastError?: string; moved?: string; unsent: number; runs: ScheduleRunReport[];
+  };
+}
+
+export interface DoorbellConfig {
+  enabled: boolean;
+  /** Room names, resolved to lights each time the bell rings. */
+  rooms: string[];
+  deviceIDs: string[];
+  rgb: number;
+  durationSeconds: number;
+  /** One full bright-dim cycle; 2–6 s keeps the flash rate at or below 0.5 Hz. */
+  pulseSeconds: number;
+  brightnessCap: number;
+  /** Minutes after local midnight; may cross midnight. */
+  quietStart?: number;
+  quietEnd?: number;
+  /** 0 leaves the lights alone during quiet hours. */
+  quietBrightnessCap: number;
+  cooldownSeconds: number;
+  /** HTTPS address of your own Alexa relay. Its token is in the secret store. */
+  relayURL?: string;
+}
+
+/** Doorbell alert settings and state. The relay token itself never reaches the renderer. */
+export interface DoorbellView {
+  config: DoorbellConfig;
+  phase: 'idle' | 'starting' | 'flashing' | 'restoring';
+  status: string;
+  relayState: string;
+  relayTokenSaved: boolean;
+  pairing?: { code: string; expiresAt: number };
+}
+
+// ---------- Govee Home account (read-only) ----------
+
+export interface GoveeRoomChange { deviceID: string; name: string; currentRoom: string; goveeRoom: string }
+export interface GoveeImportPlan { changes: GoveeRoomChange[]; unchanged: number; withoutRoom: number; notInLuma: number }
+export interface GoveeHomeGroup { id: number; name: string; enabled: boolean; reportedLightCount?: number; mainDevice?: string; mainSKU?: string; isDreamView: boolean }
+export interface GoveeAutomation { id: number; name: string; enabled: boolean; times: Array<{ hour: number; minute: number }>; repeatDays: number[]; targets: Array<{ sku: string; name: string; isDreamView: boolean }> }
+export interface GoveeConflict { automation: string; scheduleID: string; light: string }
+export interface GoveeHomeView {
+  /** Connected mode with secure storage: sign-in is possible. */
+  available: boolean;
+  signedIn: boolean;
+  /** Govee emailed a code; sign in again with it. */
+  awaitingCode: boolean;
+  busy: boolean;
+  importedAt?: number;
+  plan?: GoveeImportPlan;
+  groups: GoveeHomeGroup[];
+  automations: GoveeAutomation[];
+  conflicts: GoveeConflict[];
+  /** Account reads that failed without failing the room import. */
+  unavailable: string[];
+  /** Firmware version from the Govee Home device list, by Luma device ID. */
+  firmware: Record<string, string>;
+}
+
+export interface BackupResult { scenes: number; schedules: number; lightsUpdated: number; lightsNotFound: number; scenesWithMissingLights: number }
+
 /** Request kinds from renderer to main. Every handler validates its input. */
+export type ScheduleSyncAction = 'runHere' | 'pair' | 'off' | 'syncNow' | 'takeOver' | 'forceTakeOver' | 'keepAwake' | 'rotate' | 'dismiss' | 'copyCode';
 export interface LumaBridge {
   snapshot(): Promise<AppSnapshot>;
+  scheduleSync(action: ScheduleSyncAction, arg?: unknown): Promise<void>;
   setAppearance(value: 'system' | 'light' | 'dark'): Promise<void>;
   setSyncAssignments(value: SyncAssignment[]): Promise<void>;
   clearActivity(): Promise<void>;
@@ -260,4 +396,26 @@ export interface LumaBridge {
   /** Capture failed or ended in the renderer; stops without restoring. */
   syncEnded(token: string, reason: string): Promise<void>;
   syncSettings(settings: Partial<SyncSettings>): Promise<void>;
+  /** Starts an Audio Sync session; call the audio pump right after it resolves (user activation). */
+  audioStart(source: AudioSource, lights: Array<{ id: string }>, options: AudioOptions): Promise<AudioGrant>;
+  /** One analysis frame: loudness and 8 band levels, all 0…1. */
+  audioLevels(token: string, generation: number, seq: number, levels: { level: number; bands: number[] }): Promise<boolean>;
+  audioOptions(options: Partial<AudioOptions>): Promise<void>;
+  /** Room-wide brightness or white; each light is clamped to its own range. Lights only. */
+  roomAction(room: string, action: { brightness?: number; kelvin?: number }): Promise<void>;
+  /** Sends commands to one light in order, never coalesced (segment painter). */
+  controlBatch(deviceID: string, commands: CapabilityCommand[]): Promise<void>;
+  restoreBeforeScene(): Promise<void>;
+  /** Doorbell alert: 'update' | 'test' | 'stop' | 'saveRelay' | 'forgetRelay' | 'pairingCode' | 'unlink'. */
+  doorbell(action: string, arg?: unknown, arg2?: unknown): Promise<void>;
+  /** Save dialog in main; the backup never contains keys, tokens, IPs or webhook settings. */
+  exportBackup(): Promise<void>;
+  /** Open dialog in main; undefined when cancelled. */
+  importBackup(): Promise<BackupResult | undefined>;
+  copyCompatibilityReport(): Promise<void>;
+  /** Read-only Govee Home sign-in. The password is used once and never stored. */
+  goveeSignIn(email: string, password: string, code?: string): Promise<'needsCode' | 'signedIn'>;
+  goveeImport(): Promise<void>;
+  goveeApplyRooms(deviceIDs: string[]): Promise<void>;
+  goveeSignOut(): Promise<void>;
 }

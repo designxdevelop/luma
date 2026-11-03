@@ -144,12 +144,34 @@ struct LightsView: View {
     }
 
     private func roomHeader(_ name: String, lights: [LightDevice]) -> some View {
+        let lights = lights.filter { DeviceReadings.isLight(type: $0.deviceType) } // room actions never switch appliances
         let ids = lights.filter { $0.supports("powerSwitch") }.map(\.id)
+        let dimmable = lights.filter { $0.supports("brightness") }.map(\.id)
+        let white = lights.filter { $0.supports("colorTemperatureK") }.map(\.id)
         let on = lights.filter { $0.power == true }.count
         return HStack(alignment: .center, spacing: 8) {
             Text(name).font(.system(size: 19, weight: .bold)).accessibilityAddTraits(.isHeader)
             Text("\(on) of \(lights.count) on").font(.system(size: 13)).foregroundStyle(.secondary).monospacedDigit()
             Spacer(minLength: 8)
+            if !dimmable.isEmpty || !white.isEmpty {
+                Menu {
+                    if !dimmable.isEmpty {
+                        Section("Brightness") {
+                            ForEach([10, 25, 50, 75, 100], id: \.self) { level in Button("\(level)%") { store.perform(.brightness(level), ids: dimmable) } }
+                        }
+                    }
+                    if !white.isEmpty {
+                        // Each light's own range limits the value, as in the light's controls.
+                        Section("White") {
+                            Button("Warm 2700 K") { store.performWhite(2700, ids: white) }
+                            Button("Neutral 4000 K") { store.performWhite(4000, ids: white) }
+                            Button("Daylight 6500 K") { store.performWhite(6500, ids: white) }
+                        }
+                    }
+                } label: { Image(systemName: "slider.horizontal.3") }
+                    .buttonStyle(.borderless).fixedSize()
+                    .help("Brightness and white for \(name)").accessibilityLabel("Adjust lights in \(name)")
+            }
             Toggle(isOn: Binding(get: { on > 0 }, set: { value in store.perform(.power(value), ids: ids) })) {
                 Text(on > 0 ? "On" : "Off").font(.system(size: 13, weight: .semibold)).foregroundStyle(on > 0 ? Color.lumaAccent : .secondary)
             }
