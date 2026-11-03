@@ -74,10 +74,20 @@ interface Daemon { child: ChildProcess; output: () => string; exited: Promise<nu
 function daemons(t: TestContext) {
   const running: Daemon[] = [];
   t.after(async () => { for (const d of running) { d.child.kill('SIGKILL'); await d.exited; } });
+  // Windows child.kill('SIGTERM') forcibly terminates Node; it cannot deliver a signal to
+  // the CLI's graceful-stop handler. A test-only preload delivers that event over IPC.
+  // The shipped CLI has no IPC command surface and POSIX still exercises a real signal.
+  let preload: string | undefined;
+  if (!posix) {
+    const root = mkdtempSync(join(tmpdir(), 'luma-bridge-signal-'));
+    preload = join(root, 'signal.cjs');
+    writeFileSync(preload, "process.on('message', (message) => { if (message === 'stop') process.emit('SIGTERM'); });\n");
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+  }
   /** Starts `luma-bridge start`; resolves once it is listening (status heartbeat written) or has exited. */
   return async (dir: string): Promise<Daemon & { code?: number }> => {
     let out = '';
-    const child = spawn(process.execPath, [CLI, '--data-dir', dir, 'start'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [...(preload ? ['--require', preload] : []), CLI, '--data-dir', dir, 'start'], { stdio: posix ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', 'ipc'] });
     child.stdout!.on('data', (c) => { out += c; }); child.stderr!.on('data', (c) => { out += c; });
     let done = false;
     const exited = new Promise<number>((r) => child.on('exit', (code) => { done = true; r(code ?? 1); }));
@@ -89,7 +99,11 @@ function daemons(t: TestContext) {
   };
 }
 
-async function stop(d: Daemon): Promise<number> { d.child.kill('SIGTERM'); return d.exited; }
+async function stop(d: Daemon): Promise<number> {
+  if (posix) d.child.kill('SIGTERM');
+  else d.child.send('stop');
+  return d.exited;
+}
 
 class Client {
   state: ClientState = newClientState();
