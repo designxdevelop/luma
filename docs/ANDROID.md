@@ -33,7 +33,7 @@ Newer Compose BOMs need compileSdk 37.
 
 ## Implemented
 
-- **Onboarding:** connect a Govee API key, use the local network only, or try the demo.
+- **Onboarding:** the Govee API key is optional. There are three options: connect your account (with a "Get a free API key ↗" link), add local control (LAN Control lights on the same Wi-Fi need no key), or try the demo. The copy matches iOS, macOS and desktop.
   - The key is encrypted with a non-exportable Android Keystore AES-GCM key. Only the ciphertext is stored, in private SharedPreferences.
   - `allowBackup` is off, so the key is never put in a cloud backup.
 - **Home (Lights by room):**

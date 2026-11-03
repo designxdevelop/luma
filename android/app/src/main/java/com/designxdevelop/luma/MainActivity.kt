@@ -57,6 +57,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -72,6 +73,12 @@ class MainActivity : ComponentActivity() {
         setContent { LumaTheme { LumaRoot(store) } }
     }
 }
+
+// API-key copy shared with iOS, macOS and desktop (LightsView.swift, SettingsView.swift).
+const val GOVEE_KEY_URL = "https://developer.govee.com/reference/apply-you-govee-api-key"
+const val KEY_BENEFIT = "A free Govee API key adds cloud actions like effects and segments, and controls your lights when you're not on the same network."
+const val LAN_WITHOUT_KEY = "LAN Control works without a key for lights on the same Wi-Fi. You need a free Govee API key for cloud actions and to control lights when you're not on their network."
+const val NO_KEY_YET = "No key yet? In the Govee Home app, open Profile › Settings › Apply for API Key. Govee emails it to you, usually within minutes."
 
 // Theme.swift values: neutral surfaces, one warm accent.
 object LumaColors {
@@ -139,19 +146,28 @@ private fun Onboarding(store: HomeStore, modifier: Modifier) {
     ) {
         Icon(Icons.Outlined.WbIncandescent, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.secondary)
         Text("Welcome to Luma", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-        Text("Control your Govee lights by room. Connect your Govee account to load every light, or look for lights on this Wi-Fi network.",
+        Text("Control your Govee lights by room. The API key is optional: local lights work without one.",
             style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        val uri = LocalUriHandler.current
         Card(Modifier.widthIn(max = 480.dp).fillMaxWidth(), colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainer)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Connect Govee", style = MaterialTheme.typography.titleMedium)
-                Text("In the Govee Home app: Profile → Settings → Apply for API key. Luma stores the key encrypted on this phone.",
-                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Connect your account", style = MaterialTheme.typography.titleMedium)
+                Text(KEY_BENEFIT, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TextButton({ uri.openUri(GOVEE_KEY_URL) }, Modifier.height(48.dp)) { Text("Get a free API key ↗") }
                 OutlinedTextField(key, { key = it }, Modifier.fillMaxWidth(), label = { Text("Govee API key") }, singleLine = true,
                     visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+                Text(NO_KEY_YET, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Button({ store.connect(key) }, Modifier.fillMaxWidth().height(48.dp), enabled = key.isNotBlank()) { Text("Connect") }
             }
         }
-        OutlinedButton({ store.useLanOnly() }, Modifier.widthIn(max = 480.dp).fillMaxWidth().height(48.dp)) { Text("Use local network only") }
+        Card(Modifier.widthIn(max = 480.dp).fillMaxWidth(), colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainer)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Add local control", style = MaterialTheme.typography.titleMedium)
+                Text("No API key needed. Turn on LAN Control for each light in the Govee Home app, then look for lights on this Wi-Fi.",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedButton({ store.useLanOnly() }, Modifier.fillMaxWidth().height(48.dp)) { Text("Look for lights on this Wi-Fi") }
+            }
+        }
         TextButton({ store.enterDemo() }, Modifier.height(48.dp)) { Text("Try demo") }
     }
 }
@@ -223,7 +239,15 @@ private fun SettingsScreen(store: HomeStore, modifier: Modifier) {
     if (keyDialog) {
         var key by remember { mutableStateOf("") }
         AlertDialog(onDismissRequest = { keyDialog = false }, title = { Text("Govee API key") },
-            text = { OutlinedTextField(key, { key = it }, singleLine = true, label = { Text("API key") }, visualTransformation = PasswordVisualTransformation()) },
+            text = {
+                val uri = LocalUriHandler.current
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(LAN_WITHOUT_KEY, style = MaterialTheme.typography.bodyMedium)
+                    OutlinedTextField(key, { key = it }, singleLine = true, label = { Text("API key") }, visualTransformation = PasswordVisualTransformation())
+                    Text(NO_KEY_YET, style = MaterialTheme.typography.bodySmall)
+                    TextButton({ uri.openUri(GOVEE_KEY_URL) }) { Text("Get a free API key ↗") }
+                }
+            },
             confirmButton = { TextButton({ store.connect(key); keyDialog = false }, enabled = key.isNotBlank()) { Text("Save") } },
             dismissButton = { TextButton({ keyDialog = false }) { Text("Cancel") } })
     }
