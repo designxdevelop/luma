@@ -21,7 +21,7 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     testOptions.unitTests.all {
         // Shared test vectors live with the desktop app so every client replays the same files.
         it.systemProperty("luma.fixtures", rootProject.file("../desktop/src/test/fixtures").absolutePath)
