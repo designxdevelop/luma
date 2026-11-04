@@ -18,9 +18,11 @@ object KeyStore {
     private const val ALIAS = "luma-govee-api-key"
     private const val PREFS = "luma-secrets"
     private const val ENTRY = "govee-api-key"
+    /** Bearer token from a schedule-sync pairing code. */
+    const val SYNC_TOKEN = "schedule-sync-token"
 
-    fun read(context: Context): String? {
-        val stored = prefs(context).getString(ENTRY, null) ?: return null
+    fun read(context: Context, entry: String = ENTRY): String? {
+        val stored = prefs(context).getString(entry, null) ?: return null
         return runCatching {
             val bytes = Base64.decode(stored, Base64.NO_WRAP)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -29,13 +31,13 @@ object KeyStore {
         }.getOrNull() // A reset Keystore (e.g. restored to a new phone) means the key must be entered again.
     }
 
-    fun save(context: Context, value: String) {
+    fun save(context: Context, value: String, entry: String = ENTRY) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
         val sealed = cipher.iv + cipher.doFinal(value.trim().toByteArray())
-        prefs(context).edit().putString(ENTRY, Base64.encodeToString(sealed, Base64.NO_WRAP)).apply()
+        prefs(context).edit().putString(entry, Base64.encodeToString(sealed, Base64.NO_WRAP)).apply()
     }
 
-    fun delete(context: Context) { prefs(context).edit().remove(ENTRY).apply() }
+    fun delete(context: Context, entry: String = ENTRY) { prefs(context).edit().remove(entry).apply() }
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 

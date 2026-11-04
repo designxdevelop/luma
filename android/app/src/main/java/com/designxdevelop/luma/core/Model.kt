@@ -110,7 +110,20 @@ data class SceneSchedule(
     fun shouldRun(at: ZonedDateTime): Boolean =
         enabled && at.hour == hour && at.minute == minute && appleWeekday(at) in weekdays &&
             lastRunMinute != minuteKey(at) &&
-            !(pausedUntil?.let { runCatching { java.time.Instant.parse(it) }.getOrNull()?.isAfter(at.toInstant()) } ?: false)
+            !paused(at)
+
+    private fun paused(at: ZonedDateTime) = pausedUntil?.let { runCatching { java.time.Instant.parse(it) }.getOrNull()?.isAfter(at.toInstant()) } ?: false
+
+    /** The first run strictly after [after], or null when disabled. A time skipped by DST moves forward, as java.time does. */
+    fun next(after: ZonedDateTime): ZonedDateTime? {
+        if (!enabled || weekdays.isEmpty()) return null
+        for (day in 0L..8L) {
+            val at = after.toLocalDate().plusDays(day).atTime(hour, minute).atZone(after.zone)
+            if (at.isAfter(after) && appleWeekday(at) in weekdays && !paused(at)) return at
+        }
+        // Paused for more than a week: look again from the end of the pause.
+        return pausedUntil?.let { runCatching { java.time.Instant.parse(it) }.getOrNull() }?.let { next(it.atZone(after.zone)) }
+    }
 
     companion object {
         /** java.time counts Monday = 1 … Sunday = 7; Apple counts Sunday = 1 … Saturday = 7. */
@@ -127,3 +140,20 @@ data class SavedHome(
     val scenes: List<LightScene> = emptyList(),
     val schedules: List<SceneSchedule> = emptyList(),
 )
+
+/** A light's pin; coordinates are fractions of the image itself, independent of zoom or screen size (FloorPlan.swift). */
+@Serializable
+data class FloorPlanPin(val deviceID: String, val x: Double, val y: Double) {
+    init { if (deviceID.isEmpty() || x !in 0.0..1.0 || y !in 0.0..1.0) throw LumaException("Choose a light and a position inside the floor plan.") }
+}
+
+@Serializable
+data class FloorPlan(val id: String = newId(), val name: String, val pins: List<FloorPlanPin> = emptyList()) {
+    companion object {
+        /** A light has one pin: placing it removes its pin from every other floor. */
+        fun place(plans: List<FloorPlan>, deviceID: String, planID: String, x: Double, y: Double): List<FloorPlan> {
+            val pin = FloorPlanPin(deviceID, x.coerceIn(0.0, 1.0), y.coerceIn(0.0, 1.0))
+            return plans.map { p -> p.copy(pins = p.pins.filter { it.deviceID != deviceID } + listOfNotNull(pin.takeIf { p.id == planID })) }
+        }
+    }
+}

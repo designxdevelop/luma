@@ -66,6 +66,22 @@ fun ScenesScreen(store: HomeStore, modifier: Modifier) {
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
             item { Header("Scenes", "One scene runs at a time.") }
             if (store.home.scenes.isEmpty()) item { Banner("No scenes yet. Save a look from a light, or tap New scene.") }
+            store.restorePoint?.takeIf { store.runningSceneID == null }?.let { point ->
+                item {
+                    val count = point.steps.map { it.deviceID }.distinct().size
+                    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainer)) {
+                        Column(Modifier.padding(16.dp)) {
+                            Text(point.name, style = MaterialTheme.typography.titleSmall)
+                            Text("Put $count ${if (count == 1) "light" else "lights"} back to ${if (count == 1) "its" else "their"} power, brightness, and color from before the scene. Effects and DreamView aren't undone.",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                TextButton({ store.restorePoint = null }) { Text("Dismiss") }
+                                Button(store::restoreBeforeScene) { Text("Restore") }
+                            }
+                        }
+                    }
+                }
+            }
             items(store.home.scenes, key = { it.id }) { scene ->
                 val running = store.runningSceneID == scene.id
                 Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainer)) {
@@ -135,8 +151,25 @@ fun AutomationsScreen(store: HomeStore, modifier: Modifier) {
     }) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
             item { Header("Automations", "Run a scene at a time of day.") }
-            item { Banner("Schedules run while Luma is open or recently used. Android can stop Luma in the background, so a run may be missed.") }
+            item {
+                val context = androidx.compose.ui.platform.LocalContext.current
+                androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { store.refreshAlarmAccess(); onPauseOrDispose { } }
+                when {
+                    store.demo -> Banner("Demo schedules run only while Luma is open.")
+                    store.syncStatus.paired -> Banner("These schedules run on ${store.syncStatus.runnerName ?: "the paired computer"}. Changes here sync to it.")
+                    store.exactAlarms -> Banner("Schedules run on time, even when Luma is closed. Lights need to be on this Wi-Fi, or reachable through Govee cloud with your API key.")
+                    else -> Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                        Banner("Allow alarms so schedules run on time. Without it, Android can deliver them late and Luma skips runs more than 2 minutes late.")
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) TextButton({
+                            context.startActivity(android.content.Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, android.net.Uri.parse("package:${context.packageName}")))
+                        }) { Text("Allow exact alarms") }
+                    }
+                }
+            }
             if (scenes.isEmpty()) item { Banner("Save a scene first, then schedule it.") }
+            store.homeConflicts.takeIf { it.isNotEmpty() }?.let { cs ->
+                item { Banner("Possible conflict: " + cs.joinToString("; ") { "Govee Home's “${it.automation}” also changes ${it.light} at the same time" } + ". Turn one off so they don't fight.") }
+            }
             items(store.home.schedules, key = { it.id }) { s ->
                 val scene = scenes.firstOrNull { it.id == s.sceneID }
                 Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).clickable { editing = s }, colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainer)) {
@@ -146,6 +179,13 @@ fun AutomationsScreen(store: HomeStore, modifier: Modifier) {
                             Text("${scene?.name ?: "Missing scene"} · ${daysText(s.weekdays)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Switch(s.enabled, { store.saveSchedule(s.copy(enabled = it)) }, Modifier.padding(start = 8.dp))
+                    }
+                }
+            }
+            if (store.homeAutomations.isNotEmpty()) item {
+                Section("In Govee Home (read-only)") {
+                    store.homeAutomations.forEach { a ->
+                        SettingRow(a.name, (a.times.joinToString(", ") { "%02d:%02d".format(it.hour, it.minute) } + " · " + (if (a.repeatDays.toSet() == (1..7).toSet()) "Every day" else "${a.repeatDays.size} days") + " · " + a.targets.joinToString(", ") { it.name }) + if (a.enabled) "" else " · Off")
                     }
                 }
             }

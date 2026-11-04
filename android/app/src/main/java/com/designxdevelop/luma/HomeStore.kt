@@ -51,6 +51,11 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("luma", Context.MODE_PRIVATE)
     private val file = File(app.filesDir, "home.json")
 
+    companion object {
+        /** The running app's store, so a schedule alarm runs through it instead of a second copy of the home. */
+        @Volatile var live: HomeStore? = null
+    }
+
     var home by mutableStateOf(SavedHome()); private set
     var demo by mutableStateOf(false); private set
     var hasKey by mutableStateOf(false); private set
@@ -58,15 +63,28 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     var lanOnly by mutableStateOf(false); private set
     var loading by mutableStateOf(false); private set
     var runningSceneID by mutableStateOf<String?>(null); private set
+    /** Lights as they were before the last scene, one level deep (as on iOS). */
+    var restorePoint by mutableStateOf<LightScene?>(null)
+    var exactAlarms by mutableStateOf(ScheduleAlarms.canExact(app)); private set
     var message by mutableStateOf<String?>(null)
     var lastScan by mutableStateOf<Long?>(null); private set
     val readings = mutableStateMapOf<String, List<Readings.Reading>>()
+    var homeGroups by mutableStateOf<List<com.designxdevelop.luma.core.GoveeHomeImport.HomeGroup>>(emptyList()); private set
+    var homeAutomations by mutableStateOf<List<com.designxdevelop.luma.core.GoveeHomeImport.Automation>>(emptyList()); private set
+    /** A Govee Home import waiting for the person to pick which room changes to apply. */
+    var homePlan by mutableStateOf<com.designxdevelop.luma.core.GoveeHomeImport.Plan?>(null)
+    var floorPlans by mutableStateOf<List<com.designxdevelop.luma.core.FloorPlan>>(emptyList()); private set
+    /** Bumped when a floor image changes so the view reloads it. */
+    var floorPlanVersion by mutableStateOf(0); private set
     val log = mutableStateListOf<LogEntry>()
 
     val onboarded: Boolean get() = demo || hasKey || lanOnly || home.devices.isNotEmpty()
     val devices: List<LightDevice> get() = home.devices
     val rooms: List<Pair<String, List<LightDevice>>> get() = home.devices.groupBy { it.room }.toList().sortedBy { if (it.first == "Unassigned") "￿" else it.first.lowercase() }
 
+    val sync = ScheduleSync(app)
+    /** Snapshot of [sync]'s saved state for the UI. */
+    var syncStatus by mutableStateOf(sync.saved); private set
     private var cloud: GoveeCloud? = null
     private var lan: GoveeLan? = null
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -76,11 +94,16 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
         demo = prefs.getBoolean("demo", false)
         lanOnly = prefs.getBoolean("lanOnly", false)
         if (demo) loadDemo() else {
-            home = runCatching { LumaJson.decodeFromString(SavedHome.serializer(), file.readText()) }.getOrDefault(SavedHome())
+            home = HomeFile.load(app) ?: SavedHome()
+            floorPlans = FloorPlans.load(app)
+            loadGoveeHome()
             KeyStore.read(context)?.let { connectCloud(it) }
             if (onboarded) scan() // LAN scan on every launch.
         }
-        viewModelScope.launch { scheduleTicker() }
+        live = this
+        ScheduleAlarms.reschedule(app, home, demo)
+        viewModelScope.launch { while (isActive) { if (!demo && sync.paired) syncNow(); delay(30_000) } }
+        viewModelScope.launch { demoTicker() }
     }
 
     // ---- Account and modes ----
@@ -102,12 +125,16 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
         stopScene(); stopLan(); cloud = null
         demo = true; prefs.edit().putBoolean("demo", true).apply()
         loadDemo()
+        ScheduleAlarms.reschedule(context, home, demo = true)
     }
 
     fun leaveDemo() {
         stopScene(); readings.clear()
         demo = false; prefs.edit().putBoolean("demo", false).apply()
-        home = runCatching { LumaJson.decodeFromString(SavedHome.serializer(), file.readText()) }.getOrDefault(SavedHome())
+        home = HomeFile.load(context) ?: SavedHome()
+        floorPlans = FloorPlans.load(context)
+        loadGoveeHome()
+        ScheduleAlarms.reschedule(context, home, demo = false)
         KeyStore.read(context)?.let { connectCloud(it) }
         log("Left the demo home.")
         if (onboarded) scan()
@@ -115,6 +142,10 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
 
     private fun loadDemo() {
         home = Demo.home()
+        floorPlans = FloorPlans.demo(context, home)
+        homeGroups = listOf(com.designxdevelop.luma.core.GoveeHomeImport.HomeGroup(1, "Living Room Dream View", true, 3, "demo-tv", "Demo TV backlight", true))
+        homeAutomations = listOf(com.designxdevelop.luma.core.GoveeHomeImport.Automation(1, "Good Morning", true, listOf(com.designxdevelop.luma.core.GoveeHomeImport.Automation.Time(7, 0)), (1..7).toList(),
+            listOf(com.designxdevelop.luma.core.GoveeHomeImport.Automation.Target("Demo light bars", "Desk lights", false))))
         readings["demo-bed"] = listOf(Readings.Reading("sensorTemperature", "Temperature", "21.5 °C"), Readings.Reading("sensorHumidity", "Humidity", "44%"))
         log("Demo home loaded. These are sample lights; no real devices are controlled.")
     }
@@ -200,7 +231,7 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
 
     private fun stopLan() { lan?.stop(); lan = null; multicastLock?.release(); multicastLock = null }
 
-    override fun onCleared() { stopLan(); sceneJob?.cancel() }
+    override fun onCleared() { stopLan(); sceneJob?.cancel(); if (live === this) live = null }
 
     // ---- Control ----
 
@@ -209,6 +240,7 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
             val device = home.devices.firstOrNull { it.id == id } ?: continue
             try { CommandValidation.validate(command, device) } catch (e: Exception) { message = e.message; continue }
             replace(id) { apply(it, command) }
+            if (command.instance == "powerSwitch") LightControl.changed(context)
             if (demo || device.isDemo) continue
             viewModelScope.launch { send(device, command) }
         }
@@ -233,6 +265,24 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
                 ?.firstOrNull { jsonEquals(it["value"], c.value) }?.get("name").str?.equals("on", ignoreCase = true) ?: (n == 1))
             else -> d
         }
+    }
+
+    /** Several commands to one light, sent in order (segment painting). */
+    fun perform(commands: List<CapabilityCommand>, device: LightDevice) {
+        try { commands.forEach { CommandValidation.validate(it, device) } } catch (e: Exception) { message = e.message; return }
+        if (demo || device.isDemo) { log("Painted ${commands.size} segment groups on ${device.displayName}."); return }
+        viewModelScope.launch { for (c in commands) send(device, c) }
+    }
+
+    fun saveScene(scene: LightScene): Boolean = try {
+        CommandValidation.validateScene(scene, home.devices)
+        update { it.copy(scenes = it.scenes + scene) }
+        log("Saved scene ${scene.name}."); message = "Saved ${scene.name}."; true
+    } catch (e: Exception) { message = e.message; false }
+
+    /** Screen/audio sync preview: shows the streamed color without saving it (5–20 updates a second). */
+    fun previewStream(id: String, target: com.designxdevelop.luma.core.LightTarget) {
+        home = home.copy(devices = home.devices.map { if (it.id == id) it.copy(rgb = target.rgb, colorTemperature = null, brightness = target.brightness) else it })
     }
 
     fun togglePower(device: LightDevice) = perform(CapabilityCommand.power(device.power != true), listOf(device.id))
@@ -290,9 +340,14 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     fun deleteScene(scene: LightScene) = update { s -> s.copy(scenes = s.scenes - scene, schedules = s.schedules.filter { it.sceneID != scene.id }) }
 
     /** One scene runs at a time; steps go out in order with their delays. */
-    fun runScene(scene: LightScene) {
+    fun runScene(scene: LightScene, saveRestorePoint: Boolean = true) {
         if (runningSceneID != null) { message = "A scene is already running. Stop it before starting another."; return }
         try { CommandValidation.validateScene(scene, home.devices) } catch (e: Exception) { message = e.message; return }
+        if (saveRestorePoint) {
+            // Taken before any step is sent. Effects and DreamView aren't undone.
+            val steps = snapshotSteps(scene.steps.map { it.deviceID }.toSet())
+            restorePoint = if (steps.isEmpty()) null else LightScene(name = "Before ${scene.name}", symbol = "arrow.uturn.backward", steps = steps)
+        }
         runningSceneID = scene.id
         log("Running ${scene.name}.")
         sceneJob = viewModelScope.launch {
@@ -303,6 +358,8 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
 
     fun stopScene() { sceneJob?.cancel(); sceneJob = null; runningSceneID = null }
 
+    fun restoreBeforeScene() { restorePoint?.let { runScene(it, saveRestorePoint = false) }; restorePoint = null }
+
     // ---- Schedules ----
 
     fun saveSchedule(schedule: SceneSchedule) = update { s ->
@@ -311,20 +368,115 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
 
     fun deleteSchedule(schedule: SceneSchedule) = update { s -> s.copy(schedules = s.schedules.filter { it.id != schedule.id }) }
 
-    /**
-     * ponytail: in-process ticker; it only fires while Luma's process is alive (open, or recently
-     * backgrounded). Upgrade path: exact alarms (SCHEDULE_EXACT_ALARM) + a foreground service.
-     */
-    private suspend fun scheduleTicker() {
+    /** The demo home schedules nothing with AlarmManager; its schedules tick in-app instead. */
+    private suspend fun demoTicker() {
         while (viewModelScope.isActive) {
-            val now = ZonedDateTime.now()
-            for (s in home.schedules.filter { it.shouldRun(now) }) {
-                saveSchedule(s.copy(lastRunMinute = SceneSchedule.minuteKey(now)))
-                home.scenes.firstOrNull { it.id == s.sceneID }?.let { log("Schedule: ${it.name} at %02d:%02d.".format(s.hour, s.minute)); runScene(it) }
+            if (demo) {
+                val now = ZonedDateTime.now()
+                for (s in home.schedules.filter { it.shouldRun(now) }) {
+                    saveSchedule(s.copy(lastRunMinute = SceneSchedule.minuteKey(now)))
+                    home.scenes.firstOrNull { it.id == s.sceneID }?.let { log("Schedule: ${it.name} at %02d:%02d.".format(s.hour, s.minute)); runScene(it) }
+                }
             }
             delay(15_000)
         }
     }
+
+    /** Called by the schedule alarm while the app is alive. */
+    fun runDueSchedules(millis: Long) {
+        if (demo) return
+        val at = java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneId.systemDefault())
+        val due = ScheduleAlarms.due(home, at)
+        val late = System.currentTimeMillis() - millis > ScheduleAlarms.GRACE_MS
+        for (s in due) {
+            saveSchedule(s.copy(lastRunMinute = SceneSchedule.minuteKey(at)))
+            val scene = home.scenes.firstOrNull { it.id == s.sceneID } ?: continue
+            when {
+                late -> log("Missed ${scene.name} at %02d:%02d: Android delivered the alarm late. Allow exact alarms in Automations.".format(s.hour, s.minute), error = true)
+                runningSceneID != null -> log("Skipped ${scene.name}: another scene was running.", error = true)
+                else -> { log("Schedule: ${scene.name} at %02d:%02d.".format(s.hour, s.minute)); runScene(scene) }
+            }
+        }
+        ScheduleAlarms.reschedule(context, home, demo)
+    }
+
+    fun refreshAlarmAccess() { exactAlarms = ScheduleAlarms.canExact(context); ScheduleAlarms.reschedule(context, home, demo) }
+
+    // ---- Floor plans (placing a pin never sends a lighting command) ----
+
+    private fun setPlans(plans: List<com.designxdevelop.luma.core.FloorPlan>) {
+        floorPlans = plans
+        if (!demo) runCatching { FloorPlans.save(context, plans) }.onFailure { message = "Couldn't save the floor plan: ${it.message}" }
+    }
+
+    fun importFloorPlan(name: String, uri: Uri): Boolean = try {
+        val plan = com.designxdevelop.luma.core.FloorPlan(name = name.trim().take(64))
+        FloorPlans.importImage(context, uri, plan.id)
+        setPlans(floorPlans + plan); true
+    } catch (e: Exception) { message = e.message ?: "That image couldn't be imported."; false }
+
+    fun replaceFloorPlanImage(id: String, uri: Uri) = runCatching { FloorPlans.importImage(context, uri, id); floorPlanVersion++ }.onFailure { message = it.message }
+    fun renameFloorPlan(id: String, name: String) = setPlans(floorPlans.map { if (it.id == id) it.copy(name = name.trim().take(64)) else it })
+    fun deleteFloorPlan(id: String) { FloorPlans.image(context, id).delete(); setPlans(floorPlans.filter { it.id != id }) }
+    fun placeLight(deviceID: String, planID: String, x: Double, y: Double) = setPlans(com.designxdevelop.luma.core.FloorPlan.place(floorPlans, deviceID, planID, x, y))
+    fun removeFloorPlanPin(deviceID: String) = setPlans(floorPlans.map { p -> p.copy(pins = p.pins.filter { it.deviceID != deviceID }) })
+
+    // ---- Govee Home account (read-only: rooms, DreamView groups, automations) ----
+
+    private val homeJson get() = File(context.filesDir, "govee-home.json")
+    @kotlinx.serialization.Serializable private data class HomeImport(val groups: List<com.designxdevelop.luma.core.GoveeHomeImport.HomeGroup>, val automations: List<com.designxdevelop.luma.core.GoveeHomeImport.Automation>)
+
+    private fun loadGoveeHome() {
+        val saved = runCatching { LumaJson.decodeFromString(HomeImport.serializer(), homeJson.readText()) }.getOrNull()
+        homeGroups = saved?.groups.orEmpty(); homeAutomations = saved?.automations.orEmpty()
+    }
+
+    private val account get() = com.designxdevelop.luma.core.GoveeAccount(prefs.getString("goveeClientId", null) ?: newClientId())
+    private fun newClientId() = java.util.UUID.randomUUID().toString().replace("-", "").also { prefs.edit().putString("goveeClientId", it).apply() }
+
+    /** Returns true when Govee emailed a code and wants it on the next attempt. The password is never stored. */
+    suspend fun signInGoveeHome(email: String, password: String, code: String?): Boolean {
+        if (demo) { message = "Leave the demo to sign in to Govee Home."; return false }
+        return try {
+            when (val r = account.login(email.trim(), password, code)) {
+                com.designxdevelop.luma.core.GoveeAccount.LoginResult.NeedsCode -> { message = "Govee emailed you a code. Enter it to finish signing in."; true }
+                is com.designxdevelop.luma.core.GoveeAccount.LoginResult.SignedIn -> { KeyStore.save(context, r.token, "govee-home-token"); importGoveeHome(); false }
+            }
+        } catch (e: Exception) { message = e.message; false }
+    }
+
+    val goveeHomeSignedIn: Boolean get() = KeyStore.read(context, "govee-home-token") != null
+    fun signOutGoveeHome() { KeyStore.delete(context, "govee-home-token"); log("Signed out of Govee Home.") }
+
+    /** Reads rooms, groups and automations; a failed group or automation read doesn't fail the room import. */
+    suspend fun importGoveeHome() {
+        val token = KeyStore.read(context, "govee-home-token") ?: return
+        try {
+            val a = account
+            val entries = com.designxdevelop.luma.core.GoveeHomeImport.parse(a.deviceList(token))
+            val unavailable = mutableListOf<String>()
+            val groups = runCatching { com.designxdevelop.luma.core.GoveeHomeImport.parseGroups(a.groups(token)) }.getOrElse { unavailable += "groups"; homeGroups }
+            val autos = runCatching { com.designxdevelop.luma.core.GoveeHomeImport.parseAutomations(a.automations(token)) }.getOrElse { unavailable += "automations"; homeAutomations }
+            homeGroups = groups; homeAutomations = autos
+            homeJson.writeText(LumaJson.encodeToString(HomeImport.serializer(), HomeImport(groups, autos)))
+            homePlan = com.designxdevelop.luma.core.GoveeHomeImport.plan(entries, home.devices).copy(groups = groups, automations = autos, unavailable = unavailable)
+        } catch (e: com.designxdevelop.luma.core.GoveeAccount.SessionExpired) { signOutGoveeHome(); message = e.message }
+        catch (e: Exception) { message = e.message }
+    }
+
+    /** A saved device-list file (no groups or automations). */
+    fun importGoveeHomeFile(uri: Uri) = runCatching {
+        val entries = com.designxdevelop.luma.core.GoveeHomeImport.parse(context.contentResolver.openInputStream(uri)!!.use { it.readBytes() })
+        homePlan = com.designxdevelop.luma.core.GoveeHomeImport.plan(entries, home.devices)
+    }.onFailure { message = it.message }
+
+    fun applyRooms(changes: List<com.designxdevelop.luma.core.GoveeHomeImport.RoomChange>) {
+        update { s -> s.copy(devices = s.devices.map { d -> changes.firstOrNull { it.deviceID == d.id }?.let { d.copy(room = it.goveeRoom) } ?: d }) }
+        homePlan = null
+        log("Applied ${changes.size} rooms from Govee Home.")
+    }
+
+    val homeConflicts get() = com.designxdevelop.luma.core.GoveeHomeImport.conflicts(homeAutomations, home.schedules, home.scenes, home.devices)
 
     // ---- Backup ----
 
@@ -335,6 +487,7 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
 
     fun importBackup(uri: Uri) {
         if (runningSceneID != null) { message = "Stop the running scene before restoring."; return }
+        if (!demo && sync.paired) { message = "Turn schedule sync off before restoring a backup, so restored schedules can't undo changes made on other devices."; return }
         try {
             val bytes = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
             val backup = HomeBackup.decode(bytes)
@@ -352,13 +505,50 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
 
     private fun replace(id: String, change: (LightDevice) -> LightDevice) = update { s -> s.copy(devices = s.devices.map { if (it.id == id) change(it) else it }) }
 
-    private fun update(change: (SavedHome) -> SavedHome) {
+    private fun update(fromRunner: Boolean = false, change: (SavedHome) -> SavedHome) {
+        val before = home
         home = change(home)
-        if (!demo) runCatching {
-            val tmp = File(file.parentFile, "home.json.tmp")
-            tmp.writeText(LumaJson.encodeToString(SavedHome.serializer(), home))
-            tmp.renameTo(file)
-        }.onFailure { log("Couldn't save: ${it.message}", error = true) }
+        if (!demo) runCatching { HomeFile.save(context, home) }.onFailure { log("Couldn't save: ${it.message}", error = true) }
+        if (before.schedules != home.schedules || before.scenes != home.scenes) {
+            ScheduleAlarms.reschedule(context, home, demo)
+            // Edits made here become shared changes; ignore lastRunMinute marks, which the runner doesn't keep.
+            if (!fromRunner && !demo && sync.paired && (before.scenes != home.scenes || before.schedules.map { it.copy(lastRunMinute = null) } != home.schedules.map { it.copy(lastRunMinute = null) })) {
+                sync.reconcile(home.scenes, home.schedules).forEach { log(it, error = true) }
+                viewModelScope.launch { syncNow() }
+            }
+        }
+    }
+
+    // ---- Schedule sync (paired with a computer that runs schedules) ----
+
+    fun pair(code: String) {
+        if (demo) { message = "Leave the demo to pair with a computer."; return }
+        viewModelScope.launch {
+            try {
+                sync.pair(code, home.scenes, home.schedules).forEach { log(it, error = true) }
+                log("Paired with ${sync.saved.runnerName ?: "the runner"}. It runs your schedules; this phone won't.")
+                ScheduleAlarms.reschedule(context, home, demo)
+                syncNow()
+            } catch (e: Exception) { message = e.message }
+            syncStatus = sync.saved
+        }
+    }
+
+    fun unpair() {
+        val disabled = sync.unpair(home.schedules)
+        update { it.copy(schedules = disabled) }
+        syncStatus = sync.saved
+        ScheduleAlarms.reschedule(context, home, demo)
+        log("Schedule sync is off. Schedules here were turned off so they don't also run on the computer; turn on the ones this phone should run.")
+    }
+
+    suspend fun syncNow() {
+        val notices = sync.sync()
+        val (scenes, schedules) = sync.shared(home.scenes, home.schedules)
+        if (scenes != home.scenes || schedules != home.schedules) update(fromRunner = true) { it.copy(scenes = scenes, schedules = schedules) }
+        syncStatus = sync.saved
+        notices.forEach { log(it, error = true) }
+        notices.firstOrNull()?.let { message = it }
     }
 
     fun log(text: String, error: Boolean = false) {

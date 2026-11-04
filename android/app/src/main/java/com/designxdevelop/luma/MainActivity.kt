@@ -63,6 +63,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import java.text.DateFormat
+import kotlinx.coroutines.launch
 import java.util.Date
 
 class MainActivity : ComponentActivity() {
@@ -194,6 +195,10 @@ fun SettingRow(title: String, detail: String? = null, trailing: @Composable () -
 @Composable
 private fun SettingsScreen(store: HomeStore, modifier: Modifier) {
     var keyDialog by remember { mutableStateOf(false) }
+    var pairDialog by remember { mutableStateOf(false) }
+    var syncScreen by remember { mutableStateOf(false) }
+    var bluetoothScreen by remember { mutableStateOf(false) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { it?.let(store::exportBackup) }
     val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(store::importBackup) }
     val time = DateFormat.getTimeInstance(DateFormat.SHORT)
@@ -207,7 +212,7 @@ private fun SettingsScreen(store: HomeStore, modifier: Modifier) {
                 if (store.hasKey && !store.demo) SettingRow("Remove API key", "Lights found on the local network keep working.") { TextButton(store::removeKey) { Text("Remove", color = MaterialTheme.colorScheme.error) } }
                 HorizontalDivider(Modifier.padding(horizontal = 16.dp))
                 val onLan = store.devices.count { it.ip != null }
-                SettingRow("Local network", if (store.demo) "Disabled in the demo home" else "$onLan lights on this network" + (store.lastScan?.let { " · scanned ${time.format(Date(it))}" } ?: "")) {
+                SettingRow("Local network", if (store.demo) "Disabled in the demo home" else "$onLan ${if (onLan == 1) "light" else "lights"} on this network" + (store.lastScan?.let { " · scanned ${time.format(Date(it))}" } ?: "")) {
                     if (!store.demo) TextButton(store::refresh) { Text("Scan now") }
                 }
                 HorizontalDivider(Modifier.padding(horizontal = 16.dp))
@@ -216,6 +221,31 @@ private fun SettingsScreen(store: HomeStore, modifier: Modifier) {
                 }
             }
         }
+        item {
+            Section("Sync & Bluetooth") {
+                SettingRow("Sync lights to a TV or music", "Camera, or microphone. Uses lights on this Wi-Fi.") { TextButton({ syncScreen = true }) { Text("Open") } }
+                SettingRow("Bluetooth lights", "Govee TV backlights, controlled directly over Bluetooth.") { TextButton({ bluetoothScreen = true }) { Text("Open") } }
+            }
+        }
+        item {
+            Section("Schedule sync") {
+                val sync = store.syncStatus
+                if (sync.paired) {
+                    SettingRow("Paired with ${sync.runnerName ?: sync.host}", buildString {
+                        append("Schedules run on that computer; this phone shows and edits them.")
+                        sync.lastSync?.let { append(" Synced ${time.format(Date(it))}.") }
+                        sync.lastError?.let { append(" $it") }
+                    }) { TextButton({ scope.launch { store.syncNow() } }) { Text("Sync now") } }
+                    sync.runs.lastOrNull()?.let { r -> SettingRow("Last run: ${r.status}", listOfNotNull(time.format(Date(r.at)), r.detail).joinToString(" · ")) }
+                    SettingRow("Turn off", "Schedules here are turned off so nothing runs twice.") { TextButton(store::unpair) { Text("Turn off", color = MaterialTheme.colorScheme.error) } }
+                } else {
+                    SettingRow("Pair with a computer", if (store.demo) "Not available in the demo home" else "A Mac or PC running Luma can run schedules for this phone, even when the phone is off.") {
+                        if (!store.demo) TextButton({ pairDialog = true }) { Text("Pair") }
+                    }
+                }
+            }
+        }
+        item { GoveeHomeSection(store) }
         item {
             Section("Backup") {
                 SettingRow("Export home", "Scenes, schedules, names and rooms. No keys.") { TextButton({ export.launch("Luma backup.json") }) { Text("Export") } }
@@ -235,6 +265,20 @@ private fun SettingsScreen(store: HomeStore, modifier: Modifier) {
             }
             Spacer(Modifier.height(24.dp))
         }
+    }
+    if (syncScreen) SyncScreen(store) { syncScreen = false }
+    if (bluetoothScreen) BluetoothScreen { bluetoothScreen = false }
+    if (pairDialog) {
+        var code by remember { mutableStateOf("") }
+        AlertDialog(onDismissRequest = { pairDialog = false }, title = { Text("Pair with a computer") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("On the computer, open Luma → Settings → Schedule sync and copy its pairing code. The phone and computer must be on the same network.", style = MaterialTheme.typography.bodyMedium)
+                    OutlinedTextField(code, { code = it }, label = { Text("Pairing code") }, placeholder = { Text("luma1/…") }, minLines = 2)
+                }
+            },
+            confirmButton = { TextButton({ store.pair(code); pairDialog = false }, enabled = code.isNotBlank()) { Text("Pair") } },
+            dismissButton = { TextButton({ pairDialog = false }) { Text("Cancel") } })
     }
     if (keyDialog) {
         var key by remember { mutableStateOf("") }
