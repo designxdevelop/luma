@@ -156,6 +156,7 @@ fun AutomationsScreen(store: HomeStore, modifier: Modifier) {
                 androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { store.refreshAlarmAccess(); onPauseOrDispose { } }
                 when {
                     store.demo -> Banner("Demo schedules run only while Luma is open.")
+                    store.syncStatus.paired -> Banner("These schedules run on ${store.syncStatus.runnerName ?: "the paired computer"}. Changes here sync to it.")
                     store.exactAlarms -> Banner("Schedules run on time, even when Luma is closed. Lights need to be on this Wi-Fi, or reachable through Govee cloud with your API key.")
                     else -> Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
                         Banner("Allow alarms so schedules run on time. Without it, Android can deliver them late and Luma skips runs more than 2 minutes late.")
@@ -166,6 +167,9 @@ fun AutomationsScreen(store: HomeStore, modifier: Modifier) {
                 }
             }
             if (scenes.isEmpty()) item { Banner("Save a scene first, then schedule it.") }
+            store.homeConflicts.takeIf { it.isNotEmpty() }?.let { cs ->
+                item { Banner("Possible conflict: " + cs.joinToString("; ") { "Govee Home's “${it.automation}” also changes ${it.light} at the same time" } + ". Turn one off so they don't fight.") }
+            }
             items(store.home.schedules, key = { it.id }) { s ->
                 val scene = scenes.firstOrNull { it.id == s.sceneID }
                 Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).clickable { editing = s }, colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainer)) {
@@ -175,6 +179,13 @@ fun AutomationsScreen(store: HomeStore, modifier: Modifier) {
                             Text("${scene?.name ?: "Missing scene"} · ${daysText(s.weekdays)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Switch(s.enabled, { store.saveSchedule(s.copy(enabled = it)) }, Modifier.padding(start = 8.dp))
+                    }
+                }
+            }
+            if (store.homeAutomations.isNotEmpty()) item {
+                Section("In Govee Home (read-only)") {
+                    store.homeAutomations.forEach { a ->
+                        SettingRow(a.name, (a.times.joinToString(", ") { "%02d:%02d".format(it.hour, it.minute) } + " · " + (if (a.repeatDays.toSet() == (1..7).toSet()) "Every day" else "${a.repeatDays.size} days") + " · " + a.targets.joinToString(", ") { it.name }) + if (a.enabled) "" else " · Off")
                     }
                 }
             }
