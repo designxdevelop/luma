@@ -191,3 +191,58 @@ object Readings {
         }
     }
 }
+
+/**
+ * Model for painting `segmentedColorRgb` / `segmentedBrightness` (port of SegmentPaint.swift):
+ * reads the advertised STRUCT schema and turns a painting into the fewest validated commands.
+ */
+data class SegmentPaint(val type: String, val instance: String, val indexes: List<Int>, val valueField: String, val valueRange: IntRange, val perCommand: Int?) {
+    val isColor: Boolean get() = valueField == "rgb"
+
+    /** One command per distinct value, segments ascending, split at the per-command limit, ordered by first segment. */
+    fun commands(paint: Map<Int, Int>): List<CapabilityCommand> {
+        val allowed = indexes.toSet()
+        val groups = HashMap<Int, MutableList<Int>>()
+        for ((index, value) in paint) {
+            if (index !in allowed) throw LumaException("Segment $index isn't on this light.")
+            if (value !in valueRange) throw LumaException("$valueField must be ${valueRange.first}…${valueRange.last}.")
+            groups.getOrPut(value) { mutableListOf() } += index
+        }
+        return groups.flatMap { (value, members) ->
+            members.sorted().chunked(perCommand ?: members.size).map { part ->
+                part.first() to CapabilityCommand(type, instance, kotlinx.serialization.json.buildJsonObject {
+                    put("segment", JsonArray(part.map(::JsonPrimitive))); put(valueField, JsonPrimitive(value))
+                })
+            }
+        }.sortedBy { it.first }.map { it.second }
+    }
+
+    companion object {
+        val INSTANCES = listOf("segmentedColorRgb", "segmentedBrightness")
+        private const val MAX_SEGMENTS = 256
+
+        fun all(device: LightDevice) = INSTANCES.mapNotNull { i -> of(device.capabilities.firstOrNull { it.instance == i }) }
+
+        /** Null when the capability isn't a paintable segment schema (including a required field the painter can't fill). */
+        fun of(cap: Capability?): SegmentPaint? {
+            val p = cap?.parameters ?: return null
+            if (cap.instance !in INSTANCES || p["dataType"].str?.uppercase() != "STRUCT") return null
+            val fields = p["fields"].arr ?: return null
+            val segment = fields.firstOrNull { it["fieldName"].str == "segment" } ?: return null
+            val value = fields.firstOrNull { it["fieldName"].str.let { n -> n != null && n != "segment" } && it["dataType"].str?.uppercase() == "INTEGER" } ?: return null
+            if (fields.any { it["required"].bool == true && it !== segment && it !== value }) return null
+            val lo = int(segment["elementRange"]["min"])
+            val hi = int(segment["elementRange"]["max"])
+            val indexes = if (lo != null && hi != null && lo >= 0 && hi >= lo && hi - lo < MAX_SEGMENTS) (lo..hi).toList()
+                else segment["options"].arr.orEmpty().mapNotNull { int(it["value"]) }.distinct().sorted().take(MAX_SEGMENTS)
+            val field = value["fieldName"].str ?: return null
+            if (indexes.isEmpty()) return null
+            val fallback = if (field == "rgb") 0..0xFFFFFF else 0..100
+            val min = int(value["range"]["min"]) ?: fallback.first
+            val max = int(value["range"]["max"]) ?: fallback.last
+            return SegmentPaint(cap.type, cap.instance, indexes, field, if (min <= max) min..max else fallback, int(segment["size"]["max"])?.takeIf { it > 0 })
+        }
+
+        private fun int(v: JsonElement?): Int? = v.num?.takeIf { it.isFinite() && round(it) == it && abs(it) <= Int.MAX_VALUE }?.toInt()
+    }
+}

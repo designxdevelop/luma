@@ -140,3 +140,20 @@ data class SavedHome(
     val scenes: List<LightScene> = emptyList(),
     val schedules: List<SceneSchedule> = emptyList(),
 )
+
+/** A light's pin; coordinates are fractions of the image itself, independent of zoom or screen size (FloorPlan.swift). */
+@Serializable
+data class FloorPlanPin(val deviceID: String, val x: Double, val y: Double) {
+    init { if (deviceID.isEmpty() || x !in 0.0..1.0 || y !in 0.0..1.0) throw LumaException("Choose a light and a position inside the floor plan.") }
+}
+
+@Serializable
+data class FloorPlan(val id: String = newId(), val name: String, val pins: List<FloorPlanPin> = emptyList()) {
+    companion object {
+        /** A light has one pin: placing it removes its pin from every other floor. */
+        fun place(plans: List<FloorPlan>, deviceID: String, planID: String, x: Double, y: Double): List<FloorPlan> {
+            val pin = FloorPlanPin(deviceID, x.coerceIn(0.0, 1.0), y.coerceIn(0.0, 1.0))
+            return plans.map { p -> p.copy(pins = p.pins.filter { it.deviceID != deviceID } + listOfNotNull(pin.takeIf { p.id == planID })) }
+        }
+    }
+}

@@ -78,6 +78,26 @@ class CoreTest {
         CommandValidation.validate(options.first().command, strip)
     }
 
+    @Test fun segmentPaintGroupsByValueAndValidates() {
+        val strip = Demo.home().devices.first { it.id == "demo-strip" }
+        val paint = SegmentPaint.all(strip).single()
+        assertEquals((0..14).toList(), paint.indexes); assertEquals(15, paint.perCommand); assertTrue(paint.isColor)
+        val commands = paint.commands(mapOf(3 to 0xFF0000, 0 to 0x00FF00, 1 to 0xFF0000))
+        assertEquals(listOf("""{"segment":[0],"rgb":65280}""", """{"segment":[1,3],"rgb":16711680}"""), commands.map { it.value.toString() })
+        commands.forEach { CommandValidation.validate(it, strip) }
+        assertThrows(LumaException::class.java) { paint.commands(mapOf(15 to 1)) }
+        assertEquals(listOf(listOf(0, 1), listOf(2)), paint.copy(perCommand = 2).commands((0..2).associateWith { 5 }).map { c -> c.value["segment"].arr!!.map { it.num!!.toInt() } })
+    }
+
+    @Test fun floorPlanPinsAreOnePerLight() {
+        val plans = listOf(FloorPlan(id = "A", name = "Ground"), FloorPlan(id = "B", name = "Upstairs"))
+        val placed = FloorPlan.place(FloorPlan.place(plans, "lamp", "A", 0.2, 0.3), "lamp", "B", 1.5, 0.5)
+        assertEquals(emptyList<FloorPlanPin>(), placed[0].pins)
+        assertEquals(FloorPlanPin("lamp", 1.0, 0.5), placed[1].pins.single())
+        assertThrows(LumaException::class.java) { FloorPlanPin("lamp", -0.1, 0.5) }
+        assertThrows(Exception::class.java) { LumaJson.decodeFromString(FloorPlanPin.serializer(), """{"deviceID":"x","x":2,"y":0}""") }
+    }
+
     @Test fun readings() {
         val state = LumaJson.parseToJsonElement("""{"capabilities":[{"instance":"sensorTemperature","state":{"value":21.456}},{"instance":"powerSwitch","state":{"value":1}},{"instance":"filterLifeTime","state":{"value":80}}]}""")
         val caps = listOf(Capability("t", "sensorTemperature", buildJsonObject { put("unit", "unit.temperature.celsius") }), Capability("t", "filterLifeTime", buildJsonObject { put("unit", "unit.percent") }))
