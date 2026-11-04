@@ -19,7 +19,10 @@ import { GoveeAccount, SessionExpired, findConflicts, parseAutomations, parseDev
 import { GoveeLan, type LanPacket } from '../core/lan';
 import { WebhookServer } from '../core/http';
 import { createApiHandler } from '../core/api';
-import { HomeStorage, emptyHome, type SecretStore } from './storage';
+import { HomeStorage, dreamViewDrafts, emptyHome, type SecretStore } from './storage';
+import { FloorPlanStore } from './floor-plans';
+import { BluetoothController } from './bluetooth';
+import { dreamViewMemberLimit } from '../shared/library';
 import { demoDevices, demoEffects, demoReadings, demoScenes } from './demo';
 import { REGIONS } from '../shared/sync-math';
 import { SyncController } from './sync';
@@ -53,6 +56,10 @@ export interface HomeOptions {
   scheduleSyncOptions?: Partial<ScheduleSyncDeps>;
   /** Doorbell alert clock and relay fetch (tests). */
   doorbellOptions?: Pick<ConstructorParameters<typeof DoorbellController>[0], 'clock' | 'fetch'>;
+  /** Floor plans (main passes a store with an image encoder); in memory without images when omitted. */
+  floorPlans?: FloorPlanStore;
+  /** Sends an event to the renderer (Bluetooth writes); undefined in tests and headless use. */
+  postToRenderer?(channel: string, payload?: unknown): void;
 }
 
 export class Home {
@@ -86,14 +93,17 @@ export class Home {
   private readonly readings = new Map<string, DeviceReading[]>();
   /** Confirmed state of the last scene's lights, taken before its first write. One level, never persisted. */
   private restorePoint?: LightScene;
+  private readonly floorPlans: FloorPlanStore;
   /** Last Govee Home import, in memory only (re-read with the saved token). */
   private goveeHome: Omit<GoveeHomeView, 'available' | 'signedIn' | 'conflicts' | 'firmware'> & { entries: ImportEntry[] } = { awaitingCode: false, busy: false, groups: [], automations: [], unavailable: [], entries: [] };
   readonly sync: SyncController;
   readonly scheduleSync: ScheduleSync;
   readonly doorbell: DoorbellController;
+  readonly bluetooth: BluetoothController;
 
   constructor(private readonly options: HomeOptions) {
     this.demo = options.demo;
+    this.floorPlans = options.floorPlans ?? new FloorPlanStore(undefined, () => undefined);
     const transport: ControlTransport = {
       send: (device, command, signal) => this.transmit(device, command, signal),
       read: async (device, command) => {
@@ -155,6 +165,15 @@ export class Home {
       log: (text, isError) => this.log(text, isError),
       changed: () => this.emit(),
       ...options.scheduleSyncOptions,
+    });
+    this.bluetooth = new BluetoothController({
+      emit: () => this.emit(),
+      post: options.postToRenderer ?? (() => {}),
+      supported: !options.demo && !!options.postToRenderer,
+      accountName: (localName) => {
+        const entry = this.goveeHome.entries.find((e) => e.bleName?.toLowerCase() === localName.toLowerCase());
+        return entry && this.home.devices.find((d) => d.id.toLowerCase() === entry.device.toLowerCase())?.name;
+      },
     });
     this.doorbell = new DoorbellController({
       demo: this.demo, folder: options.storage?.folder, secrets: options.secrets,
@@ -246,7 +265,41 @@ export class Home {
       scheduleSync: this.scheduleSync.view(),
       doorbell: this.doorbell.view(),
       restorePoint: this.restorePoint?.name,
+      floorPlans: this.floorPlans.list(),
+      floorPlansWritable: this.floorPlans.writable && (this.canSave || this.demo),
+      dreamViewDrafts: this.home.dreamViewDrafts ?? {},
+      bluetooth: this.bluetooth.view(),
     };
+  }
+
+  // ---------- floor plans ----------
+
+  /** Mutates floor plans and tells the renderer. Every change is validated by the store. */
+  floorPlan<T>(change: (store: FloorPlanStore) => T): T {
+    const result = change(this.floorPlans);
+    this.emit();
+    return result;
+  }
+
+  floorPlanPlace(id: string, deviceID: string, x: unknown, y: unknown): void {
+    this.findDevice(deviceID);
+    this.floorPlan((f) => f.place(id, deviceID, x, y));
+  }
+
+  /** Local partner draft for a DreamView main light, shape-checked like a restored backup. Never sent. */
+  saveDreamViewDraft(lightID: string, input: unknown): void {
+    const light = this.findDevice(lightID);
+    let draft;
+    try { draft = dreamViewDrafts({ [lightID]: input })[lightID]!; } catch { throw new LumaError('Screen areas are 1–10, for at most 64 lights.'); }
+    const limit = dreamViewMemberLimit(light.sku);
+    if (limit !== undefined && draft.members.length > limit) throw new LumaError(`${light.sku} groups hold up to ${limit} lights.`);
+    const ids = draft.members.map((m) => m.deviceID);
+    if (new Set(ids).size !== ids.length || ids.includes(lightID) || draft.members.some((m) => m.areas.length === 0)) throw new LumaError('Each partner light needs at least one screen area.');
+    for (const m of draft.members) { this.findDevice(m.deviceID); m.areas = [...new Set(m.areas)].sort((a, b) => a - b); }
+    const drafts = { ...(this.home.dreamViewDrafts ?? {}) };
+    if (draft.members.length) drafts[lightID] = draft; else delete drafts[lightID];
+    this.home.dreamViewDrafts = drafts;
+    this.schedulePersist(); this.emit();
   }
 
   private hasSecret(name: string): boolean {
@@ -894,6 +947,7 @@ export class Home {
   }
 
   async shutdown(): Promise<void> {
+    this.bluetooth.disconnect(undefined);
     await this.doorbell.shutdown();
     clearInterval(this.scheduleTimer);
     await this.scheduleSync.stop();

@@ -97,7 +97,7 @@ export class GoveeAccount {
 
 // ---------- parsing (shapes per goveetl @ 3890402 and a live account, 2026-11-02) ----------
 
-export interface ImportEntry { device: string; sku: string; name: string; room?: string; firmware?: string }
+export interface ImportEntry { device: string; sku: string; name: string; room?: string; firmware?: string; bleName?: string }
 
 const clean = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 64) : undefined);
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
@@ -119,8 +119,13 @@ export function parseDeviceList(root: JSONValue): ImportEntry[] {
   return body.devices.flatMap((row) => {
     if (!isObject(row) || !clean(row.device) || !clean(row.sku)) return [];
     const room = num(row.groupId) !== undefined ? rooms.get(row.groupId as number) : undefined;
-    const firmware = clean(row.versionSoft);
-    return [{ device: clean(row.device)!, sku: clean(row.sku)!, name: clean(row.deviceName) ?? clean(row.sku)!, ...(room ? { room } : {}), ...(firmware ? { firmware } : {}) }];
+    // deviceExt.deviceSettings arrives as an object or a JSON string (native `nested`).
+    const ext = isObject(row.deviceExt) ? row.deviceExt.deviceSettings : undefined;
+    let settings: JSONValue | undefined = ext;
+    if (typeof ext === 'string') { try { settings = JSON.parse(ext) as JSONValue; } catch { settings = undefined; } }
+    const set = isObject(settings) ? settings : {};
+    const firmware = clean(row.versionSoft) ?? clean(set.wifiSoftVersion), bleName = clean(set.bleName);
+    return [{ device: clean(row.device)!, sku: clean(row.sku)!, name: clean(row.deviceName) ?? clean(row.sku)!, ...(room ? { room } : {}), ...(firmware ? { firmware } : {}), ...(bleName ? { bleName } : {}) }];
   });
 }
 

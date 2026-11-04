@@ -152,6 +152,7 @@ const PATHS: Record<string, string> = {
   wifi: 'M2 9a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5v.01',
   power: 'M12 3v8M6.3 6.3a8 8 0 1 0 11.4 0',
   screen: 'M3 4h18v12H3zM8 20h8M12 16v4',
+  map: 'M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2zM9 4v14M15 6v14',
   pause: 'M8 5v14M16 5v14',
 };
 export const SCENE_ICONS = ['sparkles', 'moon', 'sun', 'sofa', 'bed', 'book', 'film', 'party', 'leaf', 'coffee', 'bolt', 'heart'];
