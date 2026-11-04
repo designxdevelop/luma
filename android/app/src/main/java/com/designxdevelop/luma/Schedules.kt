@@ -40,10 +40,10 @@ object ScheduleAlarms {
     fun next(home: SavedHome, after: ZonedDateTime): ZonedDateTime? =
         home.schedules.filter { s -> home.scenes.any { it.id == s.sceneID } }.mapNotNull { it.next(after) }.minOrNull()
 
-    /** Replaces the pending alarm. The demo home never schedules alarms (its ticker runs in-app). */
+    /** Replaces the pending alarm. The demo home (in-app ticker) and a paired phone (the runner runs them) arm none. */
     fun reschedule(context: Context, home: SavedHome, demo: Boolean) {
         val alarms = context.getSystemService(AlarmManager::class.java)
-        val at = if (demo) null else next(home, ZonedDateTime.now())
+        val at = if (demo || ScheduleSync.paired(context)) null else next(home, ZonedDateTime.now())
         val intent = Intent(context, ScheduleReceiver::class.java).setAction(ACTION).putExtra(EXTRA_AT, at?.toInstant()?.toEpochMilli() ?: 0L)
         val pending = PendingIntent.getBroadcast(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         if (at == null) { alarms.cancel(pending); return }

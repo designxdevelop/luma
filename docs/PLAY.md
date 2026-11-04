@@ -48,6 +48,15 @@ If this developer account is a personal account created after November 13, 2023,
 
 The app targets API 36, which meets Play's target-API requirement for new apps in 2026. Check Play Console's warning banner if that changes.
 
+## Wear OS app
+
+`./gradlew bundleRelease` also builds `android/wear/build/outputs/bundle/release/wear-release.aab`, with the same package and the same `versionName` 1.0. To ship it:
+
+1. In Play Console → **Test and release → Advanced settings → Form factors**, add **Wear OS**.
+2. Upload this AAB to the Wear OS internal track. It's signed with the same upload key. Its `versionCode` is automatically the phone's plus 100000, so the two bundles never collide.
+
+The CI workflow uploads only the phone bundle.
+
 ## 4. Optional: upload from CI
 
 `.github/workflows/android-release.yml` is a manual workflow (**Actions → Android release → Run workflow**). It builds a signed AAB, with `versionCode` set to the run number, and uploads it to the internal track. It skips the upload unless these repository secrets exist:
@@ -84,7 +93,23 @@ Good to know: Android can stop apps in the background, so a schedule can be miss
 
 **Category:** Tools. **Contact email / website:** https://luma.designxdevelop.com/support
 
-## Data safety (draft; matches the App Store label "Data Not Collected")
+## Data safety (draft; the answers are your decision)
+
+Features that send or capture data, and how each is handled:
+
+| Feature | What happens | Likely answer |
+| --- | --- | --- |
+| Govee cloud (optional API key) | The key, light IDs and commands go to `openapi.api.govee.com` at your request. The key is stored encrypted on the phone. | Sent to a service the user chose; not shared or sold |
+| Govee Home sign-in (optional) | Your email and password go to `app2.govee.com` to read rooms, groups and automations. The password isn't stored; the session token is sealed on the phone. | **Personal info → Email address**: collected, not shared, optional, for app functionality |
+| Camera (Screen Sync) | Frames are reduced to a color grid in memory and never saved or sent. | Not collected (processed only on the device) |
+| Microphone (Audio Sync) | Reduced to loudness and 8 levels in memory; no audio is kept or sent. | Not collected (processed only on the device) |
+| Bluetooth scan | Finds Govee TV backlights. `neverForLocation` on Android 12+; Android 11 and earlier require location permission to scan, and no location is read. | Not collected |
+| Schedule sync | Scenes and schedules go only to your own computer on your network, over pinned TLS. | Not collected (no third party) |
+| Exact alarms | `SCHEDULE_EXACT_ALARM` runs schedules on time. | Not a data type |
+
+The App Store label is "Data Not Collected". With Govee Home sign-in on Android, answering **Email address** as collected (optional) is the safer choice. Also declare the `SCHEDULE_EXACT_ALARM` use in Play Console's exact-alarm declaration, if it asks.
+
+### Earlier draft
 
 - **Does your app collect or share any of the required user data types?** No.
 - **Rationale to check:**

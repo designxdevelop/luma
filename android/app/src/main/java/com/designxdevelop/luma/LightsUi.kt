@@ -69,6 +69,9 @@ import com.designxdevelop.luma.core.DreamView
 import com.designxdevelop.luma.core.LightDevice
 import com.designxdevelop.luma.core.SceneKind
 import com.designxdevelop.luma.core.SceneLibrary
+import com.designxdevelop.luma.core.SegmentPaint
+import com.designxdevelop.luma.core.LightScene
+import com.designxdevelop.luma.core.SceneStep
 
 val ColorPresets = listOf("Red" to 0xFF3B30, "Orange" to 0xFF9500, "Yellow" to 0xFFD60A, "Green" to 0x34C759, "Teal" to 0x00C7BE, "Blue" to 0x0A84FF, "Purple" to 0xAF52DE, "Pink" to 0xFF2D95)
 val WhitePresets = listOf("Warm" to 2700, "Neutral" to 4000, "Daylight" to 6500)
@@ -104,6 +107,7 @@ fun HomeScreen(store: HomeStore, modifier: Modifier) {
     var renaming by remember { mutableStateOf<LightDevice?>(null) }
     var moving by remember { mutableStateOf<LightDevice?>(null) }
     val on = store.devices.count { it.isLight && it.power == true }
+    var planMode by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
     LazyColumn(modifier.fillMaxSize()) {
         item {
             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 20.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -115,6 +119,12 @@ fun HomeScreen(store: HomeStore, modifier: Modifier) {
             }
         }
         if (store.demo) item { Banner("Demo home: sample lights. Nothing real is controlled.") }
+        if (store.devices.isNotEmpty()) item {
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+                listOf("Rooms", "Plan").forEachIndexed { i, label -> SegmentedButton((i == 1) == planMode, { planMode = i == 1 }, SegmentedButtonDefaults.itemShape(i, 2)) { Text(label) } }
+            }
+        }
+        if (planMode) item { FloorPlanView(store) { sheetFor = it } }
         if (store.loading) item { LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) }
         if (store.devices.isEmpty()) item {
             Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -124,7 +134,7 @@ fun HomeScreen(store: HomeStore, modifier: Modifier) {
                 OutlinedButton(store::refresh) { Text("Scan again") }
             }
         }
-        items(store.rooms, key = { it.first }) { (room, lights) ->
+        if (!planMode) items(store.rooms, key = { it.first }) { (room, lights) ->
             val roomLights = lights.filter { it.isLight }
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -224,9 +234,13 @@ private fun LightSheet(store: HomeStore, d: LightDevice, onRename: (LightDevice)
             if (color && (mode == 0 || !white)) ColorPicker(d) { store.perform(CapabilityCommand.rgb(it), listOf(d.id)) }
             if (white && (mode == 1 || !color)) WhitePicker(d.colorTemperature, store.kelvinRange(d)) { store.setKelvin(it, listOf(d.id)) }
             HorizontalDivider()
+            SegmentPaint.all(d).takeIf { it.isNotEmpty() }?.let { SegmentPainter(store, d, it); HorizontalDivider() }
             if (SceneLibrary.advertisesScenes(d)) SettingRowCompact("Effects", "${SceneLibrary.options(d).size} Govee scenes") { TextButton({ effects = true; if (SceneLibrary.options(d).isEmpty()) store.loadEffects(d) }) { Text("Browse") } }
             DreamView.capability(d)?.let {
-                SettingRowCompact("DreamView", "Starts the sync group set up in Govee Home") { Switch(d.dreamView == true, { v -> store.setDreamView(d, v) }) }
+                val group = store.homeGroups.firstOrNull { it.isDreamView && it.mainDevice.equals(d.id, ignoreCase = true) }
+                SettingRowCompact("DreamView", group?.let { g -> "${g.name}" + (g.reportedLightCount?.let { " · $it lights" } ?: "") + ". Set members in Govee Home." } ?: "Starts the sync group set up in Govee Home") {
+                    Switch(d.dreamView == true, { v -> store.setDreamView(d, v) })
+                }
             }
             store.readings[d.id]?.takeIf { it.isNotEmpty() }?.let { values ->
                 Text("Readings", style = MaterialTheme.typography.labelLarge)
@@ -365,4 +379,59 @@ private fun MoveDialog(d: LightDevice, rooms: List<String>, onMove: (String) -> 
         },
         confirmButton = { TextButton({ onMove(newRoom); onDismiss() }, enabled = newRoom.isNotBlank()) { Text("Move") } },
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } })
+}
+
+/** Paints RGBIC segments locally, then sends one command per value in segment order (SegmentPainterCard.swift). */
+@Composable
+private fun SegmentPainter(store: HomeStore, d: LightDevice, schemas: List<SegmentPaint>) {
+    var which by remember(d.id) { mutableStateOf(0) }
+    val schema = schemas[which.coerceIn(schemas.indices)]
+    var paint by remember(d.id, schema.instance) { mutableStateOf(mapOf<Int, Int>()) }
+    var selected by remember(d.id, schema.instance) { mutableStateOf(setOf<Int>()) }
+    var level by remember { mutableFloatStateOf(60f) }
+    Text("Segment painter · ${paint.size} of ${schema.indexes.size} painted", style = MaterialTheme.typography.labelLarge)
+    if (schemas.size > 1) SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        schemas.forEachIndexed { i, sc -> SegmentedButton(which == i, { which = i }, SegmentedButtonDefaults.itemShape(i, schemas.size)) { Text(if (sc.isColor) "Color" else "Brightness") } }
+    }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        schema.indexes.forEach { i ->
+            val v = paint[i]
+            val on = i in selected
+            val bg = when { v == null -> MaterialTheme.colorScheme.surfaceContainerHigh; schema.isColor -> rgbColor(v); else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.2f + 0.8f * v / maxOf(1, schema.valueRange.last)) }
+            Box(Modifier.size(40.dp).background(bg, RoundedCornerShape(6.dp))
+                .border(if (on) 2.dp else 1.dp, if (on) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(6.dp))
+                .clickable { selected = if (on) selected - i else selected + i }
+                .semantics { contentDescription = "Segment ${i + 1}" + (if (on) ", selected" else "") }, contentAlignment = Alignment.Center) {
+                Text("${i + 1}", style = MaterialTheme.typography.labelSmall, color = if (v != null && schema.isColor && rgbColor(v).luminance() < 0.45f) Color.White else MaterialTheme.colorScheme.onSurface)
+            }
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        TextButton({ selected = schema.indexes.toSet() }) { Text("All") }
+        TextButton({ selected = schema.indexes.filterIndexed { n, _ -> n % 2 == 0 }.toSet() }) { Text("Every other") }
+        TextButton({ selected = emptySet() }, enabled = selected.isNotEmpty()) { Text("None") }
+    }
+    if (schema.isColor) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            ColorPresets.forEach { (name, rgb) ->
+                Box(Modifier.size(40.dp).background(rgbColor(rgb), CircleShape).clickable(enabled = selected.isNotEmpty(), onClickLabel = "Paint $name") { paint = paint + selected.associateWith { rgb } }
+                    .semantics { contentDescription = "Paint $name" })
+            }
+            OutlinedButton({
+                val picked = schema.indexes.filter { it in selected }
+                paint = paint + picked.mapIndexed { n, i -> i to (android.graphics.Color.HSVToColor(floatArrayOf(360f * n / picked.size, 1f, 1f)) and 0xFFFFFF) }
+            }, enabled = selected.size > 1) { Text("Rainbow") }
+        }
+    } else Row(verticalAlignment = Alignment.CenterVertically) {
+        Slider(level, { level = it }, Modifier.weight(1f), valueRange = schema.valueRange.first.toFloat()..schema.valueRange.last.toFloat())
+        TextButton({ paint = paint + selected.associateWith { level.toInt() } }, enabled = selected.isNotEmpty()) { Text("Paint ${level.toInt()}%") }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        androidx.compose.material3.Button({ runCatching { schema.commands(paint) }.onSuccess { store.perform(it, d) }.onFailure { store.message = it.message } }, enabled = paint.isNotEmpty()) { Text("Apply") }
+        OutlinedButton({
+            runCatching { schema.commands(paint) }.onSuccess { cmds -> store.saveScene(LightScene(name = "${d.displayName} segments", symbol = "paintpalette", steps = cmds.map { SceneStep(deviceID = d.id, command = it) })) }
+        }, enabled = paint.isNotEmpty()) { Text("Save as scene") }
+        TextButton({ paint = emptyMap(); selected = emptySet() }, enabled = paint.isNotEmpty()) { Text("Clear") }
+    }
+    Text("Segments sharing a value are sent as one command, in segment order.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
