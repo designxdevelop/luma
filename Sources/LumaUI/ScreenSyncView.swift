@@ -11,6 +11,7 @@ struct ScreenSyncView: View {
     let sync: ScreenSync
 
     private static let privacySettings = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+    private static let cameraSettings = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")!
 
     var body: some View {
         ScrollView {
@@ -24,7 +25,7 @@ struct ScreenSyncView: View {
                 if sync.isActive { statsRow }
                 lightsSection
                 if audio { audioTuningSection } else { tuningSection }
-            }.pagePadding().frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)
+            }.pagePadding().frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -35,7 +36,7 @@ struct ScreenSyncView: View {
             Text("Screen").tag(ScreenSync.Mode.screen)
             Text("Audio").tag(ScreenSync.Mode.audio)
         }
-        .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 260)
+        .pickerStyle(.segmented).labelsHidden().fixedSize()
         .disabled(sync.isActive)
         .accessibilityLabel("Follow screen or audio")
         .help(sync.isActive ? "Stop first to switch between Screen and Audio." : "Choose whether lights follow the screen or audio.")
@@ -46,8 +47,10 @@ struct ScreenSyncView: View {
     @ViewBuilder private var actions: some View {
         switch sync.phase {
         case .idle where sync.source == nil:
+            cameraMenu
             Button(audio ? Copy.chooseAudio : store.demo ? "Use Sample Video" : Copy.choose) { sync.chooseSource() }.buttonStyle(.borderedProminent)
         case .idle:
+            cameraMenu
             Button("Change…") { sync.chooseSource() }
             Button("Start") { Task { await sync.start() } }.buttonStyle(.borderedProminent)
         case .starting:
@@ -60,6 +63,22 @@ struct ScreenSyncView: View {
             Button("Stop") { sync.stop() }
             Button("Resume") { Task { await sync.start() } }.buttonStyle(.borderedProminent)
         }
+    }
+
+    /// A camera aimed at the TV follows DRM video that screen capture sees as black.
+    @ViewBuilder private var cameraMenu: some View {
+        #if os(macOS)
+        if !audio {
+            Menu("Use Camera…") {
+                // ponytail: re-listed on each idle render, cheap; cache if it ever shows up in profiles.
+                let cameras = ScreenSource.cameras
+                ForEach(cameras.indices, id: \.self) { i in Button(cameras[i].name) { sync.useCamera(cameras[i]) } }
+                if cameras.isEmpty { Text("No camera found") }
+            }
+            .fixedSize()
+            .help("Follow a TV through a webcam or Continuity Camera, for Netflix and other protected video that screen capture sees as black.")
+        }
+        #endif
     }
 
     // MARK: Source and status
@@ -96,10 +115,16 @@ struct ScreenSyncView: View {
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) }
                     #else
+                    if sync.source?.kind == .camera {
+                        Text("Luma needs camera access to follow the colors on your TV. You can allow it in System Settings under Privacy & Security › Camera, then start again.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Button("Open Privacy Settings") { NSWorkspace.shared.open(Self.cameraSettings) }
+                    } else {
                     Text(audio ? "Luma needs your permission to capture audio. You can allow it in System Settings under Privacy & Security › Screen & System Audio Recording, then start again."
                                : "Luma needs your permission to read a display or window. You can allow it in System Settings under Privacy & Security › Screen & System Audio Recording, then start again.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button("Open Privacy Settings") { NSWorkspace.shared.open(Self.privacySettings) }
+                    }
                     #endif
                 }
             }
@@ -118,6 +143,7 @@ struct ScreenSyncView: View {
         case nil: audio ? "You choose what Luma listens to. Nothing is captured until you start." : "You pick what Luma follows. Nothing is captured until you start."
         case .systemAudio: "Sound apps play on this Mac, except Luma itself."
         case .microphone: "Sound the microphone hears around you, including music from this device's speaker."
+        case .camera: "Aim the camera so the TV fills the frame; lights follow what it sees."
         default: "Only the content you chose is used."
         }
     }
@@ -304,6 +330,9 @@ struct ScreenSyncView: View {
                     tuningRow("Edge depth", low: "Thin", high: "Deep", value: "\(Int((sync.settings.edgeDepth * 100).rounded()))%",
                               range: ScreenSyncSettings.edgeDepthRange, spoken: "\(Int((sync.settings.edgeDepth * 100).rounded())) percent of the picture",
                               binding: Binding(get: { sync.settings.edgeDepth }, set: { sync.settings.edgeDepth = ($0 * 100).rounded() / 100 }))
+                    tuningRow("Color boost", low: "As captured", high: "Saturated", value: "\(Int((sync.settings.saturation * 100).rounded()))%",
+                              range: ScreenSyncSettings.saturationRange, spoken: "\(Int((sync.settings.saturation * 100).rounded())) percent",
+                              binding: Binding(get: { sync.settings.saturation }, set: { sync.settings.saturation = ($0 * 100).rounded() / 100 }))
                     Toggle(isOn: Binding(get: { sync.settings.vivid }, set: { sync.settings.vivid = $0 })) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Vivid colors").font(.system(size: 13, weight: .medium))
@@ -326,7 +355,7 @@ struct ScreenSyncView: View {
         Toggle(isOn: Binding(get: { sync.settings.restore }, set: { sync.settings.restore = $0 })) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Restore previous state").font(.system(size: 13, weight: .medium))
-                Text("When you press Stop, send each synced light back to the brightness and color it had before. Local network only. Lights you changed by hand are left alone, and automatic stops (sleep, lock, errors) don't restore.")
+                Text("When you press Stop, stop from the menu bar, or quit Luma, send each synced light back to the brightness and color it had before. Local network only. Lights you changed by hand are left alone, and automatic stops (sleep, lock, errors) don't restore.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -489,7 +518,7 @@ private enum Copy {
     static let subtitle = "Match local lights to a display or window on this Mac."
     static let choose = "Choose Display or Window…"
     static let noSource = "No display or window chosen"
-    static let privacy = "When you choose a display or window, macOS asks you to confirm. Luma reads only small color samples of what you choose, here on this Mac. Nothing is recorded, saved, or uploaded, and audio and camera are never used. Capture stops when you pause, stop, lock, or sleep your Mac."
+    static let privacy = "When you choose a display or window, macOS asks you to confirm; a camera asks for permission the first time. Luma reads only small color samples of what you choose, here on this Mac. Nothing is recorded, saved, or uploaded, audio is never used, and the camera is used only when you choose it. Capture stops when you pause, stop, lock, or sleep your Mac."
     static let audioSubtitle = "Make local lights follow the music this Mac plays."
     static let chooseAudio = "Listen to Mac Audio…"
     static let noAudioSource = "No audio source chosen"

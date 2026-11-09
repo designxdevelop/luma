@@ -23,7 +23,7 @@ struct AutomationsView: View {
             }
             .pagePadding()
             .frame(maxWidth: 860, alignment: .leading)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

@@ -966,7 +966,7 @@ struct ActivityEntry: Identifiable {
     func accepted(_ runID: UUID) -> WebhookResponse {
         .init(status: 202, json: .object(["accepted": .bool(true), "runID": .string(runID.uuidString), "statusURL": .string("/v1/runs/\(runID.uuidString)"), "note": .string("Commands run asynchronously. Completed means submitted, not hardware-confirmed.")]))
     }
-    func shutdown() { doorbell.shutdown(); configurationSync?.stop(); scheduleCoordinator?.cancel(); shuttingDown = true; scheduleSync.stop(); screenSync.shutdown(); server.stop(); if demo && webhookCertificate != nil { try? WebhookTLS.delete(demo: true) }; lan.stop(); timerTask?.cancel(); sceneTask?.cancel(); scanTask?.cancel(); reconnectTask?.cancel(); stopCommands() }
+    func shutdown() { screenSync.shutdown(); doorbell.shutdown(); configurationSync?.stop(); scheduleCoordinator?.cancel(); shuttingDown = true; scheduleSync.stop(); server.stop(); if demo && webhookCertificate != nil { try? WebhookTLS.delete(demo: true) }; lan.stop(); timerTask?.cancel(); sceneTask?.cancel(); scanTask?.cancel(); reconnectTask?.cancel(); stopCommands() }
     func loadDemo() {
         configurationSync?.stop(); configurationSync = nil
         // Explore Demo can enter from a real home with a chosen or running

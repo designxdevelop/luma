@@ -185,6 +185,15 @@ func targetScalesWhiteBrightnessByClampedCap(cap: Double, expected: Int) {
     #expect((187...188).contains((half.rgb >> 8) & 0xFF))               // 0.1/0.2 -> srgb(0.5)
 }
 
+@Test func saturationBoostsGrayishColorsButKeepsNeutralsAndPureHues() {
+    let flat = ScreenColorMath.target(LinearColor(0.5, 0.4, 0.4), brightnessCap: 100)
+    let boosted = ScreenColorMath.target(LinearColor(0.5, 0.4, 0.4), brightnessCap: 100, saturation: 0.7)
+    #expect(flat.rgb >> 16 == 255 && boosted.rgb >> 16 == 255 && flat.brightness == boosted.brightness)
+    #expect((boosted.rgb >> 8) & 0xFF < ((flat.rgb >> 8) & 0xFF) - 30)  // pink, not near-white
+    #expect(ScreenColorMath.target(LinearColor(0.6, 0.6, 0.6), brightnessCap: 100, saturation: 0.9).rgb == 0xFFFFFF)
+    #expect(ScreenColorMath.target(LinearColor(0.2, 0.1, 0), brightnessCap: 100, saturation: 0.9) == ScreenColorMath.target(LinearColor(0.2, 0.1, 0), brightnessCap: 100))
+}
+
 @Test func targetNeverDropsBelowOnePercentOrTurnsOff() {
     #expect(ScreenColorMath.target(LinearColor(0.001, 0.001, 0.001), brightnessCap: 10).brightness == 1)
     #expect(ScreenColorMath.target(.black, brightnessCap: 100) == LightTarget(rgb: 0xFFFFFF, brightness: 1))
@@ -475,7 +484,7 @@ private func grid(_ f: Frame) -> ScreenGrid? { f.bytes.withUnsafeBytes { ScreenC
 @Test func settingsSavedBeforeNewFieldsKeepTheirValues() throws {
     let old = try JSONDecoder().decode(ScreenSyncSettings.self, from: Data(#"{"smoothing":0.6,"threshold":0.03,"brightnessCap":70,"updateHz":2}"#.utf8))
     #expect(old.smoothing == 0.6 && old.brightnessCap == 70 && old.updateHz == 2)
-    #expect(old.edgeDepth == 0.15 && !old.vivid)
+    #expect(old.edgeDepth == 0.15 && old.vivid && old.saturation == 0.7 && old.restore)
     var s = ScreenSyncSettings(); s.edgeDepth = 2
     #expect(s.clamped().edgeDepth == 0.33)
 }

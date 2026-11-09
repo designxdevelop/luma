@@ -486,12 +486,25 @@ private final class ScreenSyncCloudProtocol: URLProtocol, @unchecked Sendable {
         #expect(box.calls.first?.1 == [.brightness(65), .rgb(0xFFB66A)])
     }
 
-    @Test func restoreIsOptIn() async {
+    @Test func restoreCanBeTurnedOff() async {
         let f = Fixture(); defer { f.finish() }
+        f.sync.settings.restore = false
         let box = RestoreBox(); f.sync.restore = { box.calls.append(($0.id, $1)) }
         await f.start(); f.session.onFrame?(red); f.sync.tick(now: 100)
         f.sync.stop()
         #expect(box.calls.isEmpty)
+    }
+
+    @Test func menuBarStopAndQuitRestore() async {
+        let f = Fixture(); defer { f.finish() }
+        let box = RestoreBox(); f.sync.restore = { box.calls.append(($0.id, $1)) }
+        await f.start(); f.session.onFrame?(red); f.sync.tick(now: 100)
+        f.session.onEnd?(.userStopped)
+        #expect(box.calls.map(\.0) == ["demo-floor"])
+        box.calls.removeAll()
+        await f.start(); f.session.onFrame?(red); f.sync.tick(now: 200)
+        f.sync.shutdown()
+        #expect(box.calls.map(\.0) == ["demo-floor"])
     }
 
     @Test func pauseAndAutomaticEndsDoNotRestore() async {
@@ -549,9 +562,9 @@ private final class ScreenSyncCloudProtocol: URLProtocol, @unchecked Sendable {
     }
 
     @Test func restoreSettingPersistsAndOldSettingsDecode() throws {
-        var s = ScreenSyncSettings(); s.restore = true
-        #expect(try JSONDecoder().decode(ScreenSyncSettings.self, from: JSONEncoder().encode(s)).restore)
-        #expect(try JSONDecoder().decode(ScreenSyncSettings.self, from: Data(#"{"smoothing":0.5}"#.utf8)).restore == false)
+        var s = ScreenSyncSettings(); s.restore = false
+        #expect(try !JSONDecoder().decode(ScreenSyncSettings.self, from: JSONEncoder().encode(s)).restore)
+        #expect(try JSONDecoder().decode(ScreenSyncSettings.self, from: Data(#"{"smoothing":0.5}"#.utf8)).restore == true)
     }
 
     @Test func statsCountFramesSendsAndResetOnFreshStart() async {

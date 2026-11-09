@@ -138,14 +138,18 @@ public struct ScreenSyncSettings: Codable, Equatable, Sendable {
     /// How deep edges, corners and half edges reach into the picture, as a share of its width or height.
     public var edgeDepth: Double = 0.15
     /// Weights colorful pixels over gray and white ones, so color isn't washed out by UI or text.
-    public var vivid = false
-    /// On a user Stop, send each streamed light back to the state it had at start (LAN only).
-    public var restore = false
+    public var vivid = true
+    /// Share of each color's gray component removed before it goes to a light, 0 (as captured) to 0.9.
+    /// Averaged regions drift toward gray and lights render pastel, so some boost is on by default.
+    public var saturation: Double = 0.7
+    /// On a user Stop or quit, send each streamed light back to the state it had at start (LAN only).
+    public var restore = true
     public static let smoothingRange = 0.0...0.95
     public static let thresholdRange = 0.005...0.2
     public static let brightnessCapRange = 1.0...100
     public static let updateHzRange = 0.5...10.0
     public static let edgeDepthRange = 0.05...0.33
+    public static let saturationRange = 0.0...0.9
     public init() {}
     /// Settings saved before a field existed keep their other values.
     public init(from decoder: any Decoder) throws {
@@ -156,6 +160,7 @@ public struct ScreenSyncSettings: Codable, Equatable, Sendable {
         updateHz = try c.decodeIfPresent(Double.self, forKey: .updateHz) ?? d.updateHz
         edgeDepth = try c.decodeIfPresent(Double.self, forKey: .edgeDepth) ?? d.edgeDepth
         vivid = try c.decodeIfPresent(Bool.self, forKey: .vivid) ?? d.vivid
+        saturation = try c.decodeIfPresent(Double.self, forKey: .saturation) ?? d.saturation
         restore = try c.decodeIfPresent(Bool.self, forKey: .restore) ?? d.restore
     }
     /// Clamps every field; non-finite values fall back to defaults.
@@ -168,6 +173,7 @@ public struct ScreenSyncSettings: Codable, Equatable, Sendable {
         s.brightnessCap = fit(brightnessCap, Self.brightnessCapRange, d.brightnessCap)
         s.updateHz = fit(updateHz, Self.updateHzRange, d.updateHz)
         s.edgeDepth = fit(edgeDepth, Self.edgeDepthRange, d.edgeDepth)
+        s.saturation = fit(saturation, Self.saturationRange, d.saturation)
         return s
     }
 }
@@ -291,14 +297,18 @@ public enum ScreenColorMath {
         return LinearColor(p.r + a * (next.r - p.r), p.g + a * (next.g - p.g), p.b + a * (next.b - p.b))
     }
 
-    /// Full-saturation hue (brightest channel at 255) plus brightness from the
+    /// Hue with the brightest channel at 255 plus brightness from the
     /// brightest channel, scaled by the cap and never below 1%. Black keeps a
     /// neutral color at 1% so Screen Sync never turns a light off.
-    public static func target(_ color: LinearColor, brightnessCap: Double) -> LightTarget {
+    /// `saturation` removes that share of the gray (smallest) channel from the hue
+    /// first; neutral colors stay white and pure hues are unchanged.
+    public static func target(_ color: LinearColor, brightnessCap: Double, saturation: Double = 0) -> LightTarget {
         let cap = Int(min(max(brightnessCap.isFinite ? brightnessCap : 80, 1), 100).rounded())
         let m = max(color.r, color.g, color.b)
         guard color.r.isFinite, color.g.isFinite, color.b.isFinite, m > 1.0 / 4096 else { return LightTarget(rgb: 0xFFFFFF, brightness: 1) }
-        func c(_ v: Double) -> Int { Int(srgb(v / m).rounded()) }
+        // Capped below 1 so near-gray noise can't blow up into a strong hue.
+        let gray = min(color.r, color.g, color.b) * min(max(saturation.isFinite ? saturation : 0, 0), 0.9)
+        func c(_ v: Double) -> Int { Int(srgb((v - gray) / (m - gray)).rounded()) }
         let brightness = max(1, min(cap, Int((Double(cap) * srgb(m) / 255).rounded())))
         return LightTarget(rgb: c(color.r) << 16 | c(color.g) << 8 | c(color.b), brightness: brightness)
     }
@@ -336,7 +346,7 @@ public struct ScreenSyncMixer: Sendable {
         for region in ScreenRegion.allCases { next[region] = ScreenColorMath.smooth(smoothed?[region], target[region], smoothing: settings.smoothing, dt: dt) }
         smoothed = next
         return lights.sorted(by: { $0.key < $1.key }).compactMap { id, region in
-            route(id, ScreenColorMath.target(next[region], brightnessCap: settings.brightnessCap), now: now)
+            route(id, ScreenColorMath.target(next[region], brightnessCap: settings.brightnessCap, saturation: settings.saturation), now: now)
         }
     }
 
