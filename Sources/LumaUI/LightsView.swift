@@ -74,7 +74,7 @@ struct LightsView: View {
                     Text("Rooms").tag(HomeMode.rooms)
                     Text("Plan").tag(HomeMode.plan)
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 220)
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
                 .accessibilityLabel("Show lights by room or on the floor plan")
             }
         }

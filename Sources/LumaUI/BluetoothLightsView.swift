@@ -25,7 +25,7 @@ struct BluetoothLightsView: View {
                 nearbySection
                 if ble.connectedID != nil || ble.phase != .idle { connectedSection }
                 captureSection
-            }.pagePadding().frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)
+            }.pagePadding().frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity, alignment: .leading)
         }
         .onDisappear { ble.stopScan(); ble.disconnect() }
         .fileImporter(isPresented: $importingCapture, allowedContentTypes: [.plainText, .text, .data]) { readCapture($0) }

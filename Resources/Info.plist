@@ -13,6 +13,8 @@
     <key>NSHighResolutionCapable</key><true/>
     <key>NSLocalNetworkUsageDescription</key><string>Luma discovers and controls your Govee lights on your home network.</string>
     <key>NSBluetoothAlwaysUsageDescription</key><string>Luma connects to the Govee lights you choose to control their lighting and DreamView settings.</string>
+    <key>NSCameraUsageDescription</key><string>Luma reads small color samples from a camera you aim at your TV, so your lights can follow it. Nothing is recorded or uploaded.</string>
+    <key>NSCameraUseContinuityCameraDeviceType</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSSupportsAutomaticTermination</key><false/>
 </dict></plist>

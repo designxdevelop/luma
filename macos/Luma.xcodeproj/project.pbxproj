@@ -141,7 +141,9 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Design X Develop LLC";
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Luma finds and controls supported Govee lights near you over Bluetooth, only when you choose a light.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Screen Sync reads small color samples from a camera you aim at your TV, so your lights can follow it. Nothing is recorded or uploaded.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Luma finds and controls Govee lights with LAN Control on your Wi-Fi network.";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
@@ -169,7 +171,9 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Design X Develop LLC";
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Luma finds and controls supported Govee lights near you over Bluetooth, only when you choose a light.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Screen Sync reads small color samples from a camera you aim at your TV, so your lights can follow it. Nothing is recorded or uploaded.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Luma finds and controls Govee lights with LAN Control on your Wi-Fi network.";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";

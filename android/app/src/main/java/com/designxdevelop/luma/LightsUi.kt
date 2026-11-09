@@ -120,7 +120,7 @@ fun HomeScreen(store: HomeStore, modifier: Modifier) {
         }
         if (store.demo) item { Banner("Demo home: sample lights. Nothing real is controlled.") }
         if (store.devices.isNotEmpty()) item {
-            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp)) {
                 listOf("Rooms", "Plan").forEachIndexed { i, label -> SegmentedButton((i == 1) == planMode, { planMode = i == 1 }, SegmentedButtonDefaults.itemShape(i, 2)) { Text(label) } }
             }
         }

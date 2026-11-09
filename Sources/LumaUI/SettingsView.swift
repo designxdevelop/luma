@@ -134,7 +134,7 @@ struct SettingsView: View {
                             .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
-            }.pagePadding().frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)
+            }.pagePadding().frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity, alignment: .leading)
         }
         .sheet(isPresented: $connecting) { ConnectionSheet(store: store) }
         .sheet(isPresented: $showingBluetooth) { BluetoothLightsView(store: store).sheetFrame(width: 680, height: 640) }

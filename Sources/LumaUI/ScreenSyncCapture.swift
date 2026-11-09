@@ -113,6 +113,8 @@ final class SystemScreenCapture: ScreenCaptureSession {
         configuration.height = Int(aspect <= 1 ? max(2, (longSide * aspect).rounded()) : longSide)
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(ScreenSyncTiming.fps))
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
+        // The color math assumes sRGB; without this, P3 and HDR displays deliver display-space values.
+        configuration.colorSpaceName = CGColorSpace.sRGB
         configuration.queueDepth = 3
         configuration.showsCursor = false
         configuration.capturesAudio = false

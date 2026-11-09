@@ -191,6 +191,16 @@ protocol ScreenCaptureSession: AnyObject {
     }
     #endif
 
+    #if os(macOS)
+    /// A camera aimed at the TV: the way to follow DRM video, which screen capture sees
+    /// as black. Bypasses the demo sample, since only the lights are simulated there.
+    func useCamera(_ camera: ScreenSource) {
+        guard !isActive else { return }
+        ScreenSourcePicker.shared.deactivate()
+        select(camera)
+    }
+    #endif
+
     func select(_ source: ScreenSource) {
         guard !isActive else { return }
         self.source = source; message = nil; permissionDenied = false
@@ -243,25 +253,28 @@ protocol ScreenCaptureSession: AnyObject {
         store?.log(reason.map { "\(title): \($0)" } ?? "\(title) paused.")
     }
 
-    /// Ends the session and forgets the source. Lights keep their last color.
+    /// Ends the session and forgets the source. Lights keep their last color unless restore is on.
     func stop() {
         guard isActive || source != nil else { return }
         let wasActive = isActive, title = title
         let restored = wasActive && settings.restore ? restoreLights() : []
-        // An immediate readback could catch a light before it applies the restore
-        // and record the streamed color as confirmed; ask once it has settled.
-        reset(refreshLights: restored.isEmpty)
-        if !restored.isEmpty {
-            let generation = readbackGeneration
-            Task { [weak self] in
-                try? await Task.sleep(for: .seconds(1.5))
-                guard let self, self.readbackGeneration == generation else { return }
-                for device in restored { self.requestReadback(device) }
-            }
-        }
+        resetAfterRestore(restored)
         if wasActive {
             store?.log(restored.isEmpty ? "\(title) stopped. Lights keep their last synced color and brightness."
                                         : "\(title) stopped. Restored \(restored.count) \(restored.count == 1 ? "light" : "lights") to their earlier color and brightness.")
+        }
+    }
+
+    /// An immediate readback could catch a light before it applies the restore
+    /// and record the streamed color as confirmed; ask once it has settled.
+    private func resetAfterRestore(_ restored: [LightDevice]) {
+        reset(refreshLights: restored.isEmpty)
+        guard !restored.isEmpty else { return }
+        let generation = readbackGeneration
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard let self, self.readbackGeneration == generation else { return }
+            for device in restored { self.requestReadback(device) }
         }
     }
 
@@ -295,6 +308,8 @@ protocol ScreenCaptureSession: AnyObject {
     }
 
     func shutdown() {
+        // Quitting is a deliberate stop too. LAN sends are fire-and-forget UDP, so they go out before exit.
+        if isActive && settings.restore { restoreLights() }
         reset(refreshLights: false)
         cancelReadbacks()
         for (center, token) in observers { center.removeObserver(token) }
@@ -327,7 +342,8 @@ protocol ScreenCaptureSession: AnyObject {
         // Resume must wait for a fresh frame from its new capture session.
         mixer.reset()
         regionPreview = nil
-        latestCapture = nil
+        latestCapture = nil; blackSince = nil
+        if message == Self.protectedVideoHint { message = nil }
         mapper.reset(); audioTargets = [:]; audioLevels = nil; lastLevelsAt = nil; lastAudioStep = nil
     }
 
@@ -366,10 +382,17 @@ protocol ScreenCaptureSession: AnyObject {
     static let permissionMessage = "macOS didn't allow Luma to capture your screen."
     #endif
 
+    #if os(iOS)
+    private static let osName = "iOS"
+    #else
+    private static let osName = "macOS"
+    #endif
+
     static func permissionMessage(for kind: ScreenSource.Kind?) -> String {
         switch kind {
         case .microphone: "iOS didn't allow Luma to use the microphone."
         case .systemAudio: "macOS didn't allow Luma to capture audio."
+        case .camera: "\(osName) didn't allow Luma to use the camera."
         default: permissionMessage
         }
     }
@@ -378,12 +401,14 @@ protocol ScreenCaptureSession: AnyObject {
         guard g == generation else { return }
         let keepsSource = end == .permissionDenied
         let source = self.source, title = title
-        reset()
+        // Stopping from the macOS menu bar is the person's choice, like Stop; other endings aren't.
+        resetAfterRestore(end == .userStopped && phase == .running && settings.restore ? restoreLights() : [])
         if keepsSource { self.source = source }
         switch end {
         case .userStopped: message = "\(title) stopped from the macOS menu bar."
         case .permissionDenied: permissionDenied = true; message = Self.permissionMessage(for: source?.kind)
         case .sourceGone: message = source?.isAudio == true ? "The audio source you chose is no longer available. Choose it again to continue."
+                                  : source?.kind == .camera ? "The camera you chose is no longer connected. Choose it again to continue."
                                                             : "The window or display you chose is no longer available. Choose it again to continue."
         case .failed(let text): message = "\(title) stopped: \(text)"
         }
@@ -395,8 +420,10 @@ protocol ScreenCaptureSession: AnyObject {
     func receive(_ grid: ScreenGrid, generation g: UInt64, capturedAt: ContinuousClock.Instant = .now) {
         guard g == generation, phase == .starting || phase == .running else { return }
         // Region colors use the current settings, so depth and vivid apply from the next frame.
-        mixer.ingest(grid.colors(depth: settings.edgeDepth, vivid: settings.vivid))
+        let colors = grid.colors(depth: settings.edgeDepth, vivid: settings.vivid)
+        mixer.ingest(colors)
         latestCapture = capturedAt
+        noteBlack(colors[.full])
         // Tick as soon as a frame lands instead of waiting for the ticker.
         // Coalesced: frames arriving before it runs just replace the target.
         stats.analyzed += 1
@@ -409,6 +436,20 @@ protocol ScreenCaptureSession: AnyObject {
             guard self.generation == g else { return }
             self.tick(now: self.elapsed)
         }
+    }
+
+    static let protectedVideoHint = "The picture has been black for a few seconds. Streaming services like Netflix and YouTube TV hide protected video from screen capture, so Screen Sync sees only black. Aim a camera at the TV and choose Use Camera… instead."
+    @ObservationIgnored private var blackSince: Double?
+
+    /// A screen that stays fully black is usually DRM-protected video, which macOS blanks for capture.
+    private func noteBlack(_ full: LinearColor) {
+        guard source?.kind == .display || source?.kind == .window else { return }
+        if max(full.r, full.g, full.b) > 1.0 / 4096 {
+            blackSince = nil
+            if message == Self.protectedVideoHint { message = nil }
+        } else if let since = blackSince {
+            if elapsed - since > 3, message == nil { message = Self.protectedVideoHint }
+        } else { blackSince = elapsed }
     }
 
     /// Audio Sync analysis from real capture. Maps to per-light targets at once and streams
@@ -568,9 +609,9 @@ protocol ScreenCaptureSession: AnyObject {
     }
 
     func systemPause(_ event: Notification.Name, reason: String) {
-        // Displays sleeping during music don't stop Audio Sync; it doesn't use the picture.
+        // Displays sleeping don't stop Audio Sync or a camera; neither uses this Mac's picture.
         #if os(macOS)
-        if event == NSWorkspace.screensDidSleepNotification && source?.isAudio == true { return }
+        if event == NSWorkspace.screensDidSleepNotification && (source?.isAudio == true || source?.kind == .camera) { return }
         #endif
         pause(reason: reason)
     }

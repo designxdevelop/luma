@@ -188,6 +188,16 @@ import AppKit
         await screen.sync.start()
         screen.sync.systemPause(NSWorkspace.screensDidSleepNotification, reason: "displays slept")
         #expect(screen.sync.phase == .paused)
+
+        // A camera aimed at the TV doesn't use this Mac's picture either.
+        let camera = AudioFixture(); defer { camera.finish() }
+        camera.sync.useCamera(ScreenSource(name: "Camera", kind: .camera) { SampleScreenCapture() })
+        #expect(camera.sync.mode == .screen)
+        await camera.sync.start()
+        camera.sync.systemPause(NSWorkspace.screensDidSleepNotification, reason: "displays slept")
+        #expect(camera.sync.phase == .running)
+        camera.sync.systemPause(Notification.Name("com.apple.screenIsLocked"), reason: "locked")
+        #expect(camera.sync.phase == .paused, "Locking still pauses a camera")
     }
 }
 #endif
