@@ -243,7 +243,7 @@ import LumaCore
     }
 
     @Test func scheduledRunsShareTheWatchRelaysBusyAndStopBehavior() throws {
-        let store = HomeStore(demo: true); defer { store.shutdown() }
+        let store = HomeStore(demo: true, folder: testFolder()); defer { store.shutdown() }
         let scene = try #require(store.home.scenes.first)
         let runID = try #require(store.beginScheduledRun(scene))
         #expect(store.runningSceneID == scene.id)

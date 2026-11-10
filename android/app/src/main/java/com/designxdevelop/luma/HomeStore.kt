@@ -33,9 +33,12 @@ import com.designxdevelop.luma.core.num
 import com.designxdevelop.luma.core.str
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.ZonedDateTime
@@ -86,15 +89,27 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     /** Snapshot of [sync]'s saved state for the UI. */
     var syncStatus by mutableStateOf(sync.saved); private set
     private var cloud: GoveeCloud? = null
-    private var lan: GoveeLan? = null
+    @Volatile private var lan: GoveeLan? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+    private val scanMutex = Mutex()
     private var sceneJob: Job? = null
+    /** Latest home waiting to be written; one writer on IO, so saves coalesce and never block Main. */
+    private val saves = Channel<SavedHome>(Channel.CONFLATED)
+    /** Set when an unreadable home.json couldn't be moved aside, so it's never overwritten. */
+    private var saveBlocked = false
+    /** Local edits not yet staged with the runner; a sync that lands meanwhile mustn't revert them. */
+    private var reconciling = 0
 
     init {
         demo = prefs.getBoolean("demo", false)
         lanOnly = prefs.getBoolean("lanOnly", false)
+        // Not viewModelScope: onCleared closes the channel and this drains the last write after the scope is gone.
+        LightControl.scope.launch {
+            for (h in saves) runCatching { HomeFile.save(app, h) }.onFailure { e -> withContext(Dispatchers.Main) { log("Couldn't save: ${e.message}", error = true) } }
+        }
+        HomeFile.takeNotes(app).forEach { (time, text) -> log.add(0, LogEntry(time, text, true)) }
         if (demo) loadDemo() else {
-            home = HomeFile.load(app) ?: SavedHome()
+            home = loadHome()
             floorPlans = FloorPlans.load(app)
             loadGoveeHome()
             KeyStore.read(context)?.let { connectCloud(it) }
@@ -131,13 +146,21 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     fun leaveDemo() {
         stopScene(); readings.clear()
         demo = false; prefs.edit().putBoolean("demo", false).apply()
-        home = HomeFile.load(context) ?: SavedHome()
+        home = loadHome()
         floorPlans = FloorPlans.load(context)
         loadGoveeHome()
         ScheduleAlarms.reschedule(context, home, demo = false)
         KeyStore.read(context)?.let { connectCloud(it) }
         log("Left the demo home.")
         if (onboarded) scan()
+    }
+
+    /** An unreadable home.json is kept as home.json.corrupt rather than replaced by the empty home on the next save. */
+    private fun loadHome(): SavedHome = HomeFile.load(context) ?: SavedHome().also {
+        if (!file.exists()) return@also
+        message = if (HomeFile.moveAside(context)) "Your saved home couldn't be read, so Luma started empty. The unreadable file was kept as home.json.corrupt."
+        else { saveBlocked = true; "Your saved home couldn't be read or moved aside. Nothing will be saved until Luma restarts, so the file isn't overwritten." }
+        log(message!!, error = true)
     }
 
     private fun loadDemo() {
@@ -200,7 +223,7 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     fun scan() {
         if (demo) { log("Demo mode: LAN discovery is disabled. Leave demo to discover real lights."); return }
         viewModelScope.launch(Dispatchers.IO) {
-            try {
+            scanMutex.withLock { try {
                 if (multicastLock == null) {
                     val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                     multicastLock = wifi.createMulticastLock("luma-lan").apply { setReferenceCounted(false); acquire() }
@@ -212,7 +235,7 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.Main) { lastScan = System.currentTimeMillis(); log("Looking for lights on the local network…") }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { log("LAN scan failed: ${e.message}", error = true) }
-            }
+            } }
         }
     }
 
@@ -231,7 +254,7 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
 
     private fun stopLan() { lan?.stop(); lan = null; multicastLock?.release(); multicastLock = null }
 
-    override fun onCleared() { stopLan(); sceneJob?.cancel(); if (live === this) live = null }
+    override fun onCleared() { stopLan(); sceneJob?.cancel(); saves.close(); if (live === this) live = null }
 
     // ---- Control ----
 
@@ -249,7 +272,8 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     private suspend fun send(device: LightDevice, command: CapabilityCommand) {
         try {
             val l = lan
-            if (device.ip != null && l != null && command.instance in LightDevice.LAN_INSTANCES) withContext(Dispatchers.IO) { l.control(device, command) }
+            // start() is a no-op on a live socket and reopens one dropped after a receive failure.
+            if (device.ip != null && l != null && command.instance in LightDevice.LAN_INSTANCES) withContext(Dispatchers.IO) { l.start(); l.control(device, command) }
             else (cloud ?: throw IllegalStateException("${device.displayName} needs Govee cloud for this. Add your API key in Settings.")).control(device, command)
         } catch (e: Exception) { log(e.message ?: "Command failed.", error = true); message = e.message }
     }
@@ -387,7 +411,7 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
         if (demo) return
         val at = java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneId.systemDefault())
         val due = ScheduleAlarms.due(home, at)
-        val late = System.currentTimeMillis() - millis > ScheduleAlarms.GRACE_MS
+        val late = ScheduleAlarms.late(System.currentTimeMillis(), millis)
         for (s in due) {
             saveSchedule(s.copy(lastRunMinute = SceneSchedule.minuteKey(at)))
             val scene = home.scenes.firstOrNull { it.id == s.sceneID } ?: continue
@@ -409,13 +433,21 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
         if (!demo) runCatching { FloorPlans.save(context, plans) }.onFailure { message = "Couldn't save the floor plan: ${it.message}" }
     }
 
-    fun importFloorPlan(name: String, uri: Uri): Boolean = try {
+    /** Decodes and re-encodes off Main; returns at once (the dialog closes) and reports a failure through [message]. */
+    fun importFloorPlan(name: String, uri: Uri): Boolean {
         val plan = com.designxdevelop.luma.core.FloorPlan(name = name.trim().take(64))
-        FloorPlans.importImage(context, uri, plan.id)
-        setPlans(floorPlans + plan); true
-    } catch (e: Exception) { message = e.message ?: "That image couldn't be imported."; false }
+        viewModelScope.launch {
+            try { withContext(Dispatchers.IO) { FloorPlans.importImage(context, uri, plan.id) }; setPlans(floorPlans + plan) }
+            catch (e: Exception) { message = e.message ?: "That image couldn't be imported." }
+        }
+        return true
+    }
 
-    fun replaceFloorPlanImage(id: String, uri: Uri) = runCatching { FloorPlans.importImage(context, uri, id); floorPlanVersion++ }.onFailure { message = it.message }
+    fun replaceFloorPlanImage(id: String, uri: Uri) {
+        viewModelScope.launch {
+            try { withContext(Dispatchers.IO) { FloorPlans.importImage(context, uri, id) }; floorPlanVersion++ } catch (e: Exception) { message = e.message }
+        }
+    }
     fun renameFloorPlan(id: String, name: String) = setPlans(floorPlans.map { if (it.id == id) it.copy(name = name.trim().take(64)) else it })
     fun deleteFloorPlan(id: String) { FloorPlans.image(context, id).delete(); setPlans(floorPlans.filter { it.id != id }) }
     fun placeLight(deviceID: String, planID: String, x: Double, y: Double) = setPlans(com.designxdevelop.luma.core.FloorPlan.place(floorPlans, deviceID, planID, x, y))
@@ -508,13 +540,19 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     private fun update(fromRunner: Boolean = false, change: (SavedHome) -> SavedHome) {
         val before = home
         home = change(home)
-        if (!demo) runCatching { HomeFile.save(context, home) }.onFailure { log("Couldn't save: ${it.message}", error = true) }
+        if (!demo && !saveBlocked) saves.trySend(home)
         if (before.schedules != home.schedules || before.scenes != home.scenes) {
             ScheduleAlarms.reschedule(context, home, demo)
             // Edits made here become shared changes; ignore lastRunMinute marks, which the runner doesn't keep.
             if (!fromRunner && !demo && sync.paired && (before.scenes != home.scenes || before.schedules.map { it.copy(lastRunMinute = null) } != home.schedules.map { it.copy(lastRunMinute = null) })) {
-                sync.reconcile(home.scenes, home.schedules).forEach { log(it, error = true) }
-                viewModelScope.launch { syncNow() }
+                val scenes = home.scenes
+                val schedules = home.schedules
+                reconciling++
+                viewModelScope.launch {
+                    try { sync.reconcile(scenes, schedules).forEach { log(it, error = true) } } catch (e: java.io.IOException) { log("Schedule sync: ${e.message}", error = true) }
+                    finally { reconciling-- }
+                    syncNow()
+                }
             }
         }
     }
@@ -535,17 +573,24 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     }
 
     fun unpair() {
-        val disabled = sync.unpair(home.schedules)
-        update { it.copy(schedules = disabled) }
-        syncStatus = sync.saved
-        ScheduleAlarms.reschedule(context, home, demo)
-        log("Schedule sync is off. Schedules here were turned off so they don't also run on the computer; turn on the ones this phone should run.")
+        viewModelScope.launch {
+            // Unpaired before the update, so the disabled schedules aren't pushed to the runner.
+            val disabled = try { sync.unpair(home.schedules) } catch (e: java.io.IOException) { message = e.message; home.schedules.map { it.copy(enabled = false) } }
+            update { it.copy(schedules = disabled) }
+            syncStatus = sync.saved
+            ScheduleAlarms.reschedule(context, home, demo)
+            log("Schedule sync is off. Schedules here were turned off so they don't also run on the computer; turn on the ones this phone should run.")
+        }
     }
 
     suspend fun syncNow() {
-        val notices = sync.sync()
+        val scenes0 = home.scenes
+        val schedules0 = home.schedules
+        val notices = try { sync.sync() } catch (e: java.io.IOException) { log("Schedule sync: ${e.message}", error = true); return }
+        // Skip when scenes or schedules changed during the request: that edit's own reconcile and sync apply the runner's view.
+        val untouched = reconciling == 0 && home.scenes === scenes0 && home.schedules === schedules0
         val (scenes, schedules) = sync.shared(home.scenes, home.schedules)
-        if (scenes != home.scenes || schedules != home.schedules) update(fromRunner = true) { it.copy(scenes = scenes, schedules = schedules) }
+        if (untouched && (scenes != home.scenes || schedules != home.schedules)) update(fromRunner = true) { it.copy(scenes = scenes, schedules = schedules) }
         syncStatus = sync.saved
         notices.forEach { log(it, error = true) }
         notices.firstOrNull()?.let { message = it }

@@ -75,7 +75,8 @@ export function parseLanPacket(data: Buffer, sourceIP: string): LanPacket {
   const body = msg.data;
   if (msg.cmd === 'scan') {
     const { ip, device, sku } = body;
-    if (ip !== sourceIP || typeof device !== 'string' || device === '' || device.length > 128 || typeof sku !== 'string' || sku === '' || sku.length > 32) throw invalid();
+    // Control characters or a blank ID could never be saved with the home, so the reply is dropped.
+    if (ip !== sourceIP || typeof device !== 'string' || !device.trim() || device.length > 128 || typeof sku !== 'string' || !sku.trim() || sku.length > 32 || /[\u0000-\u001f]/.test(device + sku)) throw invalid();
     return { kind: 'discovery', id: device, sku, ip };
   }
   if (msg.cmd === 'devStatus') {

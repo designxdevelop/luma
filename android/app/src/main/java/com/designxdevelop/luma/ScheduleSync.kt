@@ -69,14 +69,14 @@ class ScheduleSync(private val context: Context) {
     }
 
     /** Turns sharing off. Schedules here are turned off first so nothing runs twice. */
-    fun unpair(schedules: List<SceneSchedule>): List<SceneSchedule> {
+    suspend fun unpair(schedules: List<SceneSchedule>): List<SceneSchedule> = mutex.withLock {
         KeyStore.delete(context, KeyStore.SYNC_TOKEN)
         saved = Saved(deviceID = saved.deviceID); persist()
-        return schedules.map { it.copy(enabled = false) }
+        schedules.map { it.copy(enabled = false) }
     }
 
     /** Every local scene/schedule edit becomes a shared change. Returns problems to show. */
-    fun reconcile(scenes: List<LightScene>, schedules: List<SceneSchedule>): List<String> {
+    suspend fun reconcile(scenes: List<LightScene>, schedules: List<SceneSchedule>): List<String> = mutex.withLock {
         if (!paired) return emptyList()
         val state = saved.state
         val shared = (state.view("scene").map { "scene:${it["id"].str}" to it } + state.view("schedule").map { "schedule:${it["id"].str}" to it }).toMap()
@@ -90,7 +90,7 @@ class ScheduleSync(private val context: Context) {
         for ((k, v) in local) if (!com.designxdevelop.luma.core.jsonEquals(shared[k], v)) runCatching { state.stage(k.substringBefore(':'), v) }.onFailure { problems += "Not shared: ${it.message}" }
         for (k in shared.keys - local.keys) runCatching { state.stage(k.substringBefore(':'), null, k.substringAfter(':')) }.onFailure { problems += "Not shared: ${it.message}" }
         persist()
-        return problems
+        problems
     }
 
     /** Sends pending changes and pulls the runner's. Returns notices about refused changes. */
@@ -108,9 +108,12 @@ class ScheduleSync(private val context: Context) {
                 s.state.apply(batch, response).forEach { notices += "A change to a ${it.kind} wasn't applied: ${it.reason} The runner's version is shown." }
                 runs = runs(response); name = response["hub"]["name"].str ?: name
             }
-            saved = s.copy(lastSync = System.currentTimeMillis(), lastError = null, runs = runs, runnerName = name)
+            // Re-read after the awaits, so a pairing removed meanwhile isn't written back.
+            if (!saved.paired) return emptyList()
+            saved = saved.copy(lastSync = System.currentTimeMillis(), lastError = null, runs = runs, runnerName = name)
         } catch (e: Exception) {
-            saved = s.copy(lastError = e.message)
+            if (!saved.paired) return emptyList()
+            saved = saved.copy(lastError = e.message)
         }
         persist()
         notices
@@ -141,7 +144,11 @@ class ScheduleSync(private val context: Context) {
 
     private fun runs(response: JsonElement) = (response["runs"] as? JsonArray).orEmpty().mapNotNull { runCatching { LumaJson.decodeFromJsonElement(Run.serializer(), it) }.getOrNull() }.takeLast(20)
 
-    private fun persist() = file(context).writeText(LumaJson.encodeToString(Saved.serializer(), saved))
+    private fun persist() {
+        val tmp = File(context.filesDir, "schedule-sync.json.tmp")
+        tmp.writeText(LumaJson.encodeToString(Saved.serializer(), saved))
+        if (!tmp.renameTo(file(context))) throw java.io.IOException("Couldn't save schedule sync settings.")
+    }
 
     companion object {
         private fun file(context: Context) = File(context.filesDir, "schedule-sync.json")

@@ -43,6 +43,7 @@ object WearSync {
 class WearListener : WearableListenerService() {
     override fun onMessageReceived(event: MessageEvent) {
         val body = runCatching { LumaJson.parseToJsonElement(event.data.decodeToString()) }.getOrNull()
+        // Blocks this service's worker thread so the process stays alive until a scene with delays finishes.
         runBlocking {
             when (event.path) {
                 "/luma/power" -> LightControl.setPower(applicationContext, body["ids"].arr.orEmpty().mapNotNull { it.str }, body["on"].bool == true)

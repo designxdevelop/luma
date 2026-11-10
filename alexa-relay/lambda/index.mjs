@@ -12,11 +12,12 @@ export const handler = async (event) => {
     if (!response.ok) throw new Error(`relay ${response.status}`);
     return await response.json();
   } catch (error) {
+    console.error('relay forward failed', error);
     const { header = {}, endpoint } = event?.directive ?? {};
     return { event: {
       header: { namespace: 'Alexa', name: 'ErrorResponse', payloadVersion: '3', messageId: crypto.randomUUID(), ...(header.correlationToken ? { correlationToken: header.correlationToken } : {}) },
       ...(endpoint ? { endpoint } : {}),
-      payload: { type: 'BRIDGE_UNREACHABLE', message: String(error.message ?? error) },
+      payload: { type: 'BRIDGE_UNREACHABLE', message: 'The Luma relay could not be reached.' },
     } };
   }
 };

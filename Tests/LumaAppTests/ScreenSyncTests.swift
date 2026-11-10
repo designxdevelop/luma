@@ -22,7 +22,7 @@ import LumaCore
 }
 
 @MainActor private final class Fixture {
-    let store = HomeStore(demo: true, screenSyncDefaults: nil)
+    let store = HomeStore(demo: true, screenSyncDefaults: nil, folder: testFolder())
     var sessions: [FakeCapture] = []
     var sent: [StreamUpdate] = []
     var sync: ScreenSync { store.screenSync }
@@ -292,7 +292,7 @@ private final class ScreenSyncCloudProtocol: URLProtocol, @unchecked Sendable {
         configuration.httpAdditionalHeaders = ["X-Luma-Sync-Test": id]
         let session = URLSession(configuration: configuration)
         ScreenSyncCloudProtocol.install(gate, id: id)
-        let store = HomeStore(demo: true, cloud: GoveeCloud(apiKey: "synthetic-key", session: session), screenSyncDefaults: nil)
+        let store = HomeStore(demo: true, cloud: GoveeCloud(apiKey: "synthetic-key", session: session), screenSyncDefaults: nil, folder: testFolder())
         defer { store.shutdown(); session.invalidateAndCancel(); ScreenSyncCloudProtocol.remove(id) }
         let sync = store.screenSync, capture = FakeCapture()
         var sent: [StreamUpdate] = []
@@ -331,7 +331,7 @@ private final class ScreenSyncCloudProtocol: URLProtocol, @unchecked Sendable {
         original.settings.updateHz = 4
         original.setIncluded(true, for: "real-light")
         original.setRegion(.right, for: "real-light")
-        let store = HomeStore(demo: true, screenSyncDefaults: defaults)
+        let store = HomeStore(demo: true, screenSyncDefaults: defaults, folder: testFolder())
         defer { store.shutdown() }
         #expect(store.screenSync.regions.isEmpty)
         store.screenSync.settings.updateHz = 1
@@ -346,7 +346,7 @@ private final class ScreenSyncCloudProtocol: URLProtocol, @unchecked Sendable {
     }
 
     @Test func leavingADemoWithNilDefaultsStaysIsolated() {
-        let store = HomeStore(demo: true, screenSyncDefaults: nil)
+        let store = HomeStore(demo: true, screenSyncDefaults: nil, folder: testFolder())
         defer { store.shutdown() }
         store.screenSync.settings.updateHz = 4
         store.screenSync.setIncluded(true, for: "demo-floor")
@@ -365,7 +365,7 @@ private final class ScreenSyncCloudProtocol: URLProtocol, @unchecked Sendable {
         saved.setIncluded(true, for: "real-light")
         saved.setRegion(.left, for: "real-light")
 
-        let store = HomeStore(demo: true, screenSyncDefaults: defaults)
+        let store = HomeStore(demo: true, screenSyncDefaults: defaults, folder: testFolder())
         defer { store.shutdown() }
         store.leaveDemo()
         store.home.devices = [] // Match the real empty-home Explore Demo path.

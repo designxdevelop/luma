@@ -20,7 +20,7 @@ import LumaCore
 }
 
 @MainActor private final class AudioFixture {
-    let store = HomeStore(demo: true, screenSyncDefaults: nil)
+    let store = HomeStore(demo: true, screenSyncDefaults: nil, folder: testFolder())
     var sessions: [FakeAudio] = []
     var sent: [StreamUpdate] = []
     var sync: ScreenSync { store.screenSync }

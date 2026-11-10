@@ -316,6 +316,35 @@ test('late ticks inside the grace window run; longer gaps are reported missed', 
   assert.equal(desk.sync.view().runner!.runs[0]!.status, 'missed');
 });
 
+test('a shared schedule due while a scene runs waits for it; past the grace, or disabled meanwhile, it never runs', async (t) => {
+  const clock = { now: at(2026, 6, 1, 6, 0) }, network = new Network();
+  const desk = await runner(t, 'desk', clock, network, (h) => { h.scenes = [scene()]; h.schedules = [schedule()]; });
+  let busy = true;
+  desk.deps.sceneRunning = () => busy;
+  const report = () => desk.sync.view().runner!.runs[0];
+  desk.sync.tick(at(2026, 6, 1, 6, 59, 50)); desk.sync.tick(at(2026, 6, 1, 7, 0, 10)); desk.sync.tick(at(2026, 6, 1, 7, 0, 40));
+  assert.deepEqual(desk.home.runs, []);
+  assert.equal(report(), undefined, 'reported only once it starts or misses');
+  busy = false; clock.now = at(2026, 6, 1, 7, 1, 0);
+  desk.sync.runQueued(); desk.sync.runQueued();
+  assert.deepEqual(desk.home.runs, [SCENE], 'started once the runner is free, once');
+  assert.deepEqual([report()!.status, report()!.occurrence], ['started', '2026-6-1-7-0']);
+
+  busy = true;
+  desk.sync.tick(at(2026, 6, 2, 6, 59, 50)); desk.sync.tick(at(2026, 6, 2, 7, 0, 10)); desk.sync.tick(at(2026, 6, 2, 7, 2, 1));
+  assert.equal(report()!.status, 'missed');
+  assert.match(report()!.detail!, /Another scene was still running 2 min after/);
+  busy = false; desk.sync.runQueued();
+  assert.equal(desk.home.runs.length, 1);
+
+  busy = true;
+  desk.sync.tick(at(2026, 6, 3, 6, 59, 50)); desk.sync.tick(at(2026, 6, 3, 7, 0, 10));
+  desk.home.schedules = [schedule({ enabled: false })]; desk.sync.localChange('schedule', SCHED);
+  busy = false; clock.now = at(2026, 6, 3, 7, 0, 30); desk.sync.runQueued();
+  assert.equal(desk.home.runs.length, 1, 'disabled while waiting: dropped');
+  assert.equal(report()!.occurrence, '2026-6-2-7-0');
+});
+
 // ---------------- real TLS ----------------
 
 test('real TLS: pin checked before the token is sent, wrong token refused, large first sync is chunked', async (t) => {
@@ -354,14 +383,14 @@ test('Home: a paired computer never runs schedules; the runner runs and the phon
   const make = (name: string) => {
     const dir = mkdtempSync(join(tmpdir(), 'luma-ss-home-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const runs: string[] = [];
+    const runs: string[] = [], saves: unknown[] = [];
     const home = new Home({ demo: false, version: 't', storage: new HomeStorage(dir), secrets: new MemSecrets(),
       scheduleSyncOptions: { transport: network.transport, now: () => clock.now, addresses: () => [name], timeZone: () => 'America/New_York' } });
     // Scene execution needs real lights; record the attempt instead.
-    (home as unknown as { runSavedScene: (id: string) => string }).runSavedScene = (id) => { runs.push(id); return 'r'; };
+    (home as unknown as { runSavedScene: (id: string, save?: boolean) => string }).runSavedScene = (id, save) => { runs.push(id); saves.push(save); return 'r'; };
     network.hosts.set(name, home.scheduleSync);
     t.after(() => home.shutdown());
-    return { home, runs };
+    return { home, runs, saves };
   };
   const desk = make('desk'), laptop = make('laptop');
   const deskHome = desk.home as unknown as { home: { scenes: LightScene[]; schedules: SceneSchedule[] } };
@@ -372,6 +401,7 @@ test('Home: a paired computer never runs schedules; the runner runs and the phon
   assert.equal(laptop.home.snapshot().schedules.length, 1);
   for (const d of [at(2026, 6, 1, 6, 59, 50), at(2026, 6, 1, 7, 0, 10)]) { desk.home.tickSchedules(d); laptop.home.tickSchedules(d); }
   assert.deepEqual([desk.runs.length, laptop.runs.length], [1, 0]);
+  assert.deepEqual(desk.saves, [false], 'a shared schedule run never replaces the restore point');
   const phone = new Phone(desk.home.snapshot().scheduleSync.runner!.pairingCodes[0]!, network);
   await phone.sync();
   phone.edit({ enabled: false });

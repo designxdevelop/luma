@@ -7,13 +7,13 @@ import LumaCore
     @Test func requestsAndSnapshotsRoundTripThroughMessages() throws {
         let request = WatchRequest.brightness(id: "demo-desk", value: 40)
         #expect(WatchRequest.decode(try request.encoded()) == request)
-        let store = HomeStore(demo: true); defer { store.shutdown() }
+        let store = HomeStore(demo: true, folder: testFolder()); defer { store.shutdown() }
         #expect(WatchSnapshot.decode(try store.watchSnapshot.encoded()) == store.watchSnapshot)
         #expect(WatchRequest.decode(["request": Data("nope".utf8)]) == nil)
     }
 
     @Test func watchRequestsDriveTheStoreAndIgnoreUnknownTargets() async throws {
-        let store = HomeStore(demo: true); defer { store.shutdown() }
+        let store = HomeStore(demo: true, folder: testFolder()); defer { store.shutdown() }
         store.handleWatch(.power(ids: [], on: false))
         for _ in 0..<100 where store.poweredCount > 0 { await Task.yield() }
         #expect(store.poweredCount == 0)

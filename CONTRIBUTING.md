@@ -12,8 +12,9 @@ Never post API keys, webhook tokens, passwords, secret-store contents, personal 
 
 1. Fork and clone the repository, then create a branch for your change.
 2. For native macOS, use Swift 6.2+ on macOS 14+: `./scripts/verify.sh`, then `./scripts/build-app.sh`. Follow [the Mac guide](MACOS.md) to try the isolated demo.
-3. For Windows/Linux, run `npm ci`, `npm run runtime:install`, `npm run typecheck`, and `npm test` from `desktop/`. Use `npm run demo` for synthetic UI checks. See [the desktop guide](desktop/README.md).
-4. Open a pull request describing the behavior change, why it helps, and what you verified. State the actual OS/runtime and whether real hardware was involved.
+3. For Android, install JDK 21 and an Android SDK with platform `android-36.1`, then run `./gradlew test assembleDebug` from `android/`. See [the Android guide](docs/ANDROID.md).
+4. For Windows/Linux, run `npm ci`, `npm run runtime:install`, `npm run typecheck`, and `npm test` from `desktop/`. Use `npm run demo` for synthetic UI checks. See [the desktop guide](desktop/README.md).
+5. Open a pull request describing the behavior change, why it helps, and what you verified. State the actual OS/runtime and whether real hardware was involved.
 
 Use focused changes and tests that establish behavior. Keep reported device state separate from pending user requests. Preserve ordered writes, cancellation, bounded network work, and slider/toggle regressions. Use each model's advertised capabilities and bounds instead of assuming support from its name.
 

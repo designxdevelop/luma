@@ -45,6 +45,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -158,8 +159,14 @@ fun FloorPlanView(store: HomeStore, onOpenLight: (String) -> Unit) {
                 }
             }
         }
-        val bitmap = remember(plan.id, store.floorPlanVersion) { runCatching { BitmapFactory.decodeFile(FloorPlans.image(context, plan.id).path)?.asImageBitmap() }.getOrNull() }
-        if (bitmap == null) Banner("This floor's image can't be loaded. Replace it from the ··· menu; pins are kept.")
+        // Decoded off the UI thread; null while loading, so the "can't be loaded" banner doesn't flash.
+        val image by produceState<Result<androidx.compose.ui.graphics.ImageBitmap>?>(null, plan.id, store.floorPlanVersion) {
+            value = null
+            value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { BitmapFactory.decodeFile(FloorPlans.image(context, plan.id).path)!!.asImageBitmap() } }
+        }
+        val bitmap = image?.getOrNull()
+        if (image == null) Box(Modifier.fillMaxWidth().aspectRatio(1.5f))
+        else if (bitmap == null) Banner("This floor's image can't be loaded. Replace it from the ··· menu; pins are kept.")
         else BoxWithConstraints(Modifier.fillMaxWidth().aspectRatio(bitmap.width.toFloat() / bitmap.height).clipToBounds()
             .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(12.dp))) {
             val w = constraints.maxWidth.toFloat()

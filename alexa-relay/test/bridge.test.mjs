@@ -79,6 +79,7 @@ test('the Lambda forwarder relays the directive with its secret and turns failur
     const failed = await handler({ directive: { header: { correlationToken: 'c' }, endpoint: { endpointId: ENDPOINT_ID } } });
     assert.equal(failed.event.header.name, 'ErrorResponse');
     assert.equal(failed.event.header.correlationToken, 'c');
+    assert.equal(failed.event.payload.message, 'The Luma relay could not be reached.'); // never the raw error text
   } finally { globalThis.fetch = realFetch; }
 });
 
@@ -124,4 +125,24 @@ test('offline hub, expiry, stale events, refresh rotation, and unlink', async ()
 
   assert.equal((await s.hub('/hub/unlink')).status, 204);
   assert.equal((await s.activate(refreshed.access_token)).event.payload.type, 'INVALID_AUTHORIZATION_CREDENTIAL');
+});
+
+test('expired access tokens and unexchanged-then-expired codes are deleted when read', async () => {
+  const s = setup();
+  const tokens = await s.link();
+  const keys = (prefix) => [...s.bridge.storage.map.keys()].filter((k) => k.startsWith(prefix));
+  assert.equal(keys('access:').length, 1);
+  s.clock.t += 3_600_001;
+  assert.equal((await s.activate(tokens.access_token)).event.payload.type, 'EXPIRED_AUTHORIZATION_CREDENTIAL');
+  assert.equal(keys('access:').length, 0);
+
+  // A code that outlives its TTL is removed when presented, and cannot be used.
+  const { code } = await (await s.hub('/hub/pairing-code')).json();
+  const redirect = await s.form('/oauth/authorize', { ...s.linkParams, pairing_code: code });
+  const stale = new URL(redirect.headers.get('location')).searchParams.get('code');
+  assert.equal(keys('code:').length, 1);
+  s.clock.t += 121_000;
+  const res = await s.form('/oauth/token', { grant_type: 'authorization_code', code: stale, redirect_uri: REDIRECT }, { authorization: tokens.basic });
+  assert.equal(res.status, 400);
+  assert.equal(keys('code:').length, 0);
 });

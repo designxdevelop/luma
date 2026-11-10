@@ -2,7 +2,14 @@ name: Linux verification
 
 on:
   push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/linux.yml'
   pull_request:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/linux.yml'
   workflow_dispatch:
 
 defaults:
@@ -64,7 +71,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/luma"
           tar -xzf release-linux/luma-*-linux-${{ matrix.arch }}.tar.gz -C "$RUNNER_TEMP/luma" --strip-components=1
           # The sandbox stays ON. Ubuntu 24.04 blocks unprivileged user namespaces, so install the
-          # setuid helper exactly as docs/LINUX.md describes (root-owned, mode 4755).
+          # setuid helper exactly as desktop/docs/LINUX.md describes (root-owned, mode 4755).
           sudo chown root:root "$RUNNER_TEMP/luma/chrome-sandbox"
           sudo chmod 4755 "$RUNNER_TEMP/luma/chrome-sandbox"
       - name: Synthetic Electron smoke (demo only; never real capture)

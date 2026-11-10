@@ -2,7 +2,16 @@ name: Android verification
 
 on:
   push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - 'desktop/src/test/fixtures/**'
+      - '.github/workflows/android.yml'
   pull_request:
+    paths:
+      - 'android/**'
+      - 'desktop/src/test/fixtures/**'
+      - '.github/workflows/android.yml'
   workflow_dispatch:
 
 defaults:
@@ -22,8 +31,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '21' }
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
       - name: Install the compile SDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36.1" > /dev/null
       - name: Unit tests and debug build

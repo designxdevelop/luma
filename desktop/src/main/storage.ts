@@ -40,21 +40,25 @@ export class HomeStorage {
 
   private write(file: string, home: SavedHome): void {
     // Reconstruct known fields only: accidental runtime fields/secrets are not serialized.
-    const data = JSON.stringify(decodeHome(home), null, 2);
-    if (Buffer.byteLength(data) > HOME_LIMIT) throw invalidHome();
+    let data: string;
+    try { data = JSON.stringify(decodeHome(home), null, 2); } catch { throw unsavable(); }
+    if (Buffer.byteLength(data) > HOME_LIMIT) throw unsavable();
     mkdirSync(this.folder, { recursive: true, mode: 0o700 });
-    const temp = `${file}.${randomUUID()}.tmp`;
-    try {
-      writeFileSync(temp, data, { mode: 0o600, flag: 'wx' });
-      renameSync(temp, file);
-    } finally {
-      if (existsSync(temp)) unlinkSync(temp);
-    }
+    atomicWrite(file, data);
   }
+}
+
+/** Owner-only temp file, then rename over the target: a crash leaves the old file or the new one, never half of one. */
+export function atomicWrite(file: string, data: string | Buffer): void {
+  const temp = `${file}.${randomUUID()}.tmp`;
+  try { writeFileSync(temp, data, { mode: 0o600, flag: 'wx' }); renameSync(temp, file); }
+  finally { if (existsSync(temp)) unlinkSync(temp); }
 }
 
 const HOME_LIMIT = 8 * 1024 * 1024;
 const invalidHome = () => new Error('Unrecognized or damaged home file. The original file has been preserved.');
+/** In-memory data that the file format can't hold; nothing on disk is wrong. */
+const unsavable = () => new Error('Some data in memory is not in a form Luma can store, so this change was not written. The last saved home file is unchanged.');
 const text = (v: unknown, max: number, allowEmpty = false): string => {
   if (typeof v !== 'string' || v.length > max || (!allowEmpty && !v.trim()) || /[\u0000-\u001f]/.test(v)) throw invalidHome();
   return v;

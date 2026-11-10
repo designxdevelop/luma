@@ -8,7 +8,7 @@ import { loadWebhookIdentity, webhookSans, type WebhookIdentity } from '../core/
 
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { ActivityEntry, AppSnapshot, BackupResult, GoveeHomeView, Capability, CapabilityCommand, DeviceReading, LightDevice, LightScene, SavedHome, SceneSchedule, SceneStep } from '../shared/types';
-import { LAN_INSTANCES, LumaError, brightnessRange, decodeScene, isObject, message, power, brightness, rgb, kelvin, safeInt, supports, validateCommand, validateScene, whiteRange } from '../core/model';
+import { LAN_INSTANCES, LumaError, brightnessRange, decodeScene, fitText, isObject, message, power, brightness, rgb, kelvin, safeInt, supports, validateCommand, validateScene, whiteRange } from '../core/model';
 import { isLight } from '../shared/devices';
 import { compatibilityReport } from '../core/compat';
 import { applyBackup, decodeBackup, encodeBackup } from './backup';
@@ -27,7 +27,7 @@ import { demoDevices, demoEffects, demoReadings, demoScenes } from './demo';
 import { REGIONS } from '../shared/sync-math';
 import { SyncController } from './sync';
 import { ScheduleSync, type ScheduleSyncDeps } from './schedule-sync';
-import { canonicalID } from '../core/schedule-sync';
+import { RUN_GRACE_MS, canonicalID } from '../core/schedule-sync';
 import type { StreamField } from '../core/stream';
 import { DoorbellController } from './doorbell';
 
@@ -35,6 +35,8 @@ const API_KEY = 'govee-api-key';
 const HOME_TOKEN = 'govee-home-token';
 const CLIENT_ID = 'govee-client-id';
 const WEBHOOK_TOKEN = 'webhook-token';
+/** HomeStorage refuses more lights than this, so discovery stops adding new ones there. */
+const DEVICE_LIMIT = 1000;
 
 export interface HomeOptions {
   demo: boolean;
@@ -60,6 +62,8 @@ export interface HomeOptions {
   floorPlans?: FloorPlanStore;
   /** Sends an event to the renderer (Bluetooth writes); undefined in tests and headless use. */
   postToRenderer?(channel: string, payload?: unknown): void;
+  /** Local schedule clock (tests); defaults to the system clock. */
+  now?: () => Date;
 }
 
 export class Home {
@@ -91,8 +95,11 @@ export class Home {
   private readonly lanOnly = new WeakSet<CapabilityCommand>();
   /** Last cloud readings per device (sensors, appliance modes). Never persisted. */
   private readonly readings = new Map<string, DeviceReading[]>();
-  /** Confirmed state of the last scene's lights, taken before its first write. One level, never persisted. */
+  /** Confirmed state of the lights of the last scene a person ran, taken before its first write. One level, never persisted. */
   private restorePoint?: LightScene;
+  /** Local schedules that came due while a scene ran, in due order (`at` = scheduled minute). Memory only. */
+  private dueSchedules: Array<{ id: string; at: number }> = [];
+  private readonly now: () => Date;
   private readonly floorPlans: FloorPlanStore;
   /** Last Govee Home import, in memory only (re-read with the saved token). */
   private goveeHome: Omit<GoveeHomeView, 'available' | 'signedIn' | 'conflicts' | 'firmware'> & { entries: ImportEntry[] } = { awaitingCode: false, busy: false, groups: [], automations: [], unavailable: [], entries: [] };
@@ -103,6 +110,7 @@ export class Home {
 
   constructor(private readonly options: HomeOptions) {
     this.demo = options.demo;
+    this.now = options.now ?? (() => new Date());
     this.floorPlans = options.floorPlans ?? new FloorPlanStore(undefined, () => undefined);
     const transport: ControlTransport = {
       send: (device, command, signal) => this.transmit(device, command, signal),
@@ -123,7 +131,8 @@ export class Home {
     }, options.controlOptions);
     this.runner = new SceneRunner({
       send: (step, signal) => this.engine.submit(step.deviceID, step.command, { signal }),
-      changed: () => this.emit(),
+      // Runs once at start and once when the runner is free again: queued schedules start then.
+      changed: () => { this.emit(); if (this.runner.runningSceneID === undefined) { this.runDueSchedules(); this.scheduleSync.runQueued(); } },
       log: (text, isError) => this.log(text, isError),
     });
     this.sync = new SyncController({
@@ -159,7 +168,8 @@ export class Home {
       scenes: () => this.home.scenes,
       schedules: () => this.home.schedules,
       apply: (scenes, schedules) => { this.home.scenes = scenes; this.home.schedules = schedules; this.schedulePersist(); },
-      run: (sceneID) => this.runSavedScene(sceneID),
+      run: (sceneID) => this.runSavedScene(sceneID, false),
+      sceneRunning: () => this.runner.runningSceneID !== undefined,
       runStatus: (runID) => this.runner.runs.find((r) => r.id === runID)?.status,
       persistHome: () => this.persistNow(),
       log: (text, isError) => this.log(text, isError),
@@ -442,7 +452,7 @@ export class Home {
   async discover(): Promise<void> {
     this.requireReal('LAN discovery');
     if (this.scanning) return;
-    await this.ensureLan();
+    try { await this.ensureLan(); } catch (error) { this.log(`LAN discovery failed: ${message(error)}`, true); throw error; }
     this.lan!.discover();
     this.scanning = true;
     this.log('Scanning Wi-Fi for Govee lights with LAN Control enabled…');
@@ -467,6 +477,7 @@ export class Home {
     this.lanSeen.add(packet.ip);
     if (packet.kind === 'discovery') {
       let device = this.home.devices.find((d) => d.id.toLowerCase() === packet.id.toLowerCase());
+      if (!device && this.home.devices.length >= DEVICE_LIMIT) return;
       for (const other of this.home.devices) if (other !== device && other.ip === packet.ip) other.ip = undefined;
       if (!device) {
         device = { id: packet.id, sku: packet.sku, name: `Govee ${packet.sku}`, room: 'Unassigned', capabilities: [] };
@@ -595,14 +606,14 @@ export class Home {
 
   assignRoom(deviceID: string, room: string): void {
     const device = this.findDevice(deviceID);
-    const trimmed = typeof room === 'string' ? room.trim().slice(0, 40) : '';
+    const trimmed = typeof room === 'string' ? fitText(room, 40) : '';
     device.room = trimmed || 'Unassigned';
     this.schedulePersist(); this.emit();
   }
 
   renameDevice(deviceID: string, name: string): void {
     const device = this.findDevice(deviceID);
-    const trimmed = typeof name === 'string' ? name.trim().slice(0, 64) : '';
+    const trimmed = typeof name === 'string' ? fitText(name, 64) : '';
     if (!trimmed) throw new LumaError('Enter a name.');
     device.name = trimmed;
     device.customName = trimmed;
@@ -677,8 +688,11 @@ export class Home {
     return this.saveScene(scene);
   }
 
-  /** Validates the whole scene against current lights before the first command. */
-  runScene(scene: LightScene, saveRestorePoint = true): string {
+  /**
+   * Validates the whole scene against current lights before the first command. Only a scene a person runs
+   * (app or tray) saves a restore point; schedules and webhooks never replace it.
+   */
+  runScene(scene: LightScene, saveRestorePoint = false): string {
     validateScene(scene, this.home.devices);
     // Scenes, schedules and webhooks never fight the stream: the whole run is refused before its first write.
     if (scene.steps.some((st) => this.sync.holds(st.deviceID))) throw new LumaError('Screen Sync is using one of these lights. Stop it first.', 409);
@@ -700,10 +714,10 @@ export class Home {
     return runID;
   }
 
-  runSavedScene(sceneID: string): string {
+  runSavedScene(sceneID: string, saveRestorePoint = true): string {
     const scene = this.home.scenes.find((s) => s.id === sceneID);
     if (!scene) throw new LumaError('Scene not found.', 404);
-    return this.runScene(scene);
+    return this.runScene(scene, saveRestorePoint);
   }
 
   stopScene(): void { this.runner.stop(); }
@@ -801,7 +815,7 @@ export class Home {
     let applied = 0;
     for (const change of plan.changes.filter((c) => chosen.has(c.deviceID))) {
       const device = this.home.devices.find((d) => d.id === change.deviceID);
-      if (device) { device.room = change.goveeRoom.slice(0, 40); applied++; }
+      if (device) { device.room = fitText(change.goveeRoom, 40) || 'Unassigned'; applied++; }
     }
     this.goveeHome.plan = planRooms(this.goveeHome.entries, this.home.devices);
     this.schedulePersist();
@@ -860,15 +874,32 @@ export class Home {
     this.scheduleSync.localChange('schedule', id);
   }
 
-  tickSchedules(now = new Date()): void {
+  tickSchedules(now = this.now()): void {
     // Shared schedules run only on the selected computer; a paired one never runs them.
     if (this.scheduleSync.tick(now)) return;
     for (const schedule of this.home.schedules) {
       if (!shouldRun(schedule, now)) continue;
-      schedule.lastRunMinute = minuteKey(now);
+      schedule.lastRunMinute = minuteKey(now); // stamped when due: a minute never runs twice
       this.schedulePersist();
-      const scene = this.home.scenes.find((s) => s.id === schedule.sceneID);
+      this.dueSchedules.push({ id: schedule.id, at: Math.floor(now.getTime() / 60_000) * 60_000 });
+    }
+    this.runDueSchedules(now);
+  }
+
+  /** Starts due schedules in order while no scene runs. One still waiting past the grace is missed. */
+  private runDueSchedules(now = this.now()): void {
+    if (this.scheduleSync.role !== 'off') this.dueSchedules = []; // sharing turned on while they waited: the runner decides
+    while (this.dueSchedules.length) {
+      const due = this.dueSchedules[0]!;
+      const schedule = this.home.schedules.find((s) => s.id === due.id);
+      const live = !!schedule?.enabled && !((schedule.pausedUntil ?? 0) > due.at);
+      const busy = this.runner.runningSceneID !== undefined, late = now.getTime() - due.at > RUN_GRACE_MS;
+      if (live && busy && !late) return; // waits for the runner
+      this.dueSchedules.shift();
+      if (!live) continue; // disabled, paused or deleted while it waited
+      const scene = this.home.scenes.find((s) => s.id === schedule!.sceneID);
       if (!scene) { this.log('A scheduled scene no longer exists.', true); continue; }
+      if (late) { this.log(`Missed a schedule: ${scene.name} didn't start because another scene was still running ${RUN_GRACE_MS / 60_000} min after its scheduled time.`, true); continue; }
       try { this.runScene(scene); } catch (error) { this.log(`Schedule skipped: ${message(error)}`, true); }
     }
   }
@@ -947,17 +978,21 @@ export class Home {
   }
 
   async shutdown(): Promise<void> {
-    this.bluetooth.disconnect(undefined);
-    await this.doorbell.shutdown();
+    // First, so a scene that finishes while quitting never starts a queued schedule.
     clearInterval(this.scheduleTimer);
-    await this.scheduleSync.stop();
-    clearTimeout(this.scanTimer);
-    await this.sync.stop('Luma is quitting.');
-    this.runner.stop();
-    this.engine.stop();
-    this.lan?.stop();
-    await this.server.stop();
-    this.persistNow();
+    this.dueSchedules = [];
+    this.scheduleSync.dropQueued();
+    try {
+      this.bluetooth.disconnect(undefined);
+      await this.doorbell.shutdown();
+      await this.scheduleSync.stop();
+      clearTimeout(this.scanTimer);
+      await this.sync.stop('Luma is quitting.');
+      this.runner.stop();
+      this.engine.stop();
+      this.lan?.stop();
+      await this.server.stop();
+    } finally { this.persistNow(); } // the pending save is never lost to a failed step
   }
 
   /** Schedules for the tray / renderer, and light IDs by room. */

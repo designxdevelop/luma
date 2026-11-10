@@ -17,21 +17,30 @@ import LumaCore
     @ObservationIgnored private var relayTask: Task<Void, Never>?
     @ObservationIgnored var relaySession: URLSession = .shared
 
-    private var file: URL { HomeStorage(demo: false).folder.appending(path: "doorbell-alert.json") }
+    private var file: URL { (store?.storageFolder ?? HomeStorage(demo: false).folder).appending(path: "doorbell-alert.json") }
+    /// The settings file exists but couldn't be read: it is preserved, and `update` refuses to overwrite it.
+    @ObservationIgnored var configUnreadable = false
+    static let unreadableMessage = "Doorbell alert settings could not be read and were left in place. Fix or remove doorbell-alert.json to change them."
 
     /// Called at launch and whenever the store enters or leaves the demo.
     func attach(_ store: HomeStore) {
         self.store = store
         if engine == nil { engine = DoorbellAlertEngine(io: io()) } else { engine.stop() }
         var loaded = DoorbellAlertConfig()
+        configUnreadable = false
         if store.demo { loaded.enabled = true; loaded.rooms = ["Living room"] }
-        else if let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(DoorbellAlertConfig.self, from: data), (try? saved.validate()) != nil { loaded = saved }
+        else {
+            do { if let saved = try HomeStore.readIfPresent(DoorbellAlertConfig.self, file) { try saved.validate(); loaded = saved } }
+            catch { configUnreadable = true; status = Self.unreadableMessage; store.log(Self.unreadableMessage, error: true) }
+        }
         config = loaded; engine.config = loaded
         relayTokenSaved = !store.demo && ((try? SecretStore.read(Self.tokenKey)) ?? nil) != nil
         startRelay()
     }
 
     func update(_ edit: (inout DoorbellAlertConfig) -> Void) throws {
+        // Defaults stand in for a file that failed to decode; saving them would overwrite the user's settings.
+        guard !configUnreadable else { throw LumaError.message(Self.unreadableMessage) }
         var next = config; edit(&next)
         try next.validate()
         let relayChanged = next.relayURL != config.relayURL || next.enabled != config.enabled

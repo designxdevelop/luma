@@ -19,7 +19,7 @@ public struct LumaMobileApp: App {
     public var body: some Scene {
         WindowGroup {
             RootView(store: store, navigation: navigation).tint(.lumaAccentFill)
-                .onChange(of: scenePhase) { _, phase in if phase == .active { store.refreshICloud() } }
+                .onChange(of: scenePhase) { _, phase in if phase == .active { store.refreshICloud() } else if phase == .background { store.flushTelemetry() } }
                 .onChange(of: store.watchSnapshot) { _, snapshot in watch.publish(snapshot) }
                 .onChange(of: store.shortcutVocabulary, initial: true) { LumaSiri.vocabularyChanged() }
         }

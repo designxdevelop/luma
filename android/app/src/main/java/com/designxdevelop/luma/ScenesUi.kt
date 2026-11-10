@@ -1,6 +1,11 @@
 package com.designxdevelop.luma
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -131,7 +136,7 @@ private fun NewSceneDialog(store: HomeStore, onDismiss: () -> Unit) {
                     TextButton({ selected = if (selected.size == store.devices.size) emptySet() else store.devices.map { it.id }.toSet() }) { Text("Select all") }
                 }
                 store.devices.filter { it.isLight }.forEach { d ->
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable { selected = if (d.id in selected) selected - d.id else selected + d.id }, verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(d.id in selected, role = Role.Checkbox) { selected = if (it) selected + d.id else selected - d.id }, verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(d.id in selected, null)
                         Column { Text(d.displayName); Text(statusLine(d), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     }
@@ -178,7 +183,7 @@ fun AutomationsScreen(store: HomeStore, modifier: Modifier) {
                             Text("%02d:%02d".format(s.hour, s.minute), style = MaterialTheme.typography.headlineSmall)
                             Text("${scene?.name ?: "Missing scene"} · ${daysText(s.weekdays)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        Switch(s.enabled, { store.saveSchedule(s.copy(enabled = it)) }, Modifier.padding(start = 8.dp))
+                        Switch(s.enabled, { store.saveSchedule(s.copy(enabled = it)) }, Modifier.padding(start = 8.dp).semantics { contentDescription = "Schedule at %02d:%02d".format(s.hour, s.minute) })
                     }
                 }
             }
@@ -212,7 +217,7 @@ private fun ScheduleDialog(store: HomeStore, initial: SceneSchedule, onDismiss: 
                 }
                 Text("Scene", style = MaterialTheme.typography.labelLarge)
                 store.home.scenes.forEach { sc ->
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable { sceneID = sc.id }, verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(sceneID == sc.id, role = Role.RadioButton) { sceneID = sc.id }, verticalAlignment = Alignment.CenterVertically) {
                         androidx.compose.material3.RadioButton(sceneID == sc.id, null); Text(sc.name)
                     }
                 }

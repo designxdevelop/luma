@@ -2,7 +2,32 @@ name: macOS verification
 
 on:
   push:
+    branches: [main]
+    paths:
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'ios/**'
+      - 'macos/**'
+      - 'Resources/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'scripts/**'
+      - 'LICENSE'
+      - 'desktop/src/test/fixtures/**'
+      - '.github/workflows/macos.yml'
   pull_request:
+    paths:
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'ios/**'
+      - 'macos/**'
+      - 'Resources/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'scripts/**'
+      - 'LICENSE'
+      - 'desktop/src/test/fixtures/**'
+      - '.github/workflows/macos.yml'
   workflow_dispatch:
 
 permissions:

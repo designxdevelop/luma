@@ -2,7 +2,14 @@ name: Windows verification
 
 on:
   push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/windows.yml'
   pull_request:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/windows.yml'
   workflow_dispatch:
 
 defaults:

@@ -6,7 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { Capability, CapabilityCommand, DeviceReading, JSONValue, LightDevice } from '../shared/types';
-import { LumaError, isObject, safeInt } from './model';
+import { LumaError, fitText, isObject, safeInt } from './model';
 import { parseReadings } from './readings';
 
 export interface HttpLike { status: number; headers: { get(name: string): string | null }; text(): Promise<string> }
@@ -60,12 +60,14 @@ export class GoveeCloud {
     const lights: LightDevice[] = [];
     for (const row of root.data) {
       if (!isObject(row) || typeof row.device !== 'string' || typeof row.sku !== 'string') throw new LumaError('Govee returned a device without an ID or model.');
+      // An ID or model Luma could not save is skipped, never shortened (it addresses the device).
+      if (!storable(row.device, 128) || !storable(row.sku, 64)) continue;
       // Appliances and sensors are listed too, tagged with their type so bulk light actions skip them.
       const type = typeof row.type === 'string' && row.type !== 'devices.types.light' && /^[\w.-]{1,128}$/.test(row.type) ? row.type : undefined;
       lights.push({
         id: row.device,
         sku: row.sku,
-        name: typeof row.deviceName === 'string' && row.deviceName !== '' ? row.deviceName : row.sku,
+        name: (typeof row.deviceName === 'string' && fitText(row.deviceName, 160)) || row.sku,
         room: 'Unassigned',
         capabilities: row.capabilities === undefined ? [] : decodeCapabilities(row.capabilities),
         ...(type ? { deviceType: type } : {}),
@@ -214,6 +216,8 @@ export class GoveeCloud {
     this.nextAccount = Math.max(this.nextAccount, this.now() + seconds * 1000);
   }
 }
+
+const storable = (v: string, max: number) => v.trim() !== '' && v.length <= max && !/[\u0000-\u001f]/.test(v);
 
 function decodeCapabilities(value: JSONValue): Capability[] {
   if (!Array.isArray(value)) throw new LumaError('Govee returned invalid capabilities.');

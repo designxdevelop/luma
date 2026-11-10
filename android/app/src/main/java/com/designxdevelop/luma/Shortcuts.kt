@@ -51,6 +51,9 @@ import kotlinx.coroutines.withContext
  * The demo home only exists inside the running app, so these do nothing for it when it's closed.
  */
 object LightControl {
+    /** Process-wide, so a closing shade or a finished watch message can't cancel a request in flight. */
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     fun home(context: Context): SavedHome = HomeStore.live?.home ?: HomeFile.load(context) ?: SavedHome()
     fun demo(context: Context) = HomeStore.live?.demo ?: HomeFile.demo(context)
 
@@ -59,21 +62,27 @@ object LightControl {
         if (HomeFile.demo(context)) return
         val home = HomeFile.load(context) ?: return
         val targets = home.devices.filter { it.id in ids && it.isLight }
-        HeadlessScene.run(targets.map { SceneStep(deviceID = it.id, command = CapabilityCommand.power(on)) }, home.devices, KeyStore.read(context)?.let(::GoveeCloud))
-        HomeFile.save(context, home.copy(devices = home.devices.map { if (it in targets) it.copy(power = on) else it }))
+        val cloud = KeyStore.read(context)?.let(::GoveeCloud)
+        // One run per light (power steps have no delay), so only lights that were sent are saved as changed.
+        val sent = targets.filter { HeadlessScene.run(listOf(SceneStep(deviceID = it.id, command = CapabilityCommand.power(on))), home.devices, cloud) == 0 }
+        if (sent.size < targets.size) HomeFile.note(context, "Couldn't turn ${targets.size - sent.size} of ${targets.size} lights ${if (on) "on" else "off"}. Lights need to be on this Wi-Fi, or reachable through Govee cloud with your API key.")
+        if (sent.isNotEmpty()) runCatching { HomeFile.save(context, home.copy(devices = home.devices.map { if (it in sent) it.copy(power = on) else it })) }
+            .onFailure { HomeFile.note(context, "Couldn't save light power: ${it.message}") }
     }
 
     suspend fun runScene(context: Context, sceneID: String) {
         HomeStore.live?.let { s -> withContext(Dispatchers.Main) { s.home.scenes.firstOrNull { it.id == sceneID }?.let(s::runScene) }; return }
         if (HomeFile.demo(context)) return
         val home = HomeFile.load(context) ?: return
-        home.scenes.firstOrNull { it.id == sceneID }?.let { HeadlessScene.run(it.steps, home.devices, KeyStore.read(context)?.let(::GoveeCloud)) }
+        val scene = home.scenes.firstOrNull { it.id == sceneID } ?: return
+        val failed = HeadlessScene.run(scene.steps, home.devices, KeyStore.read(context)?.let(::GoveeCloud))
+        if (failed > 0) HomeFile.note(context, "${scene.name}: $failed of ${scene.steps.size} steps weren't sent.")
     }
 
     /** Refreshes the tile and widgets after any power change. */
     fun changed(context: Context) {
         TileService.requestListeningState(context, android.content.ComponentName(context, AllLightsTile::class.java))
-        CoroutineScope(Dispatchers.Default).launch { runCatching { RoomsWidget().updateAll(context) } }
+        scope.launch { runCatching { RoomsWidget().updateAll(context) } }
         WearSync.publish(context)
     }
 
@@ -82,8 +91,6 @@ object LightControl {
 
 /** Quick Settings: one tap turns every light off, or back on when all are off. */
 class AllLightsTile : TileService() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-
     override fun onStartListening() {
         val lights = LightControl.lights(LightControl.home(this))
         qsTile?.apply {
@@ -99,14 +106,13 @@ class AllLightsTile : TileService() {
         val lights = LightControl.lights(LightControl.home(this))
         if (lights.isEmpty()) return
         val on = lights.none { it.power == true }
-        scope.launch {
-            LightControl.setPower(applicationContext, lights.map { it.id }, on)
-            onStartListening()
-            LightControl.changed(applicationContext)
+        val app = applicationContext
+        LightControl.scope.launch {
+            LightControl.setPower(app, lights.map { it.id }, on)
+            withContext(Dispatchers.Main) { runCatching { onStartListening() } } // The tile may be gone by now.
+            LightControl.changed(app)
         }
     }
-
-    override fun onDestroy() { scope.coroutineContext[kotlinx.coroutines.Job]?.cancel(); super.onDestroy() }
 }
 
 /** Home screen widget: room switches (Glance). */
