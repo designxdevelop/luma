@@ -133,8 +133,11 @@ export class Bridge {
   }
 
   async tokenState(token) {
-    const entry = typeof token === 'string' && token ? await this.storage.get(`access:${await sha256(token)}`) : undefined;
-    return !entry ? 'INVALID_AUTHORIZATION_CREDENTIAL' : entry.expiresAt < this.seconds ? 'EXPIRED_AUTHORIZATION_CREDENTIAL' : 'ok';
+    const key = typeof token === 'string' && token ? `access:${await sha256(token)}` : undefined;
+    const entry = key ? await this.storage.get(key) : undefined;
+    if (!entry) return 'INVALID_AUTHORIZATION_CREDENTIAL';
+    if (entry.expiresAt < this.seconds) { await this.storage.delete(key); return 'EXPIRED_AUTHORIZATION_CREDENTIAL'; }
+    return 'ok';
   }
 
   // ---------- Alexa directives (from the Lambda forwarder) ----------

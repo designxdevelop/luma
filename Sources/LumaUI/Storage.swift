@@ -50,6 +50,7 @@ struct HomeStorage {
         if let path = ProcessInfo.processInfo.environment["LUMA_DATA_DIR"] { folder = URL(fileURLWithPath: path) }
         else { folder = URL.applicationSupportDirectory.appending(path: demo ? "Luma-Demo" : "Luma") }
     }
+    init(folder: URL) { self.folder = folder }
     func load() throws -> SavedHome {
         let file = folder.appending(path: "home.json")
         guard FileManager.default.fileExists(atPath: file.path) else { return SavedHome() }

@@ -77,7 +77,7 @@ import LumaCore
         #expect(backup.schedules.first?.sceneID == backup.scenes.first?.id && backup.schedules.first?.weekdays == [6, 7])
         #expect(backup.scenes.first?.steps.last?.delayMilliseconds == 500)
 
-        let store = HomeStore(demo: true); defer { store.shutdown() }
+        let store = HomeStore(demo: true, folder: testFolder()); defer { store.shutdown() }
         store.home.devices = store.home.devices.map { var d = $0; d.isDemo = false; return d }
         let result = try store.restore(backup)
         #expect(result.scenes == 1 && result.schedules == 1 && result.lightsUpdated == 1 && result.lightsNotFound == 1)

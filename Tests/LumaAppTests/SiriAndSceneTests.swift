@@ -13,7 +13,7 @@ private func sceneCapability(_ instance: String, _ options: [(String, JSONValue)
 /// Runs the real App Intents against a demo store. Serialized: they share `IntentHost.testStore`.
 @MainActor @Suite(.serialized) struct SiriIntentTests {
     private func withStore(_ body: (HomeStore) async throws -> Void) async rethrows {
-        let store = HomeStore(demo: true)
+        let store = HomeStore(demo: true, folder: testFolder())
         IntentHost.testStore = store
         defer { IntentHost.testStore = nil; store.shutdown() }
         try await body(store)
@@ -180,7 +180,7 @@ private func sceneCapability(_ instance: String, _ options: [(String, JSONValue)
     }
 
     @Test func browserGroupsSharedNamesAcrossLightsAndKeepsOneLightsExactList() {
-        let store = HomeStore(demo: true); defer { store.shutdown() }
+        let store = HomeStore(demo: true, folder: testFolder()); defer { store.shutdown() }
         let living = store.lights(inRoom: "Living room")
         let rows = GoveeSceneList.rows(for: living)
         #expect(rows.first { $0.name == "Aurora" }?.count == 2)

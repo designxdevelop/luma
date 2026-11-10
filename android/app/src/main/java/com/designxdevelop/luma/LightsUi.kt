@@ -239,7 +239,7 @@ private fun LightSheet(store: HomeStore, d: LightDevice, onRename: (LightDevice)
             DreamView.capability(d)?.let {
                 val group = store.homeGroups.firstOrNull { it.isDreamView && it.mainDevice.equals(d.id, ignoreCase = true) }
                 SettingRowCompact("DreamView", group?.let { g -> "${g.name}" + (g.reportedLightCount?.let { " · $it lights" } ?: "") + ". Set members in Govee Home." } ?: "Starts the sync group set up in Govee Home") {
-                    Switch(d.dreamView == true, { v -> store.setDreamView(d, v) })
+                    Switch(d.dreamView == true, { v -> store.setDreamView(d, v) }, Modifier.semantics { contentDescription = "DreamView" })
                 }
             }
             store.readings[d.id]?.takeIf { it.isNotEmpty() }?.let { values ->

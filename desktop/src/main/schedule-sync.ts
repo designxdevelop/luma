@@ -59,6 +59,8 @@ export interface ScheduleSyncDeps {
   apply(scenes: LightScene[], schedules: SceneSchedule[]): void;
   /** Validates and starts a scene; returns its run ID or throws. */
   run(sceneID: string): string;
+  /** True while a scene runs; a due shared schedule then waits for it, up to the run grace. */
+  sceneRunning?(): boolean;
   runStatus(runID: string): string | undefined;
   /** Saves home.json now (used before a scheduled run starts). */
   persistHome(): void;
@@ -132,6 +134,8 @@ export class ScheduleSync {
   private readonly server = new WebhookServer();
   private serverStatus = 'Stopped';
   private lastTick: Date;
+  /** Shared occurrences that came due while a scene ran, in due order. Memory only; reported when they start or miss. */
+  private queued: Array<{ id: string; occurrence: string; at: number }> = [];
   private clientTimer?: NodeJS.Timeout;
   private flushing?: Promise<void>;
   private flushAgain = false;
@@ -189,6 +193,7 @@ export class ScheduleSync {
   }
 
   async stop(): Promise<void> {
+    this.dropQueued();
     clearInterval(this.clientTimer); this.clientTimer = undefined;
     await this.server.stop();
     await this.flushing?.catch(() => undefined);
@@ -390,20 +395,53 @@ export class ScheduleSync {
         if (local?.lastRunMinute === occ.key || doc.runs[wire.id]?.occurrence === occ.key) continue;
         // Recorded before the scene starts: after a crash the occurrence is skipped, never repeated.
         if (local) { local.lastRunMinute = occ.key; this.deps.persistHome(); }
-        const report: RunReport = { scheduleID: wire.id, occurrence: occ.key, at: now.getTime(), status: 'started' };
-        if (occ.paused) report.status = 'paused';
-        else if (occ.lateMs > RUN_GRACE_MS) { report.status = 'missed'; report.detail = `This computer was asleep or closed until ${Math.round(occ.lateMs / 60_000)} min after the scheduled time.`; }
-        else {
-          try { report.runID = this.deps.run(wire.sceneID); }
-          catch (error) { report.status = 'failed'; report.detail = (error as Error).message; this.deps.log(`Schedule skipped: ${report.detail}`, true); }
-        }
+        if (!occ.paused && occ.lateMs <= RUN_GRACE_MS) { this.queued.push({ id: wire.id, occurrence: occ.key, at: occ.at }); continue; } // started below
+        const report: RunReport = { scheduleID: wire.id, occurrence: occ.key, at: now.getTime(), status: 'paused' };
+        if (!occ.paused) { report.status = 'missed'; report.detail = `This computer was asleep or closed until ${Math.round(occ.lateMs / 60_000)} min after the scheduled time.`; }
         if (report.status === 'missed') this.deps.log(`Missed a schedule: ${report.detail}`, true);
         doc.runs[wire.id] = report;
         changed = true;
       }
     }
-    if (changed) { this.save(); this.deps.changed(); }
+    this.queued.sort((a, b) => a.at - b.at);
+    if (this.startQueued(now) || changed) { this.save(); this.deps.changed(); }
     return true;
+  }
+
+  /** Starts queued shared schedules once the running scene ends (the home calls this when its runner is free). */
+  runQueued(): void { if (this.startQueued(this.now())) { this.save(); this.deps.changed(); } }
+
+  dropQueued(): void { this.queued = []; }
+
+  /**
+   * Starts queued occurrences in due order while no scene runs; one still waiting past the grace is reported missed.
+   * The run report is written only when the occurrence starts, misses or fails, so the protocol is unchanged.
+   */
+  private startQueued(now: Date): boolean {
+    const doc = this.saved.runner;
+    let wrote = false;
+    while (this.queued.length) {
+      const q = this.queued[0]!;
+      // Disabled, deleted, or this computer stopped running schedules while it waited: dropped.
+      const wire = doc && this.mayExecute ? liveValues<ScheduleWire>(doc.records, 'schedule').find((w) => w.id === q.id && w.enabled) : undefined;
+      const paused = (wire?.pausedUntil ?? 0) > q.at;
+      const busy = this.deps.sceneRunning?.() ?? false, late = now.getTime() - q.at > RUN_GRACE_MS;
+      if (wire && !paused && busy && !late) break; // waits for the runner
+      this.queued.shift();
+      if (!wire) continue;
+      const report: RunReport = { scheduleID: q.id, occurrence: q.occurrence, at: now.getTime(), status: 'started' };
+      if (paused) report.status = 'paused';
+      else if (late) {
+        report.status = 'missed'; report.detail = `Another scene was still running ${RUN_GRACE_MS / 60_000} min after the scheduled time.`;
+        this.deps.log(`Missed a schedule: ${this.deps.scenes().find((s) => s.id.toUpperCase() === wire.sceneID)?.name ?? 'A scene'} didn't start because another scene was still running ${RUN_GRACE_MS / 60_000} min after its scheduled time.`, true);
+      } else {
+        try { report.runID = this.deps.run(wire.sceneID); }
+        catch (error) { report.status = 'failed'; report.detail = (error as Error).message; this.deps.log(`Schedule skipped: ${report.detail}`, true); }
+      }
+      doc!.runs[q.id] = report;
+      wrote = true;
+    }
+    return wrote;
   }
 
   // ---------- paired client ----------

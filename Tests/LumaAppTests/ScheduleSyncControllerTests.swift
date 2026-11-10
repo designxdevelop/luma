@@ -109,6 +109,33 @@ import LumaCore
         #expect(a.schedules.allSatisfy { !$0.enabled }, "a handed-off Mac must not resume running them locally")
     }
 
+    @Test func sharedRunsWaitForARunningSceneWithinTheGrace() async throws {
+        let network = Network(), clock = Clock(Self.at(2026, 6, 1, 6, 0))
+        let mac = Device("mac", network: network, clock: clock, calendar: Self.calendar)
+        defer { try? FileManager.default.removeItem(at: mac.folder) }
+        let other = SceneSchedule(id: UUID(uuidString: "B2B2B2B2-0000-4000-8000-000000000009")!, sceneID: Self.scene.id, hour: 7, minute: 0)
+        mac.scenes = [Self.scene]; mac.schedules = [Self.schedule, other]
+        try mac.becomeRunner("mac", network: network)
+        var busy = true
+        mac.sync.busy = { busy }
+        _ = mac.sync.tick(Self.at(2026, 6, 1, 6, 59, 50)); _ = mac.sync.tick(Self.at(2026, 6, 1, 7, 0, 5))
+        #expect(mac.runs.isEmpty && mac.sync.runReports.isEmpty, "queued, not reported")
+        busy = false
+        _ = mac.sync.tick(Self.at(2026, 6, 1, 7, 0, 40))
+        #expect(mac.runs == [Self.scene.id, Self.scene.id])
+        #expect(mac.sync.runReports.values.allSatisfy { $0.status == "started" && $0.occurrence == Self.schedule.minuteKey(Self.at(2026, 6, 1, 7, 0), calendar: Self.calendar) })
+        _ = mac.sync.tick(Self.at(2026, 6, 1, 7, 1, 0))
+        #expect(mac.runs.count == 2, "never twice for the same minute")
+        // Busy past the grace: reported missed, never run.
+        busy = true
+        _ = mac.sync.tick(Self.at(2026, 6, 2, 6, 59, 50)); _ = mac.sync.tick(Self.at(2026, 6, 2, 7, 0, 5))
+        _ = mac.sync.tick(Self.at(2026, 6, 2, 7, 2, 10))
+        #expect(mac.sync.runReports[Self.schedule.id.uuidString]?.status == "missed")
+        busy = false
+        _ = mac.sync.tick(Self.at(2026, 6, 2, 7, 2, 30))
+        #expect(mac.runs.count == 2)
+    }
+
     @Test func pairedDeviceQueuesOfflineEditsAndNeverRuns() async throws {
         let network = Network(), clock = Clock(Self.at(2026, 6, 1, 6, 0))
         let mac = Device("mac", network: network, clock: clock, calendar: Self.calendar), phone = Device("phone", network: network, clock: clock, calendar: Self.calendar)
@@ -179,7 +206,7 @@ import LumaCore
         defer { try? FileManager.default.removeItem(at: mac.folder) }
         mac.scenes = [Self.scene]; mac.schedules = [Self.schedule]
         try mac.becomeRunner("mac", network: network)
-        let store = HomeStore(demo: true); defer { store.shutdown() }
+        let store = HomeStore(demo: true, folder: testFolder()); defer { store.shutdown() }
         let folder = FileManager.default.temporaryDirectory.appending(path: "luma-ss-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: folder) }
         let paired = ScheduleSyncController(folder: folder, secrets: Memory().secrets, transport: network.transport, now: { clock.now }, calendar: Self.calendar, serves: false)

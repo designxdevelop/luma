@@ -159,7 +159,7 @@ class FakeGovee {
   }
 }
 
-function fixture(t: TestContext, opts: { secretsAvailable?: boolean; seed?: (dir: string) => void } = {}) {
+function fixture(t: TestContext, opts: { secretsAvailable?: boolean; seed?: (dir: string) => void; now?: () => Date } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'luma-home-test-'));
   opts.seed?.(dir);
   const secrets = new MemSecrets(opts.secretsAvailable ?? true);
@@ -172,7 +172,7 @@ function fixture(t: TestContext, opts: { secretsAvailable?: boolean; seed?: (dir
       demo: false, version: 't', storage: new HomeStorage(dir), secrets, copyToClipboard: (text) => clipboard.push(text),
       cloudOptions: { fetch: govee.fetch, sleep: async () => {}, now: Date.now },
       controlOptions: { confirmDelays: [5, 30, 30, 30, 30], expireMs: 200, settleMs: 50 },
-      createLan: (handlers) => new GoveeLan(handlers, () => socket),
+      createLan: (handlers) => new GoveeLan(handlers, () => socket), now: opts.now,
     });
     homes.push(home);
     return home;
@@ -696,18 +696,64 @@ test('tickSchedules fires once per minute, again on another day, and keeps lastR
   assert.equal(runs(), 2);
 });
 
-test('a due schedule is skipped and logged while another scene is running', async (t) => {
-  const f = await connected(t);
+const EVERY_DAY = [1, 2, 3, 4, 5, 6, 7];
+const schedulesLogged = (f: Fixture) => f.home.snapshot().activity.filter((a) => /Schedule skipped|Missed a schedule/.test(a.message)).map((a) => a.message);
+
+test('two schedules due in the same minute both run, in due order, each once', async (t) => {
+  const clock = { now: new Date(2026, 9, 20, 23, 0, 0) };
+  const f = await connected(t, { now: () => clock.now });
+  f.home.saveScene(sceneInput('bed', [{ id: 's1', deviceID: A, command: power(false), delayMilliseconds: 150 }]));
+  f.home.saveScene(quickScene('living', B));
+  f.home.saveSchedule({ id: 'sch-bed', sceneID: 'bed', hour: 23, minute: 0, weekdays: EVERY_DAY, enabled: true });
+  f.home.saveSchedule({ id: 'sch-living', sceneID: 'living', hour: 23, minute: 0, weekdays: EVERY_DAY, enabled: true });
+  f.home.tickSchedules();
+  assert.deepEqual(f.home.snapshot().runs.map((r) => r.sceneID), ['bed'], 'the second waits instead of getting a 409');
+  clock.now = new Date(2026, 9, 20, 23, 0, 15);
+  f.home.tickSchedules(); // same minute again: nothing is queued twice
+  await until(() => f.home.snapshot().runs.length === 2 && f.home.snapshot().runningSceneID === undefined, 'queued schedule to run');
+  await wait(50);
+  const runs = f.home.snapshot().runs.slice().reverse();
+  assert.deepEqual(runs.map((r) => [r.sceneID, r.status]), [['bed', 'completed'], ['living', 'completed']]);
+  assert.ok(runs[1]!.startedAt >= runs[0]!.finishedAt!);
+  assert.deepEqual(schedulesLogged(f), []);
+});
+
+test('a schedule still waiting behind a scene past the 2-minute grace is logged missed and never runs', async (t) => {
+  const clock = { now: new Date(2026, 9, 20, 6, 0, 0) };
+  const f = await connected(t, { now: () => clock.now });
   f.home.saveScene(sceneInput('long', [{ id: 's1', deviceID: A, command: power(true), delayMilliseconds: 5000 }]));
   f.home.saveScene(quickScene('q', B));
-  f.home.saveSchedule({ id: 'sch', sceneID: 'q', hour: 6, minute: 0, weekdays: [1, 2, 3, 4, 5, 6, 7], enabled: true });
+  f.home.saveSchedule({ id: 'sch', sceneID: 'q', hour: 6, minute: 0, weekdays: EVERY_DAY, enabled: true });
   f.home.runSavedScene('long');
-  f.home.tickSchedules(new Date(2026, 9, 20, 6, 0, 0));
-  const snap = f.home.snapshot();
-  assert.ok(snap.activity.some((a) => a.isError && /^Schedule skipped: .*already running/.test(a.message)));
-  assert.deepEqual(snap.runs.map((r) => r.sceneID), ['long']);
+  f.home.tickSchedules();
+  clock.now = new Date(2026, 9, 20, 6, 2, 0);
+  f.home.tickSchedules(); // exactly at the grace: still waiting
+  assert.deepEqual(schedulesLogged(f), []);
+  clock.now = new Date(2026, 9, 20, 6, 2, 1);
+  f.home.tickSchedules();
+  assert.deepEqual(schedulesLogged(f), ["Missed a schedule: Scene q didn't start because another scene was still running 2 min after its scheduled time."]);
+  assert.ok(f.home.snapshot().activity.find((a) => /Missed a schedule/.test(a.message))!.isError);
   f.home.stopScene();
   await until(() => f.home.snapshot().runningSceneID === undefined, 'stop');
+  await wait(50);
+  assert.deepEqual(f.home.snapshot().runs.map((r) => r.sceneID), ['long']);
+});
+
+test('a queued schedule disabled (or deleted) before the scene ends does not run', async (t) => {
+  const clock = { now: new Date(2026, 9, 20, 6, 0, 0) };
+  const f = await connected(t, { now: () => clock.now });
+  f.home.saveScene(sceneInput('long', [{ id: 's1', deviceID: A, command: power(true), delayMilliseconds: 150 }]));
+  f.home.saveScene(quickScene('q', B));
+  f.home.saveSchedule({ id: 'off', sceneID: 'q', hour: 6, minute: 0, weekdays: EVERY_DAY, enabled: true });
+  f.home.saveSchedule({ id: 'gone', sceneID: 'q', hour: 6, minute: 0, weekdays: EVERY_DAY, enabled: true });
+  f.home.runSavedScene('long');
+  f.home.tickSchedules();
+  f.home.saveSchedule({ id: 'off', sceneID: 'q', hour: 6, minute: 0, weekdays: EVERY_DAY, enabled: false });
+  f.home.deleteSchedule('gone');
+  await until(() => f.home.snapshot().runs[0]!.status === 'completed' && f.home.snapshot().runningSceneID === undefined, 'long scene to end');
+  await wait(50);
+  assert.deepEqual(f.home.snapshot().runs.map((r) => r.sceneID), ['long']);
+  assert.deepEqual(schedulesLogged(f), []);
 });
 
 // ---------- 8. webhook (loopback only) ----------
@@ -922,6 +968,37 @@ test('restore lights puts the last scene\'s lights back to their confirmed state
   assert.throws(() => f.home.restoreBeforeScene(), /nothing to restore/);
 });
 
+test('only a scene run by hand replaces the restore point; schedules and webhooks leave it alone', async (t) => {
+  const clock = { now: new Date(2026, 9, 20, 7, 0, 0) };
+  const f = await connected(t, { now: () => clock.now });
+  t.after(() => f.home.stopWebhook());
+  const idle = (what: string) => until(() => f.home.snapshot().runningSceneID === undefined && f.home.snapshot().runs.every((r) => r.status !== 'running'), what);
+  f.home.saveScene(quickScene('mine'));
+  f.home.saveScene(quickScene('auto', B));
+  f.home.runSavedScene('mine');
+  await idle('manual run');
+  assert.equal(f.home.snapshot().restorePoint, 'Before Scene mine');
+
+  f.home.saveSchedule({ id: 'sch', sceneID: 'auto', hour: 7, minute: 0, weekdays: EVERY_DAY, enabled: true });
+  f.home.tickSchedules();
+  assert.equal(f.home.snapshot().runs[0]!.sceneID, 'auto');
+  await idle('schedule run');
+  assert.equal(f.home.snapshot().restorePoint, 'Before Scene mine', 'a schedule run keeps it');
+
+  const port = await startOnFreePort(f.home);
+  const token = f.secrets.read('webhook-token')!;
+  for (const [path, body] of [['/v1/actions', { target: 'all', power: true }], ['/v1/scenes/auto/run', {}], [`/v1/devices/${encodeURIComponent(B)}/commands`, power(false)]] as const) {
+    const res = await call(port, path, { token, method: 'POST', ...(body ? { body } : {}) });
+    assert.equal(res.status, 202, path);
+    await idle(path);
+    assert.equal(f.home.snapshot().restorePoint, 'Before Scene mine', `${path} keeps it`);
+  }
+
+  f.home.runSavedScene('auto');
+  assert.equal(f.home.snapshot().restorePoint, 'Before Scene auto', 'a manual run still replaces it');
+  await idle('second manual run');
+});
+
 test('room white and brightness clamp to each light, skip appliances, and never touch other rooms', async (t) => {
   const f = fixture(t);
   f.govee.extra = [{ device: 'HEAT-1', sku: 'H7130', deviceName: 'Heater', type: 'devices.types.heater', capabilities: [
@@ -987,7 +1064,7 @@ test('compatibility report lists models and features, never names, IDs, rooms or
 
 // ---------- Govee Home account (read-only) ----------
 
-function fakeAccount(opts: { expire?: boolean; failGroups?: boolean } = {}) {
+function fakeAccount(opts: { expire?: boolean; failGroups?: boolean; room?: string } = {}) {
   const calls: Array<{ url: string; method: string; headers: Record<string, string>; body?: any; redirect?: string }> = [];
   const fetch: FetchLike = async (url, init) => {
     calls.push({ url, method: init.method, headers: init.headers, body: init.body ? JSON.parse(init.body) : undefined, redirect: init.redirect });
@@ -999,7 +1076,7 @@ function fakeAccount(opts: { expire?: boolean; failGroups?: boolean } = {}) {
     }
     if (path === 'account/rest/account/v1/verification') return json({ status: 200 });
     if (opts.expire) return json({}, 401);
-    if (path === 'bff-app/v1/device/list') return json({ status: 200, data: { groups: [{ groupId: 7, groupName: 'Living Room' }], devices: [
+    if (path === 'bff-app/v1/device/list') return json({ status: 200, data: { groups: [{ groupId: 7, groupName: opts.room ?? 'Living Room' }], devices: [
       { device: A.toLowerCase(), sku: 'H6008', deviceName: 'Desk lamp', groupId: 7, secretCode: 'never-read', versionSoft: '1.02.03' },
       { device: B, sku: 'H6159', deviceName: 'Shelf strip' },
       { device: 'ZZ', sku: 'H6097', deviceName: 'TV', groupId: 7 }] } });
@@ -1071,4 +1148,80 @@ test('Govee Home: an expired session removes the saved token; a failed extra rea
   await assert.rejects(expired.goveeImport(), /Sign in to Govee Home first/);
   await assert.rejects(new Home({ demo: true, version: 't' }).goveeSignIn('a@b.c', 'x'), /Demo mode/);
   await assert.rejects(home.goveeSignIn('not-an-email', 'x'), LumaError);
+});
+
+// ---------- hostile names never break saving ----------
+
+test('control characters and over-long names from every ingest path are cleaned or dropped, so the home still saves', async (t) => {
+  const f = fixture(t);
+  const home = new Home({ demo: false, version: 't', storage: new HomeStorage(f.dir), secrets: f.secrets,
+    cloudOptions: { fetch: f.govee.fetch, sleep: async () => {}, now: Date.now }, accountFetch: fakeAccount({ room: 'Living\tRoom' }).fetch,
+    createLan: (handlers) => new GoveeLan(handlers, () => f.socket) });
+  t.after(() => home.shutdown());
+  const C = 'AA:BB:CC:DD:EE:03';
+  f.govee.extra = [
+    { device: C, sku: 'H6008', deviceName: `Porch\t${'x'.repeat(200)}`, type: 'devices.types.light', capabilities: capsFor([2000, 9000]) },
+    { device: 'BAD\u0001ID', sku: 'H6008', deviceName: 'Ghost', capabilities: [] },
+    { device: 'AA:BB:CC:DD:EE:04', sku: 'H'.repeat(65), deviceName: 'Too long a model', capabilities: [] },
+    { device: 'AA:BB:CC:DD:EE:05', sku: 'H6008', deviceName: ' \u0002 ', capabilities: [] },
+  ];
+  await home.connect(KEY);
+  await home.goveeSignIn('me@example.com', 'pw', '123456');
+  home.goveeApplyRooms([A]);
+  home.assignRoom(B, 'Den\u0000\u001f');
+  home.renameDevice(B, `Shelf\nstrip${'y'.repeat(100)}`);
+  assert.throws(() => home.renameDevice(B, '\u0001\u0002'), /Enter a name/);
+  home.saveScene({ ...quickScene('movie'), name: 'Movie\tnight' });
+  await home.discover();
+  f.socket.inject(scanPacket('LAN\u0007ID', '192.168.1.60'), '192.168.1.60');
+  f.socket.inject({ msg: { cmd: 'scan', data: { ip: '192.168.1.61', device: '   ', sku: 'H6008' } } }, '192.168.1.61');
+  f.socket.inject({ msg: { cmd: 'scan', data: { ip: '192.168.1.62', device: 'AA:BB:CC:DD:EE:06', sku: 'H60\n08' } } }, '192.168.1.62');
+
+  home.persistNow();
+  assert.ok(!home.snapshot().activity.some((e) => /Could not save/.test(e.message)), 'no save failure was logged');
+  const loaded = new HomeStorage(f.dir).load();
+  assert.doesNotThrow(() => new HomeStorage(f.dir).save(loaded));
+  const byID = new Map(loaded.devices.map((d) => [d.id, d]));
+  assert.deepEqual([...byID.keys()].sort(), [A, B, C, 'AA:BB:CC:DD:EE:05'].sort(), 'unsavable IDs and models were never added');
+  assert.equal(byID.get(C)!.name, `Porch ${'x'.repeat(154)}`);
+  assert.equal(byID.get('AA:BB:CC:DD:EE:05')!.name, 'H6008', 'a blank name falls back to the model');
+  assert.equal(byID.get(A)!.room, 'Living Room');
+  assert.equal(byID.get(B)!.room, 'Den');
+  assert.equal(byID.get(B)!.customName, `Shelf strip${'y'.repeat(53)}`);
+  assert.equal(loaded.scenes.find((s) => s.id === 'movie')!.name, 'Movie night');
+});
+
+test('LAN discovery stops adding new lights at the storage limit but keeps updating known ones', async (t) => {
+  const devices = Array.from({ length: 1000 }, (_, i) => ({ id: `ID-${i}`, sku: 'H6008', name: `Light ${i}`, room: 'Unassigned', capabilities: [] }));
+  const f = fixture(t, { seed: (dir) => writeFileSync(join(dir, 'home.json'), JSON.stringify({ version: 1, devices, scenes: [], schedules: [], webhookPort: 8787, allowLAN: false })) });
+  await f.home.discover();
+  f.socket.inject(scanPacket('NEW-ONE', '192.168.1.70'), '192.168.1.70');
+  f.socket.inject(scanPacket('ID-7', '192.168.1.71'), '192.168.1.71');
+  assert.equal(f.home.confirmedDevices().length, 1000);
+  assert.equal(confirmed(f, 'ID-7').ip, '192.168.1.71');
+  assert.equal(saved(f).devices.length, 1000);
+  assert.ok(!f.home.snapshot().activity.some((e) => /Could not save/.test(e.message)));
+});
+
+test('a launch-time LAN scan that cannot bind is logged where the person can see it', async (t) => {
+  const f = fixture(t);
+  const busy = new FakeSocket();
+  busy.bind = () => { throw Object.assign(new Error('bind'), { code: 'EADDRINUSE' }); };
+  const home = new Home({ demo: false, version: 't', storage: new HomeStorage(f.dir), secrets: f.secrets, createLan: (handlers) => new GoveeLan(handlers, () => busy) });
+  t.after(() => home.shutdown());
+  await assert.rejects(home.discover(), /port 4002 is already in use/);
+  const entry = home.snapshot().activity[0]!;
+  assert.match(entry.message, /^LAN discovery failed: UDP port 4002 is already in use/);
+  assert.equal(entry.isError, true);
+  assert.equal(home.snapshot().notice, entry.message);
+});
+
+test('shutdown still writes the pending save when an earlier step fails', async (t) => {
+  const f = await connected(t);
+  f.home.assignRoom(A, 'Attic');
+  const stop = f.home.sync.stop.bind(f.home.sync);
+  let failed = false;
+  f.home.sync.stop = async (...args) => { if (!failed) { failed = true; throw new Error('capture hung'); } return stop(...args); };
+  await assert.rejects(f.home.shutdown(), /capture hung/);
+  assert.equal(JSON.parse(readFileSync(f.file, 'utf8')).devices.find((d: LightDevice) => d.id === A).room, 'Attic');
 });

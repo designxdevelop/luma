@@ -180,7 +180,8 @@ object SyncProtocol {
         val c = java.net.URL("https://${code.host}:${code.port}$path").openConnection() as HttpsURLConnection
         try {
             c.sslSocketFactory = ssl.socketFactory
-            c.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true } // The pin identifies the runner; hosts are often bare LAN IPs.
+            // The pin identifies the runner (hosts are often bare LAN IPs), so the verifier checks the pin too rather than the name.
+            c.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, session -> runCatching { SyncCodes.certPin(session.peerCertificates[0].encoded) == code.pin }.getOrDefault(false) }
             c.requestMethod = "POST"; c.connectTimeout = timeoutMs; c.readTimeout = timeoutMs; c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
             c.setRequestProperty("Authorization", "Bearer ${code.token}")

@@ -11,7 +11,8 @@ struct ActivityEntry: Identifiable {
 
 @Observable final class HomeStore {
     var iCloudStatus = "Checking iCloud…"
-    private var configurationSync: CloudSyncCoordinator?
+    /// Internal so tests can attach one with a fake transport.
+    var configurationSync: CloudSyncCoordinator?
     private var scheduleOwners: [UUID: String] = [:]
     /// Explicit primary/fallback per schedule. Absent = legacy single-installation schedule.
     private(set) var coordinations: [UUID: ScheduleCoordination] = [:]
@@ -29,7 +30,7 @@ struct ActivityEntry: Identifiable {
     var home = SavedHome()
     private(set) var floorPlans: [FloorPlan] = []
     private var canSaveFloorPlans = true
-    private var floorPlanStorage: FloorPlanStorage { FloorPlanStorage(folder: HomeStorage(demo: demo).folder) }
+    private var floorPlanStorage: FloorPlanStorage { FloorPlanStorage(folder: folderOverride ?? HomeStorage(demo: demo).folder) }
     var activity: [ActivityEntry] = []
     var notice: String?
     var busy = false
@@ -42,7 +43,8 @@ struct ActivityEntry: Identifiable {
     /// Govee Home control groups and automations from the last signed-in import, saved with the home.
     var accountGroups: [GoveeHomeImport.HomeGroup] = [] { didSet { if !demo { home.goveeHomeGroups = accountGroups.isEmpty ? nil : accountGroups } } }
     var accountAutomations: [GoveeHomeImport.Automation] = [] { didSet { if !demo { home.goveeHomeAutomations = accountAutomations.isEmpty ? nil : accountAutomations } } }
-    /// Each light's last known state from just before the most recent scene run.
+    /// Each light's last known state from just before the most recent scene run by hand (app, Siri/Shortcuts, watch).
+    /// Schedule and webhook runs pass `saveRestorePoint: false` and leave it alone.
     var restorePoint: LightScene?
     var webhookRunning = false
     var webhookStatus = "Stopped"
@@ -53,10 +55,25 @@ struct ActivityEntry: Identifiable {
     var runs: [AutomationRun] = []
     var demo: Bool
     var canSave = true
+    /// False when schedule-owners.json or schedule-coordination.json exists but can't be read:
+    /// those files are preserved, and nothing runs, saves, or syncs schedule ownership from empty state.
+    var canSaveSchedules = true
+    /// The legacy scheduler's previous tick. Starts just before this minute, so a launch at 7:00:05 still runs 7:00.
+    private var lastScheduleTick = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 / 60).rounded(.down) * 60 - 1)
+    /// Due legacy runs that found a scene running, in due order. In memory only.
+    private var queuedSchedules: [(id: UUID, key: String, at: Date)] = []
+    /// iCloud-triggered cloud reconnects back off from 30 s to 30 min, and stop for a key Govee
+    /// rejected until the saved key changes or a connect succeeds.
+    var cloudRetry = (at: Date.distantPast, delay: 30.0, rejectedKey: String?.none)
+    /// iCloud records already logged as unreadable, so a 30 s exchange doesn't repeat the entry.
+    private var skippedSyncKeys: Set<String> = []
     let screenSync: ScreenSync
     /// Shared schedules: run here (Mac), or pair with the computer that runs them.
     private(set) var scheduleSync: ScheduleSyncController
     private let storage: HomeStorage
+    /// Tests pass a temporary folder: home, sidecars, activity log, floor plans and doorbell settings all live there.
+    private let folderOverride: URL?
+    var storageFolder: URL { storage.folder }
     private let screenSyncDefaults: UserDefaults?
     private var shuttingDown = false
     private(set) var cloud: GoveeCloud?
@@ -119,10 +136,11 @@ struct ActivityEntry: Identifiable {
     /// Tests build their own stores and must not touch this: it reads the real home and Keychain.
     static let shared = HomeStore()
 
-    init(demo demoOverride: Bool? = nil, cloud: GoveeCloud? = nil, screenSyncDefaults: UserDefaults? = .standard) {
+    init(demo demoOverride: Bool? = nil, cloud: GoveeCloud? = nil, screenSyncDefaults: UserDefaults? = .standard, folder: URL? = nil) {
         let isDemo = demoOverride ?? CommandLine.arguments.contains("--demo")
         demo = isDemo
-        storage = HomeStorage(demo: false)
+        folderOverride = folder
+        storage = folder.map(HomeStorage.init(folder:)) ?? HomeStorage(demo: false)
         scheduleSync = ScheduleSyncController(folder: isDemo ? nil : storage.folder)
         self.screenSyncDefaults = screenSyncDefaults
         screenSync = ScreenSync(defaults: isDemo ? nil : screenSyncDefaults)
@@ -131,10 +149,10 @@ struct ActivityEntry: Identifiable {
         if !isDemo { accountSignedIn = (try? SecretStore.read(Self.accountTokenKey)) != nil }
         do { home = try storage.load() }
         catch { canSave = false; notice = "Your saved home could not be read. It has been preserved at \(storage.folder.path)." }
-        if let data = try? Data(contentsOf: storage.folder.appending(path: "schedule-owners.json")),
-           let owners = try? JSONDecoder().decode([UUID: String].self, from: data) { scheduleOwners = owners }
-        if let data = try? Data(contentsOf: storage.folder.appending(path: "schedule-coordination.json")),
-           let saved = try? JSONDecoder().decode([UUID: ScheduleCoordination].self, from: data) { coordinations = saved }
+        do {
+            scheduleOwners = try Self.readIfPresent([UUID: String].self, storage.folder.appending(path: "schedule-owners.json")) ?? [:]
+            coordinations = try Self.readIfPresent([UUID: ScheduleCoordination].self, storage.folder.appending(path: "schedule-coordination.json")) ?? [:]
+        } catch { canSaveSchedules = false }
         schedulerDevices = [thisSchedulerDevice]
         for i in home.devices.indices { home.devices[i].ip = nil; home.devices[i].online = nil }
         accountGroups = home.goveeHomeGroups ?? []; accountAutomations = home.goveeHomeAutomations ?? []
@@ -167,6 +185,7 @@ struct ActivityEntry: Identifiable {
         screenSync.readback = { [weak self] device in await self?.refresh(device) }
         screenSync.observeSystem()
         if !canSave, let notice { log(notice, error: true) }
+        if !canSaveSchedules { log("Schedule owner or failover settings could not be read and have been preserved at \(storage.folder.path). Local schedules won't run and iCloud sync is paused until they can be read.", error: true) }
         // CloudKit traps without the entitlement, so nothing CloudKit is created
         // unless this signed build carries the Luma container (ad-hoc and simulator builds stay local).
         if !isDemo && demoOverride == nil && CloudAvailability.isEntitled {
@@ -176,10 +195,10 @@ struct ActivityEntry: Identifiable {
                 status: { [weak self] message in
                     guard let self else { return }
                     self.iCloudStatus = message
-                    if !self.cloudConnected && !self.busy {
+                    if !self.cloudConnected && !self.busy && Date() >= self.cloudRetry.at {
                         Task { [weak self] in
-                            guard let self, let key = try? SecretStore.read("govee-api-key") else { return }
-                            await self.connectCloud(key: key)
+                            guard let self, let key = try? SecretStore.read("govee-api-key"), self.retryCloudInBackground(key: key) else { return }
+                            await self.connectCloud(key: key, background: true)
                         }
                     }
                 })
@@ -209,8 +228,9 @@ struct ActivityEntry: Identifiable {
         }
         sync.run = { [weak self] id in
             guard let self, let scene = self.home.scenes.first(where: { $0.id == id }) else { throw LumaError.message("Scheduled scene no longer exists.") }
-            return try self.runScene(scene)
+            return try self.runScene(scene, saveRestorePoint: false)
         }
+        sync.busy = { [weak self] in self?.runningSceneID != nil }
         sync.runStatus = { [weak self] id in self?.runs.first { $0.id == id }?.status }
         sync.log = { [weak self] message, error in self?.log(message, error: error) }
     }
@@ -226,10 +246,34 @@ struct ActivityEntry: Identifiable {
     }
     func persist() {
         guard canSave, !demo else { return }
+        telemetrySave?.cancel(); telemetrySave = nil; lightAdded = false
         // Every scene/schedule edit, from any view, becomes a shared change here.
         scheduleSync.reconcile()
         do { try storage.save(home); configurationSync?.changed() } catch { log("Could not save home: \(error.localizedDescription)", error: true) }
     }
+    /// Light telemetry (power, brightness, colour, online, IP, last seen) is never synced, so status packets and
+    /// readbacks only save home.json, coalesced over 300 ms, with no shared-schedule reconcile or iCloud capture.
+    /// A merge that added a light changes the synced snapshot (its room), so that takes the full path.
+    func persistTelemetry() {
+        guard canSave, !demo else { return }
+        if lightAdded { persist(); return }
+        guard telemetrySave == nil else { return }
+        telemetrySave = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            self?.flushTelemetry()
+        }
+    }
+    /// Writes a pending telemetry save now: on quit, on iOS backgrounding, and before home.json is read back.
+    func flushTelemetry() {
+        guard let pending = telemetrySave else { return }
+        pending.cancel(); telemetrySave = nil
+        guard canSave, !demo else { return }
+        do { try storage.save(home) } catch { log("Could not save home: \(error.localizedDescription)", error: true) }
+    }
+    @ObservationIgnored private var telemetrySave: Task<Void, Never>?
+    /// Set when a merge appends a light; cleared by the next full save.
+    @ObservationIgnored private var lightAdded = false
 
     @discardableResult
     func importFloorPlan(name: String, image: Data) throws -> UUID {
@@ -296,7 +340,14 @@ struct ActivityEntry: Identifiable {
         configurationSync?.changed()
     }
 
-    func connectCloud(key: String) async {
+    /// Gate for iCloud-triggered reconnects: true when one may run now, and schedules the next.
+    func retryCloudInBackground(key: String, now: Date = Date()) -> Bool {
+        guard key != cloudRetry.rejectedKey, now >= cloudRetry.at else { return false }
+        cloudRetry.at = now.addingTimeInterval(cloudRetry.delay); cloudRetry.delay = min(cloudRetry.delay * 2, 1800)
+        return true
+    }
+    /// `background` retries log failures without raising the notice banner.
+    func connectCloud(key: String, background: Bool = false) async {
         guard !busy else { return }
         busy = true; defer { busy = false }
         do {
@@ -309,7 +360,7 @@ struct ActivityEntry: Identifiable {
             let found = try await client.devices()
             try SecretStore.save(value, account: "govee-api-key")
             if demo { leaveDemo() }
-            cloud = client; cloudConnected = true
+            cloud = client; cloudConnected = true; cloudRetry = (.distantPast, 30, nil)
             for device in found { merge(device) }
             persist(); log("Connected Govee cloud. Found \(found.count) lights.")
             for device in found {
@@ -317,8 +368,12 @@ struct ActivityEntry: Identifiable {
                 do { merge(try await client.state(for: device), stateRevision: revision) }
                 catch { log("Could not read \(device.name): \(error.localizedDescription)") }
             }
-            persist()
-        } catch { log("Cloud connection failed: \(error.localizedDescription)", error: true) }
+            persistTelemetry()
+        } catch {
+            // ponytail: matches GoveeCloud's HTTP 401/403 message; a typed error would mean changing LumaCore.
+            if background, error.localizedDescription.contains("rejected the API key") { cloudRetry.rejectedKey = key }
+            log("Cloud connection failed: \(error.localizedDescription)", error: !background)
+        }
     }
     func disconnectCloud() {
         cloud = nil; cloudConnected = false
@@ -329,7 +384,7 @@ struct ActivityEntry: Identifiable {
         guard !scanning else { return }
         if demo { log("Demo mode: LAN discovery is disabled. Leave demo to discover real lights."); return }
         do {
-            try lan.start(onDevice: { [weak self] device in self?.merge(device); self?.persist() }, onError: { [weak self] message in self?.log(message, error: true) })
+            try startLAN()
             try lan.discover(); scanning = true; log("Scanning home Wi-Fi for LAN-enabled Govee lights…")
             scanTask?.cancel()
             scanTask = Task { [weak self] in
@@ -343,7 +398,9 @@ struct ActivityEntry: Identifiable {
     }
     func merge(_ packet: LightDevice, stateRevision: UInt64? = nil) {
         var incoming = packet
-        let index = home.devices.firstIndex { $0.id.caseInsensitiveCompare(incoming.id) == .orderedSame || (incoming.ip != nil && $0.ip == incoming.ip) }
+        // ID first: a stale light still holding a reused IP must not absorb another light's packet.
+        let index = home.devices.firstIndex { $0.id.caseInsensitiveCompare(incoming.id) == .orderedSame }
+            ?? incoming.ip.flatMap { ip in home.devices.firstIndex { $0.ip == ip } }
         if let index { incoming.id = home.devices[index].id }
         if let stateRevision, stateRevision != deviceRevisions[incoming.id, default: 0] { return }
         recentConfirmations = recentConfirmations.filter { $0.value.until > .now }
@@ -373,7 +430,8 @@ struct ActivityEntry: Identifiable {
             }
             d.online = incoming.online ?? d.online; d.lastSeen = incoming.lastSeen ?? d.lastSeen
             home.devices[i] = d
-        } else { home.devices.append(incoming); log("Found \(incoming.name) (\(incoming.sku)).") }
+        } else { home.devices.append(incoming); lightAdded = true; log("Found \(incoming.name) (\(incoming.sku)).") }
+        if let ip = incoming.ip { for i in home.devices.indices where home.devices[i].ip == ip && home.devices[i].id != incoming.id { home.devices[i].ip = nil } }
         for (key, pending) in pendingControls where key.deviceID == incoming.id && pending.phase == .confirming {
             if incoming.online != false && incoming.reportedValue(for: key.instance) == pending.command.value {
                 pendingControls.removeValue(forKey: key)
@@ -386,18 +444,20 @@ struct ActivityEntry: Identifiable {
     }
     func refresh(_ device: LightDevice) async {
         guard !shuttingDown, !Task.isCancelled else { return }
+        // Views pass display copies (custom name, pending overlay); LAN caches what it's given
+        // and builds the status reply from it, so both routes use the stored copy.
+        let reported = home.devices.first { $0.id == device.id } ?? device
         do {
-            if device.isDemo { log("Demo state refreshed.") }
-            else if device.ip != nil {
-                try lan.start(onDevice: { [weak self] incoming in self?.merge(incoming); self?.persist() }, onError: { [weak self] text in self?.log(text, error: true) })
-                try lan.requestStatus(for: device)
+            if reported.isDemo { log("Demo state refreshed.") }
+            else if reported.ip != nil {
+                try startLAN()
+                try lan.requestStatus(for: reported)
             }
             else if let cloud {
                 let revision = deviceRevisions[device.id, default: 0]
-                let reported = home.devices.first { $0.id == device.id } ?? device
                 let (state, values) = try await cloud.stateAndReadings(for: reported)
                 readings[device.id] = values.isEmpty ? nil : (values, Date())
-                merge(state, stateRevision: revision); persist()
+                merge(state, stateRevision: revision); persistTelemetry()
             }
             else { throw LumaError.message("Connect cloud or discover LAN lights to refresh state.") }
         } catch { log(error.localizedDescription, error: true) }
@@ -484,7 +544,7 @@ struct ActivityEntry: Identifiable {
         var usedLAN = false
         if device.isDemo { route = "Demo" }
         else if device.ip != nil && ["powerSwitch", "brightness", "colorRgb", "colorTemperatureK"].contains(command.instance) && (command.instance != "colorTemperatureK" || (2000...9000).contains(command.value.number ?? 0)) {
-            try lan.start(onDevice: { [weak self] incoming in self?.merge(incoming); self?.persist() }, onError: { [weak self] message in self?.log(message, error: true) })
+            try startLAN()
             try lan.control(device: device, command: command); route = "LAN sent; awaiting status"; usedLAN = true
             accepted()
         } else if let cloud {
@@ -502,7 +562,7 @@ struct ActivityEntry: Identifiable {
                     merge(read, stateRevision: revision)
                     if pendingControls[operation.key] == nil { break }
                 }
-                persist()
+                persistTelemetry()
             }
             catch { log("Command accepted; state read failed for \(device.name): \(error.localizedDescription)") }
         }
@@ -547,8 +607,9 @@ struct ActivityEntry: Identifiable {
         for command in commands { try lan.control(device: device, command: command) }
     }
     func startLAN() throws {
-        try lan.start(onDevice: { [weak self] incoming in self?.merge(incoming); self?.persist() }, onError: { [weak self] message in self?.log(message, error: true) })
+        try lan.start(onDevice: { [weak self] incoming in self?.lanStatus(incoming) }, onError: { [weak self] message in self?.log(message, error: true) })
     }
+    func lanStatus(_ incoming: LightDevice) { merge(incoming); persistTelemetry() }
     func perform(_ command: CapabilityCommand, ids: [String]) {
         for id in ids {
             do { enqueue(try prepare(command, deviceID: id, coalescible: true)) }
@@ -578,7 +639,7 @@ struct ActivityEntry: Identifiable {
                     if let cloud {
                         let revision = self.deviceRevisions[device.id, default: 0]
                         self.merge(try await cloud.state(for: device), stateRevision: revision)
-                        self.persist()
+                        self.persistTelemetry()
                     } else if device.ip != nil { try self.lan.requestStatus(for: device) }
                 } catch is CancellationError { return }
                 catch { self.log("State confirmation unavailable: \(error.localizedDescription)") }
@@ -741,6 +802,12 @@ struct ActivityEntry: Identifiable {
         else { home.scenes.append(scene) }
         persist(); log("Saved scene: \(scene.name).")
     }
+    /// A scene file never replaces an existing scene: a clashing ID gets a fresh one.
+    func importScene(_ scene: LightScene) throws {
+        var scene = scene
+        if home.scenes.contains(where: { $0.id == scene.id }) { scene.id = UUID() }
+        try saveScene(scene)
+    }
     func captureScene(name: String, ids: [String]) throws {
         try saveScene(.init(name: name, steps: snapshotSteps(ids)))
     }
@@ -883,17 +950,46 @@ struct ActivityEntry: Identifiable {
         log("Loaded Govee scenes for \(lights.count - failed.count) of \(lights.count) lights" + skipped, error: !failed.isEmpty)
     }
     func tickSchedules(now: Date = Date()) {
+        // Advanced even while shared sync runs schedules, so turning it off doesn't report a backlog as missed.
+        let previous = lastScheduleTick; lastScheduleTick = now
         // Shared schedules run only on the selected computer; a paired device never runs them.
-        if scheduleSync.tick(now) { return }
-        // Coordinated schedules never run on the legacy path, even offline.
-        for i in home.schedules.indices where coordinations[home.schedules[i].id] == nil && (scheduleOwners[home.schedules[i].id] == nil || scheduleOwners[home.schedules[i].id] == installationID) && home.schedules[i].shouldRun(at: now) {
-            let schedule = home.schedules[i]
-            home.schedules[i].lastRunMinute = schedule.minuteKey(now)
-            persist()
-            guard let scene = home.scenes.first(where: { $0.id == schedule.sceneID }) else { log("Scheduled scene no longer exists.", error: true); continue }
-            do { try runScene(scene) } catch { log("Schedule skipped: \(error.localizedDescription)", error: true) }
+        if scheduleSync.tick(now) { queuedSchedules.removeAll(); return }
+        // Coordinated schedules never run on the legacy path, even offline. Unreadable ownership runs nothing.
+        // Every minute since the last tick, so a 7:00 run is seen after waking at 7:01 (sleep, App Nap).
+        var due: [(index: Int, occ: ScheduleSync.Occurrence)] = []
+        for i in home.schedules.indices where isLegacyHere(home.schedules[i]) {
+            for occ in ScheduleSync.occurrences(.init(home.schedules[i]), lastTick: previous, now: now) where !occ.paused && home.schedules[i].lastRunMinute != occ.key { due.append((i, occ)) }
         }
+        for (i, occ) in due.sorted(by: { ($0.occ.at, $0.index) < ($1.occ.at, $1.index) }) {
+            home.schedules[i].lastRunMinute = occ.key
+            persist()
+            if occ.late > ScheduleSync.runGrace { log("Missed a schedule: Luma was asleep or closed until \(Int(occ.late / 60)) min after the scheduled time.", error: true); continue }
+            queuedSchedules.append((home.schedules[i].id, occ.key, occ.at))
+        }
+        runQueuedSchedules(now: now)
         tickCoordinated()
+    }
+    /// Starts queued legacy runs in due order once no scene is running. Each must still exist, be enabled, run here
+    /// and be unpaused; one that couldn't start within the grace is logged missed and dropped.
+    /// ponytail: drained on the 15 s tick, so a queued run starts up to 15 s after the scene ahead of it ends,
+    /// and one freed in the last 15 s of the grace is reported missed; draining on scene end would close that.
+    private func runQueuedSchedules(now: Date) {
+        while let next = queuedSchedules.first {
+            guard let schedule = home.schedules.first(where: { $0.id == next.id }), schedule.enabled, isLegacyHere(schedule),
+                  schedule.lastRunMinute == next.key, !(schedule.pausedUntil.map { $0 > next.at } ?? false) else { queuedSchedules.removeFirst(); continue }
+            let late = now.timeIntervalSince(next.at)
+            if late > ScheduleSync.runGrace {
+                queuedSchedules.removeFirst()
+                log("Missed a schedule: another scene was still running \(Int(late / 60)) min after the scheduled time.", error: true); continue
+            }
+            guard runningSceneID == nil else { return }
+            queuedSchedules.removeFirst()
+            guard let scene = home.scenes.first(where: { $0.id == schedule.sceneID }) else { log("Scheduled scene no longer exists.", error: true); continue }
+            do { try runScene(scene, saveRestorePoint: false) } catch { log("Schedule skipped: \(error.localizedDescription)", error: true) }
+        }
+    }
+    private func isLegacyHere(_ schedule: SceneSchedule) -> Bool {
+        canSaveSchedules && coordinations[schedule.id] == nil && (scheduleOwners[schedule.id] == nil || scheduleOwners[schedule.id] == installationID)
     }
     func startWebhooks() {
         do {
@@ -939,11 +1035,11 @@ struct ActivityEntry: Identifiable {
             if request.method == "GET", path.count == 3, path[0...1] == ["v1", "runs"], let id = UUID(uuidString: path[2]), let run = runs.first(where: { $0.id == id }) { return .init(status: 200, body: try JSONEncoder.pretty.encode(run)) }
             if request.method == "POST", path.count == 4, path[0...1] == ["v1", "scenes"], path[3] == "run" {
                 guard let id = UUID(uuidString: path[2]), let scene = home.scenes.first(where: { $0.id == id }) else { return .init(status: 404, json: .object(["error": .string("Scene not found")])) }
-                return accepted(try runScene(scene))
+                return accepted(try runScene(scene, saveRestorePoint: false))
             }
             if request.method == "POST", path.count == 4, path[0...1] == ["v1", "devices"], path[3] == "commands" {
                 let command = try JSONDecoder().decode(CapabilityCommand.self, from: request.body)
-                return accepted(try runScene(.init(name: "Webhook command", steps: [.init(deviceID: path[2], command: command)])))
+                return accepted(try runScene(.init(name: "Webhook command", steps: [.init(deviceID: path[2], command: command)]), saveRestorePoint: false))
             }
             if request.method == "POST", path == ["v1", "actions"] {
                 let action = try JSONDecoder().decode(AutomationAction.self, from: request.body)
@@ -955,7 +1051,7 @@ struct ActivityEntry: Identifiable {
                     for command in commands { try CommandValidation.validate(command, for: device) }
                 }
                 let steps = ids.flatMap { id in commands.map { SceneStep(deviceID: id, command: $0) } }
-                return accepted(try runScene(.init(name: "Webhook action", steps: steps)))
+                return accepted(try runScene(.init(name: "Webhook action", steps: steps), saveRestorePoint: false))
             }
             return .init(status: 404, json: .object(["error": .string("Route not found")]))
         } catch {
@@ -966,7 +1062,7 @@ struct ActivityEntry: Identifiable {
     func accepted(_ runID: UUID) -> WebhookResponse {
         .init(status: 202, json: .object(["accepted": .bool(true), "runID": .string(runID.uuidString), "statusURL": .string("/v1/runs/\(runID.uuidString)"), "note": .string("Commands run asynchronously. Completed means submitted, not hardware-confirmed.")]))
     }
-    func shutdown() { screenSync.shutdown(); doorbell.shutdown(); configurationSync?.stop(); scheduleCoordinator?.cancel(); shuttingDown = true; scheduleSync.stop(); server.stop(); if demo && webhookCertificate != nil { try? WebhookTLS.delete(demo: true) }; lan.stop(); timerTask?.cancel(); sceneTask?.cancel(); scanTask?.cancel(); reconnectTask?.cancel(); stopCommands() }
+    func shutdown() { flushTelemetry(); screenSync.shutdown(); doorbell.shutdown(); configurationSync?.stop(); scheduleCoordinator?.cancel(); shuttingDown = true; scheduleSync.stop(); server.stop(); if demo && webhookCertificate != nil { try? WebhookTLS.delete(demo: true) }; lan.stop(); timerTask?.cancel(); sceneTask?.cancel(); scanTask?.cancel(); reconnectTask?.cancel(); stopCommands() }
     func loadDemo() {
         configurationSync?.stop(); configurationSync = nil
         // Explore Demo can enter from a real home with a chosen or running
@@ -1005,7 +1101,7 @@ struct ActivityEntry: Identifiable {
         doorbell.attach(self)
     }
     func leaveDemo() {
-        screenSync.usePreferences(screenSyncDefaults); stopWebhooks(); stopScene(); stopCommands(); webhookToken = ""; demo = false
+        flushTelemetry(); screenSync.usePreferences(screenSyncDefaults); stopWebhooks(); stopScene(); stopCommands(); webhookToken = ""; demo = false
         restorePoint = nil
         do { home = try storage.load(); for i in home.devices.indices { home.devices[i].ip = nil; home.devices[i].online = nil } }
         catch { canSave = false; log("Saved home could not be loaded. Your file was preserved.", error: true) }
@@ -1040,7 +1136,27 @@ extension HomeStore {
         Task { [weak self] in await self?.configurationSync?.exchange() }
     }
 
-    private func syncSnapshot() throws -> [String: Data] {
+    /// Nil when the file doesn't exist; throws when it exists but can't be read or decoded.
+    static func readIfPresent<T: Decodable>(_ type: T.Type, _ file: URL) throws -> T? {
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        return try JSONDecoder().decode(type, from: Data(contentsOf: file))
+    }
+
+    /// Replaces entries in place by ID, removes tombstones (nil), and appends new entries sorted by ID,
+    /// so iCloud's unordered records never reorder the list or order it differently per device.
+    static func upsert<T: Identifiable>(_ items: inout [T], _ changes: [(T.ID, T?)]) where T.ID == UUID {
+        var added: [T] = []
+        for (id, value) in changes {
+            guard let value else { items.removeAll { $0.id == id }; continue }
+            if let i = items.firstIndex(where: { $0.id == id }) { items[i] = value } else { added.append(value) }
+        }
+        items += added.sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+
+    func syncSnapshot() throws -> [String: Data] {
+        // An unreadable home, floor plan list or schedule sidecar would look like deletions to the
+        // coordinator and be uploaded as tombstones, so sync pauses instead.
+        guard canSave, canSaveFloorPlans, canSaveSchedules else { throw LumaError.message("Saved settings could not be read; iCloud sync is paused.") }
         var values: [String: Data] = [:]
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -1072,8 +1188,16 @@ extension HomeStore {
     }
 
     private func applySync(_ records: [String: SyncMutation]) throws {
-        guard canSave, canSaveFloorPlans, !demo else { return }
+        guard canSave, canSaveFloorPlans, canSaveSchedules, !demo else { return }
         let decoder = JSONDecoder()
+        // A record this build can't decode (say, from a newer client) is skipped and the local value kept,
+        // so one bad record can't stop every later exchange. Each key is logged once per launch.
+        func decode<T: Decodable>(_ type: T.Type, _ data: Data, _ key: String) -> T? {
+            do { return try decoder.decode(type, from: data) } catch {
+                if skippedSyncKeys.insert(key).inserted { log("Skipped an iCloud item this version can't read (\(key)). The copy on this device is kept.") }
+                return nil
+            }
+        }
         let originalHome = home
         let originalOwners = scheduleOwners
         let originalCoordinations = coordinations
@@ -1082,30 +1206,34 @@ extension HomeStore {
         for i in home.devices.indices {
             let id = Data(home.devices[i].id.utf8).base64EncodedString().replacingOccurrences(of: "/", with: "_")
             if let mutation = records["device:\(id)/name"] {
-                home.devices[i].customName = try mutation.value.map { try decoder.decode(String.self, from: $0) }
+                if let data = mutation.value { if let name = decode(String.self, data, "device:\(id)/name") { home.devices[i].customName = name } }
+                else { home.devices[i].customName = nil }
             }
-            if let data = records["device:\(id)/room"]?.value { home.devices[i].room = try decoder.decode(String.self, from: data) }
+            if let data = records["device:\(id)/room"]?.value, let room = decode(String.self, data, "device:\(id)/room") { home.devices[i].room = room }
         }
+        var scenes: [(UUID, LightScene?)] = []
         for mutation in records.values where mutation.field == "value" && mutation.entity.hasPrefix("scene:") {
             guard let id = UUID(uuidString: String(mutation.entity.dropFirst(6))) else { continue }
-            home.scenes.removeAll { $0.id == id }
-            if let data = mutation.value { home.scenes.append(try decoder.decode(LightScene.self, from: data)) }
+            guard let data = mutation.value else { scenes.append((id, nil)); continue }
+            if let scene = decode(LightScene.self, data, "\(mutation.entity)/value") { scenes.append((id, scene)) }
         }
+        Self.upsert(&home.scenes, scenes)
+        var schedules: [(UUID, SceneSchedule?)] = []
         for mutation in records.values where mutation.field == "value" && mutation.entity.hasPrefix("schedule:") {
             guard let id = UUID(uuidString: String(mutation.entity.dropFirst(9))) else { continue }
-            let lastRun = home.schedules.first { $0.id == id }?.lastRunMinute
-            home.schedules.removeAll { $0.id == id }
-            if let data = mutation.value {
-                var schedule = try decoder.decode(SceneSchedule.self, from: data)
-                schedule.lastRunMinute = lastRun
-                home.schedules.append(schedule)
-                // An absent/invalid owner cannot silently enable execution here.
-                scheduleOwners[id] = records["schedule:\(id)/owner"]?.value.flatMap { try? decoder.decode(String.self, from: $0) } ?? "unassigned"
-            }
+            guard let data = mutation.value else { schedules.append((id, nil)); continue }
+            guard var schedule = decode(SceneSchedule.self, data, "\(mutation.entity)/value") else { continue }
+            schedule.lastRunMinute = home.schedules.first { $0.id == id }?.lastRunMinute
+            schedules.append((id, schedule))
+            // An absent/invalid owner cannot silently enable execution here.
+            scheduleOwners[id] = records["schedule:\(id)/owner"]?.value.flatMap { try? decoder.decode(String.self, from: $0) } ?? "unassigned"
         }
+        Self.upsert(&home.schedules, schedules)
         for id in home.schedules.map(\.id) {
             guard let mutation = records["schedule:\(id)/coordination"] else { continue }
-            coordinations[id] = try mutation.value.map { try decoder.decode(ScheduleCoordination.self, from: $0) }
+            // Undecodable keeps the existing value: nil would hand a coordinated schedule to the legacy scheduler.
+            if let data = mutation.value { if let coordination = decode(ScheduleCoordination.self, data, "schedule:\(id)/coordination") { coordinations[id] = coordination } }
+            else { coordinations[id] = nil }
         }
         coordinations = coordinations.filter { id, _ in home.schedules.contains { $0.id == id } }
         var devices = [thisSchedulerDevice]
@@ -1119,7 +1247,7 @@ extension HomeStore {
         for mutation in records.values where mutation.entity.hasPrefix("floor:") && mutation.field == "name" {
             guard let id = UUID(uuidString: String(mutation.entity.dropFirst(6))) else { continue }
             if let data = mutation.value {
-                let name = try decoder.decode(String.self, from: data)
+                guard let name = decode(String.self, data, "floor:\(id)/name") else { continue }
                 if let image = records["floor:\(id)/image"]?.value {
                     if (try? Data(contentsOf: floorPlanImageURL(id))) != image {
                         try floorPlanStorage.importSyncedImage(image, id: id)
@@ -1135,17 +1263,18 @@ extension HomeStore {
         for mutation in records.values where mutation.entity.hasPrefix("pin:") && mutation.field == "value" {
             let encoded = String(mutation.entity.dropFirst(4)).replacingOccurrences(of: "_", with: "/")
             guard let raw = Data(base64Encoded: encoded), let deviceID = String(data: raw, encoding: .utf8) else { continue }
+            var placement: SyncedPin?
+            if let data = mutation.value { guard let decoded = decode(SyncedPin.self, data, "\(mutation.entity)/value") else { continue }; placement = decoded }
             for i in plans.indices { plans[i].pins.removeAll { $0.deviceID == deviceID } }
-            if let data = mutation.value {
-                let placement = try decoder.decode(SyncedPin.self, from: data)
-                if let i = plans.firstIndex(where: { $0.id == placement.floor }) { plans[i].pins.append(placement.pin) }
-            }
+            if let placement, let i = plans.firstIndex(where: { $0.id == placement.floor }) { plans[i].pins.append(placement.pin) }
         }
-        try storage.save(home)
-        try floorPlanStorage.save(plans)
-        floorPlans = plans
-        try JSONEncoder().encode(scheduleOwners).write(to: storage.folder.appending(path: "schedule-owners.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        try saveCoordinations()
+        // Every exchange applies the whole ledger; only files whose contents changed are written.
+        if home.devices != originalHome.devices || home.scenes != originalHome.scenes || home.schedules != originalHome.schedules { try storage.save(home) }
+        if plans != floorPlans { try floorPlanStorage.save(plans); floorPlans = plans }
+        if scheduleOwners != originalOwners {
+            try JSONEncoder().encode(scheduleOwners).write(to: storage.folder.appending(path: "schedule-owners.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        }
+        if coordinations != originalCoordinations { try saveCoordinations() }
         committed = true
     }
 }
@@ -1166,36 +1295,39 @@ extension HomeStore: ScheduleHost {
     /// Enables (or, with nil, ends) coordinated mode. Ending it keeps the schedule on this installation.
     func setCoordination(_ coordination: ScheduleCoordination?, for id: UUID) {
         guard home.schedules.contains(where: { $0.id == id }) else { return }
+        guard canSaveSchedules else { log("Schedule failover settings could not be read, so they can't be changed. The files were preserved.", error: true); return }
         coordinations[id] = coordination
         if coordination == nil { scheduleOwners[id] = installationID; scheduleStatus[id] = nil }
         do {
             try saveCoordinations()
-            try JSONEncoder().encode(scheduleOwners).write(to: storage.folder.appending(path: "schedule-owners.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            // Same guard as saveCoordinations: a demo store (tests included) never writes the real owners file.
+            if canSave, !demo { try JSONEncoder().encode(scheduleOwners).write(to: storage.folder.appending(path: "schedule-owners.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) }
         } catch { log("Could not save schedule failover: \(error.localizedDescription)", error: true) }
         persist()
     }
 
     private func saveCoordinations() throws {
-        guard canSave, !demo else { return }
+        guard canSave, canSaveSchedules, !demo else { return }
         try JSONEncoder().encode(coordinations).write(to: storage.folder.appending(path: "schedule-coordination.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     func tickCoordinated() {
         let mine = home.schedules.compactMap { schedule in coordinations[schedule.id].map { (schedule, $0) } }
-        guard let scheduleCoordinator else {
-            // No cloud claim is possible, so coordinated schedules must not run here at all.
-            for (schedule, _) in mine { scheduleStatus[schedule.id] = "Paused: iCloud is unavailable in this build" }
-            return
-        }
 #if os(macOS)
         // App Nap could delay ticks for minutes; sleep is still allowed and no wake is promised.
-        let hasRole = mine.contains { ScheduleFailover.role(of: installationID, in: $0.1) != nil }
+        let hasRole = home.schedules.contains { $0.enabled && isLegacyHere($0) }
+            || (scheduleCoordinator != nil && mine.contains { ScheduleFailover.role(of: installationID, in: $0.1) != nil })
         if hasRole, schedulerActivity == nil {
             schedulerActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Running Luma schedules")
         } else if !hasRole, let activity = schedulerActivity {
             ProcessInfo.processInfo.endActivity(activity); schedulerActivity = nil
         }
 #endif
+        guard let scheduleCoordinator else {
+            // No cloud claim is possible, so coordinated schedules must not run here at all.
+            for (schedule, _) in mine { scheduleStatus[schedule.id] = "Paused: iCloud is unavailable in this build" }
+            return
+        }
         guard !mine.isEmpty else { return }
         Task { await scheduleCoordinator.tick(mine) }
     }

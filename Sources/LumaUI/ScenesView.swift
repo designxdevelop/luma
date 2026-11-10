@@ -373,7 +373,7 @@ struct ScenesView: View {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             let data = try Data(contentsOf: url)
             guard data.count < 1024 * 1024 else { throw LumaError.message("Scene file must be smaller than 1 MB.") }
-            try store.saveScene(JSONDecoder().decode(LightScene.self, from: data)); errorText = nil
+            try store.importScene(JSONDecoder().decode(LightScene.self, from: data)); errorText = nil
         } catch { errorText = error.localizedDescription }
     }
 

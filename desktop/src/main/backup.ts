@@ -7,7 +7,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { BackupResult, DreamViewDraft, LightScene, SavedHome, SceneSchedule } from '../shared/types';
-import { LumaError, isObject } from '../core/model';
+import { LumaError, fitText, isObject } from '../core/model';
 import { dreamViewDrafts, scene as decodeScene, schedule as decodeSchedule } from './storage';
 
 export const BACKUP_FORMAT = 'luma-home-backup';
@@ -53,7 +53,7 @@ export function encodeBackup(home: SavedHome, now = new Date()): string {
 const notBackup = () => new LumaError("That file isn't a Luma home backup.");
 
 /** Display text the Mac allows longer than Luma for Windows/Linux stores: shortened, never a reason to refuse a backup. */
-const fit = (v: unknown, max: number): unknown => (typeof v === 'string' ? v.replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, max) : v);
+const fit = (v: unknown, max: number): unknown => (typeof v === 'string' ? fitText(v, max) : v);
 
 /** Strict structural decode. Lights don't need to be connected: scenes for missing lights are kept and counted. */
 export function decodeBackup(text: string): DecodedBackup {

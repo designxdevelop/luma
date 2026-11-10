@@ -50,7 +50,7 @@ import LumaCore
     }
 
     @Test func webhookRingIsAuthenticatedUpstreamAndRejectsReplaysAndBadInput() async {
-        let store = HomeStore(demo: true, screenSyncDefaults: nil)
+        let store = HomeStore(demo: true, screenSyncDefaults: nil, folder: testFolder())
         defer { store.shutdown() }
         _ = virtualClock(store)
         #expect(ring(store, id: "short")?.status == 400)
@@ -66,7 +66,7 @@ import LumaCore
     }
 
     @Test func manualControlDuringAlertWinsAndOthersAreRestored() async {
-        let store = HomeStore(demo: true, screenSyncDefaults: nil)
+        let store = HomeStore(demo: true, screenSyncDefaults: nil, folder: testFolder())
         defer { store.shutdown() }
         let before = store.home.devices
         let clock = virtualClock(store)
@@ -86,7 +86,7 @@ import LumaCore
     }
 
     @Test func dreamViewLightsAreSkippedAndShutdownRestoresBestEffort() async {
-        let store = HomeStore(demo: true, screenSyncDefaults: nil)
+        let store = HomeStore(demo: true, screenSyncDefaults: nil, folder: testFolder())
         let i = store.home.devices.firstIndex { $0.id == "demo-tv" }!
         store.home.devices[i].dreamView = true
         let before = store.home.devices
@@ -98,5 +98,22 @@ import LumaCore
         #expect(store.activity.contains { $0.message.contains("TV backlight (DreamView is on)") })
         #expect(store.home.devices.map(\.brightness) == before.map(\.brightness))
         #expect(store.home.devices.map(\.rgb) == before.map(\.rgb))
+    }
+
+    @Test func unreadableSettingsFileIsNeverOverwritten() throws {
+        let store = HomeStore(demo: true, folder: testFolder()); defer { store.shutdown() }
+        let folder = FileManager.default.temporaryDirectory.appending(path: "luma-doorbell-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "doorbell-alert.json")
+        try Data("{\"enabled\": \"newer schema\"}".utf8).write(to: file)
+        #expect(throws: (any Error).self) { try HomeStore.readIfPresent(DoorbellAlertConfig.self, file) }
+        // attach() sets this for a present-but-unreadable file; update must refuse before saving defaults.
+        store.doorbell.configUnreadable = true
+        let before = store.doorbell.config
+        #expect(throws: (any Error).self) { try store.doorbell.update { $0.durationSeconds = 9 } }
+        #expect(store.doorbell.config == before)
+        store.doorbell.attach(store)
+        #expect(!store.doorbell.configUnreadable, "a demo attach never reads the file")
     }
 }

@@ -12,8 +12,9 @@ Every image was inspected; all are JPEG, no alpha.
 | `screenshots/ipad-13/` | same five | 2064 × 2752 |
 
 Floor plan uses `docs/qa/sim/luma-test-floorplan.png` (upscaled) with the four
-demo lights pinned. Previous assets are preserved in
-`screenshots-backup-2026-10-30/`.
+demo lights pinned. The previous set was removed from the working tree; it
+remains in git history (last commit containing it: `99046ae`, under
+`docs/app-store/screenshots-backup-2026-10-30/`).
 
 Not done: App Store Connect upload, live-media backup, Header / Search Results
 tab inspection (5244 × 2950 or 3840 × 1646), Mac capture. These need native

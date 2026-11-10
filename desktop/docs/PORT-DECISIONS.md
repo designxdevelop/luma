@@ -19,7 +19,7 @@ Automated tests use synthetic fixtures and loopback-only HTTP. Demo mode must no
 
 ## Release scope
 
-The initial Windows implementation covers public cloud capabilities, compatible basic LAN controls, app-owned scenes, schedules while running/awake, authenticated inbound webhooks, tray access, and encrypted secrets. It does not promise private Govee app parity, Bluetooth, MQTT, screen/audio streaming, or editing Govee DIY animations.
+The initial Windows implementation covers public cloud capabilities, compatible basic LAN controls, app-owned scenes, schedules while running/awake, authenticated inbound webhooks, tray access, and encrypted secrets. It does not promise private Govee app parity, MQTT, or editing Govee DIY animations. Bluetooth lights (Web Bluetooth), Screen Sync and Audio Sync were added later (see [Screen Sync 0.2.0](#screen-sync-020) below).
 
 No Windows runtime was found during initial host inspection. macOS compilation, pure TypeScript tests, and a demo renderer inspection do not replace Windows runtime QA, DPAPI testing, firewall checks, tray behavior testing, or installer validation. See VERIFICATION.md for actual results when available.
 

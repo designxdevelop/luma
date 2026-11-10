@@ -29,6 +29,9 @@ export const brightness = (value: number): CapabilityCommand => ({ type: BASIC_T
 export const rgb = (value: number): CapabilityCommand => ({ type: BASIC_TYPES.colorRgb!, instance: 'colorRgb', value });
 export const kelvin = (value: number): CapabilityCommand => ({ type: BASIC_TYPES.colorTemperatureK!, instance: 'colorTemperatureK', value });
 
+/** Outside display text (names, rooms) made storable: control characters become spaces, trimmed, cut to the storage limit. */
+export const fitText = (v: string, max: number): string => v.replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, max);
+
 export function isObject(value: unknown): value is { [key: string]: JSONValue } {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -208,7 +211,7 @@ export function decodeScene(input: unknown, devices: LightDevice[], options: { n
   if (!Array.isArray(steps)) throw new LumaError('A scene needs a steps array.');
   const scene: LightScene = {
     id: !options.newID && typeof input.id === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(input.id) ? input.id : randomUUID(),
-    name: typeof input.name === 'string' ? input.name.trim() : '',
+    name: typeof input.name === 'string' ? fitText(input.name, Infinity) : '', // over-length names are still refused below
     icon: typeof input.icon === 'string' && /^[a-z-]{1,24}$/.test(input.icon) ? input.icon : 'sparkles',
     steps: steps.map((raw): SceneStep => {
       if (!isObject(raw) || !isObject(raw.command)) throw new LumaError('Each step needs a device and command.');

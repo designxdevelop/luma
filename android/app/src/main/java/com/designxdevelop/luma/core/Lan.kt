@@ -151,7 +151,12 @@ class GoveeLan(private val onDevice: (LightDevice) -> Unit, private val onError:
         val buffer = ByteArray(8193)
         while (!s.isClosed) {
             val packet = DatagramPacket(buffer, buffer.size)
-            try { s.receive(packet) } catch (e: Exception) { if (!s.isClosed) onError("Could not receive Govee UDP packet: ${e.message}"); return }
+            try { s.receive(packet) } catch (e: Exception) {
+                if (!s.isClosed) onError("Could not receive Govee UDP packet: ${e.message}")
+                // Drop the dead socket (unless stop/start already replaced it) so the next start() opens a new one.
+                synchronized(this) { if (socket === s) { s.close(); socket = null } }
+                return
+            }
             if (packet.length !in 1..8192) continue
             val ip = packet.address.hostAddress ?: continue
             val received = runCatching { LanPacket.parse(packet.data.copyOf(packet.length), ip) }.getOrNull() ?: continue

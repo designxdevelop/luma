@@ -58,6 +58,8 @@ import UIKit
     /// Replaces the home's scenes and schedules with the shared view and saves home.json.
     var apply: ([LightScene], [SceneSchedule]) -> Void = { _, _ in }
     var run: (UUID) throws -> UUID = { _ in throw LumaError.message("Not connected.") }
+    /// True while a scene is running; due runs wait in `queued` until it ends.
+    var busy: () -> Bool = { false }
     var runStatus: (UUID) -> String? = { _ in nil }
     var log: (String, Bool) -> Void = { _, _ in }
 
@@ -71,12 +73,14 @@ import UIKit
     private var loop: Task<Void, Never>?
     private var activity: NSObjectProtocol?
     private var flushAgain = false
+    /// Due runs that found a scene running, in due order. In memory only; reported when they start or are missed.
+    private var queued: [(id: String, occ: ScheduleSync.Occurrence)] = []
     /// False in tests: no listener and no Keychain TLS identity.
     private let serves: Bool
 
     /// `folder` nil (demo) turns sync off entirely.
     init(folder: URL?, secrets: Secrets = .keychain, transport: @escaping Transport = { try await ScheduleSyncTransport.send($0, path: $1, body: $2) },
-         now: @escaping () -> Date = Date.init, calendar: Calendar = .current, serves: Bool = true) {
+         now: @escaping () -> Date = Date.init, calendar: Calendar = .autoupdatingCurrent, serves: Bool = true) {
         self.folder = folder; self.secrets = secrets; self.transport = transport; self.now = now; self.calendar = calendar; self.serves = serves
         lastTick = now()
         saved = Saved(device: .init(id: UUID().uuidString, name: Self.deviceName, platform: Self.platform))
@@ -308,11 +312,11 @@ import UIKit
 
     /// Runs due shared schedules. Returns false when HomeStore's own scheduler should run instead.
     func tick(_ date: Date? = nil) -> Bool {
-        guard enabled, saved.role != .off else { return false }
+        guard enabled, saved.role != .off else { queued.removeAll(); return false }
         let current = date ?? now()
         let previous = lastTick
         lastTick = current
-        guard mayExecute, var doc = saved.runner else { return true }
+        guard mayExecute, var doc = saved.runner else { queued.removeAll(); return true }
         var local = schedules()
         var changed = false, localChanged = false
         for value in ScheduleSync.liveSchedules(doc.records) {
@@ -328,14 +332,34 @@ import UIKit
                     report.status = "missed"
                     report.detail = "This Mac was asleep or Luma was closed until \(Int(occ.late / 60)) min after the scheduled time."
                     log("Missed a schedule: \(report.detail!)", true)
-                } else if let sceneID = UUID(uuidString: value.sceneID) {
+                } else { queued.append((value.id, occ)); continue }
+                doc.runs[value.id] = report
+                changed = true
+            }
+        }
+        // Oldest first; one still waiting past the grace is reported missed. Each must still be live, enabled and unpaused.
+        // ponytail: drained only on ticks (15 s), like HomeStore's legacy queue.
+        queued.sort { ($0.occ.at, $0.id) < ($1.occ.at, $1.id) }
+        while let next = queued.first {
+            guard let value = ScheduleSync.liveSchedules(doc.records).first(where: { $0.id == next.id }), value.enabled,
+                  Double(value.pausedUntil ?? 0) / 1000 <= next.occ.at.timeIntervalSince1970 else { queued.removeFirst(); continue }
+            var report = ScheduleSync.RunReport(scheduleID: next.id, occurrence: next.occ.key, at: millis(current), status: "started")
+            let late = current.timeIntervalSince(next.occ.at)
+            if late > ScheduleSync.runGrace {
+                report.status = "missed"
+                report.detail = "Another scene was still running \(Int(late / 60)) min after the scheduled time."
+                log("Missed a schedule: \(report.detail!)", true)
+            } else {
+                guard !busy() else { break }
+                if let sceneID = UUID(uuidString: value.sceneID) {
                     if localChanged { apply(scenes(), local); localChanged = false }
                     do { report.runID = try run(sceneID).uuidString }
                     catch { report.status = "failed"; report.detail = error.localizedDescription; log("Schedule skipped: \(error.localizedDescription)", true) }
                 }
-                doc.runs[value.id] = report
-                changed = true
             }
+            queued.removeFirst()
+            doc.runs[next.id] = report
+            changed = true
         }
         if localChanged { apply(scenes(), local) }
         if changed { saved.runner = doc; _ = save() }

@@ -11,11 +11,11 @@
 // Commands run with execFileSync and fixed argv (no shell).
 
 import { execFileSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { LumaError } from '../core/model';
-import type { SecretStore } from '../main/storage';
+import { atomicWrite, type SecretStore } from '../main/storage';
 
 export const SECRET_BACKENDS = ['keychain', 'secret-service', 'dpapi', 'file'] as const;
 export type SecretBackend = (typeof SECRET_BACKENDS)[number];
@@ -73,12 +73,6 @@ const unb64 = (s: string) => Buffer.from(s.trim(), 'base64').toString('utf8');
 const folderTag = (folder: string) => createHash('sha256').update(resolve(folder)).digest('hex').slice(0, 12);
 const status = (error: unknown) => (error as { status?: number }).status;
 const stderr = (error: unknown) => String((error as { stderr?: unknown }).stderr ?? '').trim().slice(0, 200);
-
-function atomicWrite(file: string, data: string): void {
-  const temp = `${file}.${randomUUID()}.tmp`;
-  try { writeFileSync(temp, data, { mode: 0o600, flag: 'wx' }); renameSync(temp, file); }
-  finally { if (existsSync(temp)) unlinkSync(temp); }
-}
 
 function keychain(folder: string, keychainPath = process.env.LUMA_BRIDGE_KEYCHAIN): Raw {
   const kc = keychainPath ? [keychainPath] : [];

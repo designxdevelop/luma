@@ -77,12 +77,12 @@ export function createCaptureAdapter({ real, revalidate, sync, window, rendererU
     if (permission === 'display-capture') return sync.kind === 'screen' ? real : audioSupport.system;
     return permission === 'media' && sync.kind === 'audio' && audioOnly(mediaTypes) && (sync.phase !== 'starting' || audio.peek(sync.generation) === 'input');
   };
-  session.defaultSession.setPermissionRequestHandler((wc, permission, cb, details) => {
+  // main.ts installs these as the session's only permission handlers (with its Web Bluetooth check).
+  const request = (wc: WebContents | null, permission: string, details: unknown) => {
     const mediaTypes = (details as { mediaTypes?: string[] }).mediaTypes;
-    const ok = allow(wc, permission, mediaTypes) && (permission !== 'media' || audio.consume(sync.generation) === 'input');
-    cb(ok);
-  });
-  session.defaultSession.setPermissionCheckHandler((wc, permission, _origin, details) => allow(wc, permission, (details as { mediaType?: string }).mediaType ? [(details as { mediaType: string }).mediaType] : undefined));
+    return allow(wc, permission, mediaTypes) && (permission !== 'media' || audio.consume(sync.generation) === 'input');
+  };
+  const check = (wc: WebContents | null, permission: string, details: unknown) => allow(wc, permission, (details as { mediaType?: string }).mediaType ? [(details as { mediaType: string }).mediaType] : undefined);
 
   // Lock, sleep and display changes stop the session. Nothing restarts capture afterwards.
   // Offered sources are revoked even when idle: on Wayland a listed source is not re-enumerated at Start.
@@ -116,6 +116,7 @@ export function createCaptureAdapter({ real, revalidate, sync, window, rendererU
       audio.issue(source, generation);
       return { token, generation, source };
     }),
+    request, check,
     revoke: () => { grants.revoke(); audio.revoke(); },
     dispose: () => lock?.dispose(),
   };

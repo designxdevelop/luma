@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { HomeStorage, emptyHome } from '../main/storage';
+import { HomeStorage, atomicWrite, emptyHome } from '../main/storage';
 import { demoDevices, demoScenes } from '../main/demo';
 import type { SavedHome } from '../shared/types';
 
@@ -98,4 +98,23 @@ test('validation failure before atomic save preserves a previously good home', (
   storage.save(updated);
   assert.equal(storage.load().devices[0]!.room, 'New room');
   assert.deepEqual(readdirSync(storage.folder), ['home.json']);
+});
+
+test('in-memory data that cannot be stored is reported as such, not as a damaged file', (t) => {
+  const storage = fixture(t);
+  storage.save(home());
+  const before = readFileSync(storage.file, 'utf8');
+  const bad = home();
+  bad.scenes[0]!.name = 'Movie\tnight';
+  assert.throws(() => storage.save(bad), (e: Error) => /not in a form Luma can store/.test(e.message) && !/damaged/.test(e.message));
+  assert.equal(readFileSync(storage.file, 'utf8'), before, 'the saved file is untouched');
+});
+
+test('atomicWrite replaces a binary file whole and leaves no temp file', (t) => {
+  const storage = fixture(t);
+  const file = join(storage.folder, 'secret.bin');
+  writeFileSync(file, 'old');
+  atomicWrite(file, Buffer.from([0, 1, 2, 255]));
+  assert.deepEqual([...readFileSync(file)], [0, 1, 2, 255]);
+  assert.deepEqual(readdirSync(storage.folder), ['secret.bin']);
 });

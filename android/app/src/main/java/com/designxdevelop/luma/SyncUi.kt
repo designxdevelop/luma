@@ -181,7 +181,7 @@ fun SyncScreen(store: HomeStore, onClose: () -> Unit) {
                     SyncSource.entries.filter { it != SyncSource.Sample || store.demo }.forEach { s -> FilterChip(source == s, { running = false; source = s }, { Text(s.title) }, enabled = true) }
                 }
                 if (source == SyncSource.Camera) {
-                    if (running) CameraCapture(Modifier.fillMaxWidth().aspectRatio(16f / 9)) { grid.set(it) }
+                    if (running) CameraCapture(Modifier.fillMaxWidth().aspectRatio(16f / 9), onError = { store.message = it }) { grid.set(it) }
                     else Box(Modifier.fillMaxWidth().aspectRatio(16f / 9).background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(12.dp)), Alignment.Center) { Text("Camera preview appears when sync starts") }
                 }
                 Text("Lights", style = MaterialTheme.typography.labelLarge)
@@ -241,7 +241,7 @@ private fun sampleGrid(t: Double): ScreenGrid {
 
 /** Back camera at ~320×180, reduced to a grid on a background thread; only the grid leaves. */
 @Composable
-private fun CameraCapture(modifier: Modifier, onGrid: (ScreenGrid) -> Unit) {
+private fun CameraCapture(modifier: Modifier, onError: (String) -> Unit, onGrid: (ScreenGrid) -> Unit) {
     val context = LocalContext.current
     val owner = LocalLifecycleOwner.current
     // TextureView mode so the preview clips to its frame inside the scrolling dialog.
@@ -250,7 +250,7 @@ private fun CameraCapture(modifier: Modifier, onGrid: (ScreenGrid) -> Unit) {
         val executor = Executors.newSingleThreadExecutor()
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
-            val provider = future.get()
+            val provider = runCatching { future.get() }.getOrElse { onError("The camera couldn't start: ${it.message}"); return@addListener }
             val analysis = ImageAnalysis.Builder()
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -272,7 +272,7 @@ private fun CameraCapture(modifier: Modifier, onGrid: (ScreenGrid) -> Unit) {
                 }
             }
             val p = Preview.Builder().build().also { it.surfaceProvider = preview.surfaceProvider }
-            runCatching { provider.unbindAll(); provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, p, analysis) }
+            runCatching { provider.unbindAll(); provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, p, analysis) }.onFailure { onError("The camera couldn't start: ${it.message}") }
         }, ContextCompat.getMainExecutor(context))
         onDispose { runCatching { future.get().unbindAll() }; executor.shutdown() }
     }
@@ -288,19 +288,20 @@ private fun MicrophoneCapture(onLevels: (AudioLevels) -> Unit) {
         val rate = 48_000
         val size = maxOf(AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT), AudioSpectrum.SIZE * 4)
         val record = AudioRecord(MediaRecorder.AudioSource.MIC, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT, size)
-        var on = true
+        val on = java.util.concurrent.atomic.AtomicBoolean(true)
         val worker = thread(name = "luma-audio", isDaemon = true) {
             val window = FloatArray(AudioSpectrum.SIZE)
             val chunk = FloatArray(rate / 20)
             runCatching { record.startRecording() }
-            while (on) {
+            while (on.get()) {
                 val n = record.read(chunk, 0, chunk.size, AudioRecord.READ_BLOCKING)
-                if (n <= 0) continue
+                if (n < 0) break // An error code (e.g. dead object), not a short read: retrying would spin.
+                if (n == 0) continue
                 if (n >= window.size) chunk.copyInto(window, 0, n - window.size, n)
                 else { window.copyInto(window, 0, n); chunk.copyInto(window, window.size - n, 0, n) }
                 AudioSpectrum.levels(window.copyOf(), rate.toDouble())?.let(onLevels)
             }
         }
-        onDispose { on = false; runCatching { record.stop() }; worker.join(200); record.release() }
+        onDispose { on.set(false); runCatching { record.stop() }; worker.join(200); record.release() }
     }
 }

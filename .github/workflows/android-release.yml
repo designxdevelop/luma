@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   release:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -20,12 +21,22 @@ jobs:
         working-directory: android
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '21' }
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
       - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36.1" > /dev/null
       - name: Restore upload key
         if: env.HAS_KEY == 'true'
-        run: echo "${{ secrets.LUMA_UPLOAD_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/upload.jks"
+        env:
+          LUMA_UPLOAD_KEYSTORE_BASE64: ${{ secrets.LUMA_UPLOAD_KEYSTORE_BASE64 }}
+        run: echo "$LUMA_UPLOAD_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
       - name: Build bundle
         env:
           LUMA_UPLOAD_KEYSTORE: ${{ env.HAS_KEY == 'true' && format('{0}/upload.jks', runner.temp) || '' }}
@@ -35,7 +46,7 @@ jobs:
         with: { name: luma-android-aab, path: android/app/build/outputs/bundle/release/app-release.aab }
       - name: Upload to Play internal testing
         if: env.HAS_KEY == 'true' && env.HAS_PLAY == 'true'
-        uses: r0adkll/upload-google-play@v1.1.5
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: com.designxdevelop.luma

@@ -14,7 +14,7 @@ import { createCaptureAdapter } from './capture';
 import { stopOnRendererLoss } from './sync';
 import { audioSupportFor } from './audio-capture';
 import { LINUX_PROFILE_DIR, linuxCaptureSwitches, linuxRevalidatesSources, linuxSecretsAvailable, linuxSessionType } from './linux-platform';
-import { HomeStorage, type SecretStore } from './storage';
+import { HomeStorage, atomicWrite, type SecretStore } from './storage';
 import { BACKUP_LIMIT } from './backup';
 import { FLOOR_IMAGE_LIMIT, FloorPlanStore } from './floor-plans';
 import { isLight } from '../shared/devices';
@@ -81,6 +81,8 @@ if (demo) {
 /** DPAPI (Windows) or a real keyring (Linux: libsecret/KWallet, never basic_text). Never falls back to plaintext. */
 class SafeSecretStore implements SecretStore {
   private readonly folder = join(app.getPath('userData'), 'secrets');
+  /** Decrypted values (undefined = none saved), so a snapshot doesn't hit the disk and keyring each time. */
+  private readonly cache = new Map<string, string | undefined>();
   get available(): boolean {
     if (process.platform === 'win32') return safeStorage.isEncryptionAvailable();
     if (linux) return linuxSecretsAvailable(safeStorage.isEncryptionAvailable(), safeStorage.getSelectedStorageBackend());
@@ -93,17 +95,26 @@ class SafeSecretStore implements SecretStore {
   read(name: string): string | undefined {
     if (!this.available) return undefined;
     const file = this.path(name);
-    if (!existsSync(file) || statSync(file).size > 64 * 1024) return undefined;
-    try { return safeStorage.decryptString(readFileSync(file)); }
-    catch { throw new LumaError('A saved secret could not be decrypted on this Windows account. Enter it again.'); }
+    if (this.cache.has(name)) return this.cache.get(name);
+    let value: string | undefined;
+    if (existsSync(file) && statSync(file).size <= 64 * 1024) {
+      try { value = safeStorage.decryptString(readFileSync(file)); }
+      catch { throw new LumaError('A saved secret could not be decrypted with this user account. Enter it again.'); }
+    }
+    this.cache.set(name, value);
+    return value;
   }
   write(name: string, value: string): void {
     if (!this.available) throw new LumaError('Secure storage is unavailable; nothing was saved.');
+    const file = this.path(name);
+    this.cache.delete(name);
     mkdirSync(this.folder, { recursive: true, mode: 0o700 });
-    writeFileSync(this.path(name), safeStorage.encryptString(value), { mode: 0o600 });
+    atomicWrite(file, safeStorage.encryptString(value));
+    this.cache.set(name, value);
   }
   delete(name: string): void {
     const file = this.path(name);
+    this.cache.delete(name);
     if (existsSync(file)) unlinkSync(file);
   }
 }
@@ -182,7 +193,7 @@ function encodeFloorImage(data: Buffer): Buffer | undefined {
   return (scale < 1 ? image.resize({ width: Math.round(width * scale), height: Math.round(height * scale), quality: 'best' }) : image).toPNG();
 }
 
-function buildTray(): void {
+function buildTray(snapshot = home.snapshot()): void {
   if (!tray) {
     const icon = nativeImage.createFromPath(join(__dirname, '..', '..', 'assets', 'tray.png'));
     tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }));
@@ -190,7 +201,6 @@ function buildTray(): void {
   }
   const syncLabel = home.sync.kind === 'audio' ? 'Audio Sync' : 'Screen Sync';
   tray.setToolTip(`${demo ? 'Luma (Demo)' : 'Luma'}${home.sync.active ? ` · ${syncLabel} ${home.sync.phase === 'paused' ? 'paused' : 'live'}` : ''}`);
-  const snapshot = home.snapshot();
   const rooms = [...new Set(snapshot.devices.map((d) => d.room))].sort();
   const lights = snapshot.devices.filter(isLight);
   const powerRooms = roomPower(snapshot.devices);
@@ -385,11 +395,17 @@ function registerIPC(): void {
   });
 }
 
-function hardenSessions(): void {
-  session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
-  // Only our own renderer may use Web Bluetooth (Bluetooth lights); everything else stays denied.
+/**
+ * The only permission handlers (Electron keeps one of each per session): requests are denied unless
+ * Screen/Audio Sync allows them; checks allow that, or Web Bluetooth (Bluetooth lights) for our own renderer.
+ */
+function setPermissionHandlers(): void {
   const ours = (wc: Electron.WebContents | null) => !!window && wc === window.webContents && wc.getURL() === rendererURL();
-  session.defaultSession.setPermissionCheckHandler((wc, permission) => (permission as string) === 'bluetooth' && ours(wc));
+  session.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => callback(capture.request(wc, permission, details)));
+  session.defaultSession.setPermissionCheckHandler((wc, permission, _origin, details) => ((permission as string) === 'bluetooth' && ours(wc)) || capture.check(wc, permission, details));
+}
+
+function hardenSessions(): void {
   app.on('web-contents-created', (_event, contents) => {
     contents.on('will-navigate', (event) => event.preventDefault());
     contents.on('will-attach-webview', (event) => event.preventDefault());
@@ -424,6 +440,7 @@ if (unsupported) {
     });
     nativeTheme.themeSource = home.snapshot().appearance;
     capture = createCaptureAdapter({ real: captureReal, revalidate: !linux || linuxRevalidatesSources(linuxSession), sync: home.sync, window: () => window, rendererURL, audioSupport });
+    setPermissionHandlers(); // before any web contents exists
     registerIPC();
     let queued = false;
     home.subscribe(() => {
@@ -431,12 +448,13 @@ if (unsupported) {
       queued = true;
       setTimeout(() => {
         queued = false;
+        const snapshot = home.snapshot(); // one per update, shared by the window and the tray
         if (window && !window.isDestroyed()) {
           // A live Audio Sync session must keep analyzing while the window is hidden in the tray.
           window.webContents.setBackgroundThrottling(!(home.sync.active && home.sync.kind === 'audio'));
-          window.webContents.send('luma:snapshot-changed', home.snapshot());
+          window.webContents.send('luma:snapshot-changed', snapshot);
         }
-        buildTray();
+        buildTray(snapshot);
       }, 50);
     });
     buildTray();
@@ -444,7 +462,7 @@ if (unsupported) {
     // Reconnect with the saved encrypted key; the webhook server always starts off.
     if (!demo && home.hasSavedHome && home.snapshot().hasSavedKey) void home.reconnect().catch(() => {});
     // Lights can change IP between launches (updates, router restarts), so rescan every launch.
-    if (!demo && home.hasSavedHome) void home.discover().catch(() => {});
+    if (!demo && home.hasSavedHome) void home.discover().catch(() => {}); // Home logs the failure, as reconnect does
     // The schedule runner's LAN server starts with the app when this computer runs shared schedules.
     void home.scheduleSync.start();
   });

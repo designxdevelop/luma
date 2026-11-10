@@ -482,7 +482,7 @@ function scenesView(s: AppSnapshot): string {
       </div>
     </article>`).join('')}</div>
     ${sceneBrowser(s)}
-    <p class="hint">Stopping a scene does not undo commands it already sent. Restore lights puts power, brightness, color and white back to how they were before the last scene ran (effects and segments aren't undone).</p>
+    <p class="hint">Stopping a scene does not undo commands it already sent. Restore lights puts power, brightness, color and white back to how they were before the last scene you ran here or from the tray (schedules and webhooks don't count; effects and segments aren't undone).</p>
   </section>`;
 }
 
@@ -1153,7 +1153,7 @@ document.addEventListener('click', (event) => {
       void act(() => luma.saveSchedule({ ...sch, weekdays }));
       break;
     }
-    case 'sch-delete': void act(() => luma.deleteSchedule(id!)); break;
+    case 'sch-delete': { const sch = state.snap?.schedules.find((x) => x.id === id); const sc = sch && state.snap?.scenes.find((x) => x.id === sch.sceneID); if (sch && confirm(`Delete this schedule${sc ? ` for “${sc.name}”` : ''}?`)) void act(() => luma.deleteSchedule(sch.id)); break; }
     case 'hook-start': void act(() => luma.startWebhook()); break;
     case 'hook-stop': void act(() => luma.stopWebhook()); break;
     case 'copy-spki-pin': void act(() => luma.copySpkiPin(), 'SPKI pin copied.'); break;

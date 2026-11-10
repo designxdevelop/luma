@@ -105,7 +105,7 @@ private final class InteractionProtocol: URLProtocol, @unchecked Sendable {
         configuration.httpAdditionalHeaders = ["X-Luma-Interaction-Test": id]
         session = URLSession(configuration: configuration)
         InteractionProtocol.registry.install(script, id: id)
-        store = HomeStore(demo: true, cloud: GoveeCloud(apiKey: "fake-interaction-key-\(id)", session: session))
+        store = HomeStore(demo: true, cloud: GoveeCloud(apiKey: "fake-interaction-key-\(id)", session: session), folder: testFolder())
         store.home.devices = [.init(id: "interaction-lamp", sku: "H6008", name: "Test light", capabilities: [
             .init(type: "devices.capabilities.on_off", instance: "powerSwitch"),
             .init(type: "devices.capabilities.range", instance: "brightness")
