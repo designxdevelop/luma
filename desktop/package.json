@@ -1,7 +1,7 @@
 {
   "name": "luma-desktop",
   "productName": "Luma",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Luma for Windows and Linux: a controller for Govee lights. Luma is an open-source project built by Design X Develop LLC.",
   "author": "Design X Develop LLC",
   "license": "MIT",
