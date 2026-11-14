@@ -29,6 +29,7 @@ import com.designxdevelop.luma.core.SceneStep
 import com.designxdevelop.luma.core.arr
 import com.designxdevelop.luma.core.get
 import com.designxdevelop.luma.core.jsonEquals
+import com.designxdevelop.luma.core.notingLook
 import com.designxdevelop.luma.core.num
 import com.designxdevelop.luma.core.str
 import kotlinx.coroutines.Dispatchers
@@ -278,8 +279,9 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
         } catch (e: Exception) { log(e.message ?: "Command failed.", error = true); message = e.message }
     }
 
-    private fun apply(d: LightDevice, c: CapabilityCommand): LightDevice {
+    private fun apply(light: LightDevice, c: CapabilityCommand): LightDevice {
         val n = c.value.num?.toInt()
+        val d = light.notingLook(c)
         return when (c.instance) {
             "powerSwitch" -> d.copy(power = n == 1)
             "brightness" -> d.copy(brightness = n)
@@ -294,6 +296,7 @@ class HomeStore(app: Application) : AndroidViewModel(app) {
     /** Several commands to one light, sent in order (segment painting). */
     fun perform(commands: List<CapabilityCommand>, device: LightDevice) {
         try { commands.forEach { CommandValidation.validate(it, device) } } catch (e: Exception) { message = e.message; return }
+        replace(device.id) { commands.fold(it, ::apply) }
         if (demo || device.isDemo) { log("Painted ${commands.size} segment groups on ${device.displayName}."); return }
         viewModelScope.launch { for (c in commands) send(device, c) }
     }

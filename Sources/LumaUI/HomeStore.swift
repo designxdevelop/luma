@@ -492,6 +492,7 @@ struct ActivityEntry: Identifiable {
         doorbell.yield(deviceID)
         let operation = QueuedControl(id: operationID, deviceID: deviceID, command: command, coalescible: coalescible)
         deviceRevisions[deviceID, default: 0] += 1
+        if let i = home.devices.firstIndex(where: { $0.id == deviceID }) { home.devices[i].noteLook(command) }
         confirmationTasks.removeValue(forKey: operation.key)?.cancel()
         recentConfirmations.removeValue(forKey: operation.key)
         pendingControls[operation.key] = .init(id: operation.id, command: command)
@@ -1069,9 +1070,15 @@ struct ActivityEntry: Identifiable {
         // capture. Detach first so demo content and tuning remain isolated.
         screenSync.usePreferences(nil)
         let caps = [Capability(type: "devices.capabilities.on_off", instance: "powerSwitch"), Capability(type: "devices.capabilities.range", instance: "brightness"), Capability(type: "devices.capabilities.color_setting", instance: "colorRgb"), Capability(type: "devices.capabilities.color_setting", instance: "colorTemperatureK")]
+        // Govee's documented segment schema, so the demo strip shows the segment painter and a gradient.
+        let demoSegments = Capability(type: "devices.capabilities.segment_color_setting", instance: "segmentedColorRgb", parameters: .object([
+            "dataType": .string("STRUCT"), "fields": .array([
+                .object(["fieldName": .string("segment"), "dataType": .string("Array"), "elementType": .string("INTEGER"), "required": .bool(true),
+                         "size": .object(["min": .number(1), "max": .number(15)]), "elementRange": .object(["min": .number(0), "max": .number(14)])]),
+                .object(["fieldName": .string("rgb"), "dataType": .string("INTEGER"), "required": .bool(true), "range": .object(["min": .number(0), "max": .number(16777215)])])])]))
         home.devices = [
             .init(id: "demo-floor", sku: "Demo lamp", name: "Corner glow", room: "Living room", capabilities: caps, power: true, brightness: 65, rgb: 0xFFB66A, online: true, isDemo: true),
-            .init(id: "demo-strip", sku: "Demo strip", name: "Behind the sofa", room: "Living room", capabilities: caps, power: true, brightness: 42, rgb: 0xCA8BFF, online: true, isDemo: true),
+            .init(id: "demo-strip", sku: "Demo strip", name: "Behind the sofa", room: "Living room", capabilities: caps + [demoSegments], power: true, brightness: 42, rgb: 0xCA8BFF, online: true, isDemo: true),
             .init(id: "demo-desk", sku: "Demo light bars", name: "Desk lights", room: "Office", capabilities: caps, power: true, brightness: 80, rgb: 0x89CBD2, online: true, isDemo: true),
             .init(id: "demo-bed", sku: "Demo bulb", name: "Bedside", room: "Bedroom", capabilities: caps, power: false, brightness: 25, rgb: 0xFFC58B, online: true, isDemo: true),
             // Documented cloud toggle shape, so the DreamView card can be explored without a TV.
@@ -1091,7 +1098,10 @@ struct ActivityEntry: Identifiable {
             guard let i = home.devices.firstIndex(where: { $0.id == id }) else { continue }
             home.devices[i].capabilities.append(sceneList("lightScene", id == "demo-bed" ? Array(builtIn.prefix(6)) : builtIn, base: 1000))
         }
-        if let i = home.devices.firstIndex(where: { $0.id == "demo-strip" }) { home.devices[i].capabilities.append(sceneList("diyScene", ["Party Pulse", "Slow Fade"], base: 5000)) }
+        if let i = home.devices.firstIndex(where: { $0.id == "demo-strip" }) {
+            home.devices[i].capabilities.append(sceneList("diyScene", ["Party Pulse", "Slow Fade"], base: 5000))
+            home.devices[i].palette = [0xFF5E62, 0xFF5E62, 0xFF7A6B, 0xFF9966, 0xFFB36B, 0xE98AA8, 0xCA8BFF, 0xB07CFF, 0x9A6BFF, 0x8A5CF6, 0x6F7CF7, 0x559CF6, 0x3FA9F5, 0x3FC4E8, 0x3FD9D9]
+        }
         home.scenes = [LightScene(name: "Evening unwind", symbol: "moon.stars", steps: home.devices.prefix(2).flatMap { [.init(deviceID: $0.id, command: .power(true)), .init(deviceID: $0.id, command: .brightness(35)), .init(deviceID: $0.id, command: .rgb(0xFFAE64))] }), LightScene(name: "Focus time", symbol: "sun.max", steps: [.init(deviceID: "demo-desk", command: .power(true)), .init(deviceID: "demo-desk", command: .kelvin(4500))])]
         // Sample Govee Home data, as a signed-in import would show it.
         accountGroups = [.init(id: 1, name: "Living Room Dream View", enabled: true, reportedLightCount: 3, mainDevice: "demo-tv", mainSKU: "Demo TV backlight", isDreamView: true)]

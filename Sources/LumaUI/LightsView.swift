@@ -30,6 +30,11 @@ struct LightsView: View {
         return Dictionary(grouping: lights, by: \.room).sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }.map { ($0.key, $0.value) }
     }
 
+    private var glowColors: [Color] {
+        if store.devices.isEmpty { return [0xFF9500, 0xFF2D95, 0xAF52DE, 0x0A84FF, 0x00C7BE].map { Color(rgb: $0) } }
+        return shown.filter(\.isLit).flatMap { $0.hasPalette ? $0.lookColors.enumerated().filter { $0.offset.isMultiple(of: 5) }.map(\.element) : [$0.displayColor] }
+    }
+
     var body: some View {
         Group {
             if showsPlan {
@@ -45,6 +50,8 @@ struct LightsView: View {
                         if store.devices.isEmpty { onboarding } else { roomsContent }
                     }.pagePadding()
                 }
+                // The lights that are on wash the top of the page in their colors.
+                .background(alignment: .top) { AmbientGlow(colors: glowColors).frame(height: 420).ignoresSafeArea(edges: .top) }
             }
         }
         .background { Button("Find") { searchFocused = true }.keyboardShortcut("f").opacity(0).accessibilityHidden(true) }
@@ -152,6 +159,8 @@ struct LightsView: View {
         return HStack(alignment: .center, spacing: 8) {
             Text(name).font(.system(size: 19, weight: .bold)).accessibilityAddTraits(.isHeader)
             Text("\(on) of \(lights.count) on").font(.system(size: 13)).foregroundStyle(.secondary).monospacedDigit()
+            let lit = lights.filter(\.isLit)
+            if !lit.isEmpty { LookStrip(colors: lit.count == 1 ? lit[0].lookColors : lit.map(\.displayColor), height: 6).frame(width: 44) }
             Spacer(minLength: 8)
             if !dimmable.isEmpty || !white.isEmpty {
                 Menu {
@@ -201,9 +210,13 @@ struct LightsView: View {
             VStack(spacing: 28) {
                 VStack(spacing: 12) {
                     ZStack {
-                        Circle().fill(RadialGradient(colors: [Color(rgb: 0xFFB866).opacity(0.45), .clear], center: .center, startRadius: 4, endRadius: 70)).frame(width: 140, height: 140)
-                        Image(systemName: "lightbulb.led.wide.fill").font(.system(size: 44, weight: .medium)).foregroundStyle(Color.lumaAccent)
-                    }.accessibilityHidden(true)
+                        Circle().fill(AngularGradient(colors: [0xFF9500, 0xFF2D95, 0xAF52DE, 0x0A84FF, 0x00C7BE, 0xFFD60A, 0xFF9500].map { Color(rgb: $0) }, center: .center))
+                            .frame(width: 96, height: 96).blur(radius: 26).opacity(0.7)
+                        Image(systemName: "lightbulb.led.wide.fill").font(.system(size: 44, weight: .medium)).foregroundStyle(.white)
+                            .shadow(color: Color(rgb: 0xFF9500).opacity(0.9), radius: 12)
+                            .frame(width: 84, height: 84)
+                            .background(LinearGradient(colors: [Color(rgb: 0xFFB347), Color(rgb: 0xB95500)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    }.frame(height: 140).accessibilityHidden(true)
                     Text("Welcome to Luma").font(.system(size: 24, weight: .bold)).tracking(-0.4)
                     Text("Control your Govee lights from your \(PlatformCopy.device): quick power and brightness, color, scenes, schedules, and automations.")
                         .font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 440)
@@ -258,8 +271,7 @@ private struct SceneChip: View {
             else { do { try store.runScene(scene) } catch { store.log(error.localizedDescription, error: true) } }
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: scene.symbol).font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.lumaAccent)
-                    .frame(width: 36, height: 36).background(Color.lumaAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                SceneSwatch(scene: scene, size: 36, glowing: running)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(scene.name).font(.system(size: 14, weight: .semibold)).lineLimit(1)
                     Text(running ? "Running · \(PlatformCopy.tapVerb.lowercased()) to stop" : "^[\(Set(scene.steps.map(\.deviceID)).count) light](inflect: true)").font(.system(size: 12)).foregroundStyle(running ? Color.lumaAccent : .secondary)
@@ -270,7 +282,8 @@ private struct SceneChip: View {
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(running ? Color.lumaAccent.opacity(0.7) : hovering ? Color.primary.opacity(0.18) : Color.hairline))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TilePressStyle())
+        .sensoryFeedback(.impact(weight: .light), trigger: running)
         .disabled(store.runningSceneID != nil && !running)
         .onHover { hovering = $0 }
         .help(running ? "Stop \(scene.name)" : "Run \(scene.name)")
@@ -285,7 +298,8 @@ struct LightTile: View {
     let open: () -> Void
     let rename: () -> Void
     @State private var hovering = false
-    private var isOn: Bool { device.power == true && device.online != false }
+    @State private var taps = 0
+    private var isOn: Bool { device.isLit }
     private var canSwitch: Bool { device.supports("powerSwitch") && device.online != false }
     private var needsName: Bool {
         guard let own = store.home.devices.first(where: { $0.id == device.id }), own.customName == nil else { return false }
@@ -302,20 +316,23 @@ struct LightTile: View {
     }
 
     var body: some View {
-        Button { canSwitch ? store.perform(.power(!(device.power ?? false)), ids: [device.id]) : open() } label: {
+        Button { taps += 1; canSwitch ? store.perform(.power(!(device.power ?? false)), ids: [device.id]) : open() } label: {
             VStack(alignment: .leading, spacing: 0) {
-                LightOrb(device: device, size: 40)
-                Spacer(minLength: 18)
+                LightOrb(device: device, size: 44)
+                Spacer(minLength: 14)
                 Text(device.name).font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary).lineLimit(2).multilineTextAlignment(.leading)
                     .padding(.trailing, needsName ? 64 : 0)
-                Text(stateText).font(.system(size: 13)).monospacedDigit()
+                Text(stateText).font(.system(size: 13)).monospacedDigit().contentTransition(.numericText())
                     .foregroundStyle(device.online == false ? Color.danger : .secondary).lineLimit(1)
+                // The light itself in miniature: its colors, as long as it is bright.
+                LookStrip(colors: device.lookColors, fraction: isOn ? Double(device.brightness ?? 100) / 100 : 0).padding(.top, 10)
             }
-            .padding(14).frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
+            .padding(14).frame(maxWidth: .infinity, minHeight: 146, alignment: .topLeading)
             .background(background)
-            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
         .buttonStyle(TilePressStyle())
+        .sensoryFeedback(.impact(weight: .light), trigger: taps)
         .overlay(alignment: .topTrailing) {
             Button(action: open) {
                 Image(systemName: "chevron.right").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
@@ -332,7 +349,7 @@ struct LightTile: View {
                         .padding(.horizontal, 10).frame(height: 26).background(Color.lumaAccent.opacity(0.12), in: Capsule())
                         .frame(minHeight: 44).contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).padding(.trailing, 8).padding(.bottom, 2)
+                .buttonStyle(.plain).padding(.trailing, 8).padding(.bottom, 16)
                 .help("Give this light a name only Luma uses").accessibilityLabel("Name \(device.name)")
             }
         }
@@ -361,26 +378,51 @@ struct LightTile: View {
     }
 
     private var background: some View {
-        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
         let color = device.displayColor
         return ZStack {
             Color.surface
             if isOn {
-                LinearGradient(colors: [color.opacity(0.42), color.opacity(0.08)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                LinearGradient(colors: device.lookColors, startPoint: .topLeading, endPoint: .bottomTrailing).opacity(0.5)
+                // Fades to the card so the name and state stay readable over any color.
+                LinearGradient(colors: [Color.surface.opacity(0), Color.surface.opacity(0.78)], startPoint: .top, endPoint: .bottom)
             }
         }
         .clipShape(shape)
         .overlay {
             if device.online == false { shape.strokeBorder(Color.danger.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])) }
-            else { shape.strokeBorder(isOn ? color.opacity(0.45) : hovering ? Color.primary.opacity(0.16) : Color.hairline) }
+            else if isOn { shape.strokeBorder(LinearGradient(colors: device.lookColors.map { $0.opacity(0.6) }, startPoint: .topLeading, endPoint: .bottomTrailing)) }
+            else { shape.strokeBorder(hovering ? Color.primary.opacity(0.16) : Color.hairline) }
         }
-        .shadow(color: isOn ? color.opacity(0.18) : .black.opacity(0.03), radius: isOn ? 10 : 3, y: 2)
-        .animation(.easeOut(duration: 0.2), value: isOn)
+        .shadow(color: isOn ? color.opacity(hovering ? 0.4 : 0.28) : .black.opacity(0.03), radius: isOn ? 16 : 3, y: isOn ? 6 : 2)
+        .animation(.easeOut(duration: 0.3), value: isOn)
+        .animation(.easeOut(duration: 0.3), value: device.rgb)
+        .animation(.easeOut(duration: 0.2), value: hovering)
     }
 }
 
-private struct TilePressStyle: ButtonStyle {
+/// A scene's icon on a gradient of the colors it sets.
+struct SceneSwatch: View {
+    let scene: LightScene
+    var size: CGFloat = 44
+    var glowing = false
+    var body: some View {
+        let found = sceneColors(scene)
+        let colors = found.isEmpty ? [Color(rgb: 0xFFB347), Color(rgb: 0xB95500)] : found.count == 1 ? [found[0].hueShifted(-25), found[0], found[0].hueShifted(25)] : found
+        let shape = RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
+        let gradient = LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+        Image(systemName: scene.symbol).font(.system(size: size * 0.42, weight: .semibold)).foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.3), radius: 1.5, y: 0.5)
+            .frame(width: size, height: size)
+            .background(gradient, in: shape)
+            .background(shape.fill(gradient).blur(radius: size * 0.28).opacity(glowing ? 0.9 : 0.45))
+            .animation(.easeInOut(duration: 0.4), value: glowing)
+            .accessibilityHidden(true)
+    }
+}
+
+struct TilePressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label.scaleEffect(configuration.isPressed ? 0.97 : 1).animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+        configuration.label.scaleEffect(configuration.isPressed ? 0.95 : 1).animation(.spring(duration: 0.3, bounce: 0.45), value: configuration.isPressed)
     }
 }

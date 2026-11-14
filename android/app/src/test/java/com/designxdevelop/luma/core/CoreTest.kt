@@ -206,3 +206,16 @@ class CoreTest {
     }
 
 }
+
+class LightLookTest {
+    @org.junit.Test fun paletteFollowsWhatLumaSends() {
+        val strip = Demo.home().devices.first { it.id == "demo-strip" }.copy(palette = null, rgb = 0x111111)
+        val schema = SegmentPaint.all(strip).first()
+        val painted = schema.commands(mapOf(1 to 0xFF0000, 3 to 0xFF0000)).fold(strip) { d, c -> d.notingLook(c) }
+        org.junit.Assert.assertEquals(listOf(0x111111, 0xFF0000, 0x111111, 0xFF0000), painted.palette!!.take(4))
+        org.junit.Assert.assertNotNull(painted.notingLook(CapabilityCommand.brightness(40)).palette)
+        org.junit.Assert.assertNull(painted.notingLook(CapabilityCommand.rgb(0x0000FF)).palette)
+        val sunset = SceneLibrary.options(strip).first { it.name == "Sunset" }
+        org.junit.Assert.assertEquals(ScenePalette.colors("sunset"), painted.notingLook(sunset.command).palette)
+    }
+}

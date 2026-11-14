@@ -35,7 +35,8 @@ object Demo {
     fun home(): SavedHome {
         val devices = listOf(
             LightDevice("demo-floor", "Demo lamp", "Corner glow", room = "Living room", capabilities = caps + sceneList("lightScene", builtIn, 1000), power = true, brightness = 65, rgb = 0xFFB66A, online = true, isDemo = true),
-            LightDevice("demo-strip", "Demo strip", "Behind the sofa", room = "Living room", capabilities = caps + sceneList("lightScene", builtIn, 1000) + sceneList("diyScene", listOf("Party Pulse", "Slow Fade"), 5000) + segments, power = true, brightness = 42, rgb = 0xCA8BFF, online = true, isDemo = true),
+            LightDevice("demo-strip", "Demo strip", "Behind the sofa", room = "Living room", capabilities = caps + sceneList("lightScene", builtIn, 1000) + sceneList("diyScene", listOf("Party Pulse", "Slow Fade"), 5000) + segments, power = true, brightness = 42, rgb = 0xCA8BFF, online = true, isDemo = true,
+                palette = listOf(0xFF5E62, 0xFF5E62, 0xFF7A6B, 0xFF9966, 0xFFB36B, 0xE98AA8, 0xCA8BFF, 0xB07CFF, 0x9A6BFF, 0x8A5CF6, 0x6F7CF7, 0x559CF6, 0x3FA9F5, 0x3FC4E8, 0x3FD9D9)),
             LightDevice("demo-desk", "Demo light bars", "Desk lights", room = "Office", capabilities = caps, power = true, brightness = 80, rgb = 0x89CBD2, online = true, isDemo = true),
             LightDevice("demo-bed", "Demo bulb", "Bedside", room = "Bedroom", capabilities = caps + sceneList("lightScene", builtIn.take(6), 1000), power = false, brightness = 25, rgb = 0xFFC58B, online = true, isDemo = true),
             LightDevice("demo-tv", "Demo TV backlight", "TV backlight", room = "Living room", capabilities = caps + dreamView, power = true, brightness = 70, rgb = 0x7FA8FF, online = true, isDemo = true, dreamView = false),

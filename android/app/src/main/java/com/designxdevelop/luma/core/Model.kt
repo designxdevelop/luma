@@ -64,6 +64,8 @@ data class LightDevice(
     val brightness: Int? = null,
     val rgb: Int? = null,
     val colorTemperature: Int? = null,
+    /** Colors Luma last sent beyond the single reported one (painted segments, a known scene), in strip order. Display only. */
+    val palette: List<Int>? = null,
     val dreamView: Boolean? = null,
     val online: Boolean? = null,
     /** Epoch milliseconds (Android-local storage only). */

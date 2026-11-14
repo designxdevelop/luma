@@ -35,25 +35,6 @@ private func friendlyTitle(for instance: String) -> String {
     }
 }
 
-/// Distinct color/white values a scene uses, for the preview dots on a card.
-private func swatchKeys(for scene: LightScene) -> [Int] {
-    var seen = Set<Int>()
-    var keys: [Int] = []
-    for step in scene.steps {
-        guard let n = step.command.value.number else { continue }
-        let key: Int
-        switch step.command.instance {
-        case "colorRgb": key = Int(n)
-        case "colorTemperatureK": key = -Int(n)
-        default: continue
-        }
-        if seen.insert(key).inserted { keys.append(key) }
-    }
-    return Array(keys.prefix(8))
-}
-
-private func swatchColor(_ key: Int) -> Color { key >= 0 ? Color(rgb: key) : kelvinColor(-key) }
-
 // MARK: - Symbol picker
 
 private struct SymbolGrid: View {
@@ -238,13 +219,13 @@ struct ScenesView: View {
         let total = scene.steps.reduce(0) { $0 + $1.delayMilliseconds }
         var summary = "\(lights) \(lights == 1 ? "light" : "lights") · \(scene.steps.count) \(scene.steps.count == 1 ? "step" : "steps")"
         if total > 0 { summary += " · \(formatSeconds(total))" }
-        let colors = swatchKeys(for: scene).map(swatchColor)
+        let colors = sceneColors(scene)
         return Card(padding: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 // Paper 06: a banner of the scene's own colors, with the icon tile overlapping its bottom edge.
                 LinearGradient(colors: colors.count > 1 ? colors : [colors.first ?? Color.lumaAccent.opacity(0.35), (colors.first ?? Color.lumaAccent).opacity(0.15)],
                                startPoint: .leading, endPoint: .trailing)
-                    .frame(height: 56)
+                    .frame(height: 64)
                     .overlay(alignment: .topTrailing) {
                         Menu { sceneActions(scene) } label: {
                             Image(systemName: "ellipsis").font(.system(size: 14, weight: .bold)).foregroundStyle(.primary)
@@ -256,12 +237,9 @@ struct ScenesView: View {
                         .accessibilityLabel("More actions for \(scene.name)")
                     }
                     .overlay(alignment: .bottomLeading) {
-                        Image(systemName: scene.symbol).font(.system(size: 17)).foregroundStyle(Color.lumaAccent)
-                            .frame(width: 44, height: 44)
-                            .background(Color.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
+                        SceneSwatch(scene: scene, size: 46, glowing: running)
+                            .overlay(RoundedRectangle(cornerRadius: 12.5, style: .continuous).strokeBorder(Color.surface, lineWidth: 2.5))
                             .offset(x: 16, y: 22)
-                            .accessibilityHidden(true)
                     }
                     .zIndex(1)
                 // Title and Run/Stop share a row; at large Dynamic Type the button drops below.
@@ -274,6 +252,9 @@ struct ScenesView: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(running ? Color.lumaAccent : .clear, lineWidth: 1.5))
+        .shadow(color: (colors.first ?? .clear).opacity(running ? 0.45 : 0.16), radius: running ? 20 : 12, y: 5)
+        .animation(.easeInOut(duration: 0.4), value: running)
+        .sensoryFeedback(.impact(weight: .medium), trigger: running)
         .contextMenu { sceneActions(scene) }
     }
 

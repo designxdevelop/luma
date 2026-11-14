@@ -7,6 +7,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -145,8 +146,12 @@ private fun Onboarding(store: HomeStore, modifier: Modifier) {
         verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(Icons.Outlined.WbIncandescent, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.secondary)
-        Text("Welcome to Luma", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+        androidx.compose.foundation.layout.Box(contentAlignment = Alignment.Center) {
+            AmbientGlow(ColorPresets.map { rgbColor(it.second) }.filterIndexed { i, _ -> i % 2 == 0 }, Modifier.fillMaxWidth().height(180.dp))
+            Icon(Icons.Outlined.WbIncandescent, null, tint = Color.White, modifier = Modifier.size(84.dp)
+                .background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(Color(0xFFFFB347), Color(0xFFB95500))), androidx.compose.foundation.shape.RoundedCornerShape(24.dp)).padding(18.dp))
+        }
+        Text("Welcome to Luma", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
         Text("Control your Govee lights by room. The API key is optional: local lights work without one.",
             style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         val uri = LocalUriHandler.current
@@ -203,7 +208,7 @@ private fun SettingsScreen(store: HomeStore, modifier: Modifier) {
     val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(store::importBackup) }
     val time = DateFormat.getTimeInstance(DateFormat.SHORT)
     LazyColumn(modifier.fillMaxSize()) {
-        item { Text("Settings", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 20.dp, top = 20.dp, bottom = 8.dp)) }
+        item { Text("Settings", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 20.dp, top = 20.dp, bottom = 8.dp)) }
         item {
             Section("Connections") {
                 SettingRow("Govee cloud", when { store.demo -> "Not used in the demo home"; store.hasKey -> "Connected · key stored encrypted on this phone"; else -> "Not connected" }) {
