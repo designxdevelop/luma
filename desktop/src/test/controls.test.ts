@@ -271,3 +271,26 @@ test('fresh RGB on an RGB-only model confirms without inventing white telemetry'
   assert.equal(h.device.colorTemperature, undefined);
   h.engine.stop();
 });
+
+test('palette follows what Luma sends', async () => {
+  const { noteLook, scenePalette } = await import('../shared/library');
+  const light = {
+    id: 'a', sku: 'H', name: 'Strip', room: 'r', rgb: 0x111111,
+    capabilities: [
+      { type: 't', instance: 'segmentedColorRgb', parameters: { dataType: 'STRUCT', fields: [
+        { fieldName: 'segment', dataType: 'Array', elementRange: { min: 0, max: 3 } }, { fieldName: 'rgb', dataType: 'INTEGER' }] } },
+      { type: 's', instance: 'lightScene', parameters: { options: [{ name: 'Sunset Glow', value: 1 }, { name: 'Mode 7', value: 2 }] } },
+    ],
+  } as import('../shared/types').LightDevice;
+  noteLook(light, { type: 't', instance: 'segmentedColorRgb', value: { segment: [1, 3], rgb: 0xff0000 } });
+  assert.deepEqual(light.palette, [0x111111, 0xff0000, 0x111111, 0xff0000]);
+  noteLook(light, { type: 'x', instance: 'brightness', value: 40 });
+  assert.ok(light.palette);
+  noteLook(light, { type: 's', instance: 'lightScene', value: 1 });
+  assert.deepEqual(light.palette, scenePalette('sunset'));
+  noteLook(light, { type: 's', instance: 'lightScene', value: 2 });
+  assert.equal(light.palette, undefined);
+  light.palette = [1, 2];
+  noteLook(light, { type: 'c', instance: 'colorRgb', value: 0x0000ff });
+  assert.equal(light.palette, undefined);
+});

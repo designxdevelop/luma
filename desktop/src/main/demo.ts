@@ -38,7 +38,8 @@ export function demoDevices(): LightDevice[] {
   const now = Date.now();
   return [
     { id: 'demo-floor', sku: 'Demo floor lamp', name: 'Corner glow', room: 'Living room', capabilities: basic(), power: true, brightness: 65, rgb: 0xffb66a, colorTemperature: 0, online: true, lastSeen: now, isDemo: true },
-    { id: 'demo-strip', sku: 'Demo strip', name: 'Behind the sofa', room: 'Living room', capabilities: [...basic(), ...effects], power: true, brightness: 42, rgb: 0xca8bff, colorTemperature: 0, online: true, lastSeen: now, isDemo: true },
+    { id: 'demo-strip', sku: 'Demo strip', name: 'Behind the sofa', room: 'Living room', capabilities: [...basic(), ...effects], power: true, brightness: 42, rgb: 0xca8bff, colorTemperature: 0, online: true, lastSeen: now, isDemo: true,
+      palette: [0xff5e62, 0xff5e62, 0xff7a6b, 0xff9966, 0xffb36b, 0xe98aa8, 0xca8bff, 0xb07cff, 0x9a6bff, 0x8a5cf6, 0x6f7cf7, 0x559cf6, 0x3fa9f5, 0x3fc4e8, 0x3fd9d9] },
     { id: 'demo-desk', sku: 'Demo light bars', name: 'Desk lights', room: 'Office', capabilities: [...basic([2700, 6500]), effects[0]!, effects[4]!], power: true, brightness: 80, rgb: 0, colorTemperature: 4500, online: true, lastSeen: now, isDemo: true },
     { id: 'demo-bed', sku: 'Demo bulb', name: 'Bedside', room: 'Bedroom', capabilities: basic([2200, 6500]), power: false, brightness: 25, rgb: 0xffc58b, colorTemperature: 0, online: true, lastSeen: now, isDemo: true },
     { id: 'demo-porch', sku: 'Demo outdoor', name: 'Porch', room: 'Outside', capabilities: basic(), power: false, brightness: 50, rgb: 0xffffff, colorTemperature: 0, online: false, lastSeen: now - 3_600_000, isDemo: true },

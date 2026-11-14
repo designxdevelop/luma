@@ -6,7 +6,7 @@
 // DreamView draft limits. No DOM, Electron or Node.
 
 import type { CapabilityCommand, FloorPlan, JSONValue, LightDevice } from './types';
-import { isLight } from './devices.js';
+import { isLight, segmentSchema } from './devices.js';
 
 export type SceneKind = 'lightScene' | 'diyScene' | 'snapshot';
 export const SCENE_KINDS: SceneKind[] = ['lightScene', 'diyScene', 'snapshot'];
@@ -119,3 +119,52 @@ export const pinOrder = (plan: FloorPlan) => [...plan.pins].sort((a, b) => a.y -
 /** Member capacity per ha-govee-led-ble services.yaml; undefined for models it doesn't list (native DreamViewDraft). */
 export const dreamViewMemberLimit = (sku: string): number | undefined => ({ H6199: 5, H6097: 7, H6099: 7, H66A0: 10 } as Record<string, number>)[sku.toUpperCase()];
 export const DREAMVIEW_APPLY_BLOCKER = "Luma can't send this to your lights yet: it can't read which lights are in the group or their command versions, and a Bluetooth writer would also have to handle the encryption these TV backlights report supporting. Set members in Govee Home.";
+
+// Port of LightLook.swift. Govee reports one color per light, never segment or scene
+// colors, so Luma remembers what it last sent to draw the gradient the light is showing.
+// ponytail: only Luma's own writes update it; clear on telemetry if stale palettes bite.
+
+const SCENE_PALETTES: Array<[string[], number[]]> = [
+  [['sunrise', 'dawn', 'morning'], [0xff7a3d, 0xffb36b, 0xffe2a8]],
+  [['sunset', 'dusk', 'twilight'], [0xff5e62, 0xff9966, 0xb24592]],
+  [['aurora', 'northern'], [0x00e5a0, 0x3fa9f5, 0x8a5cf6]],
+  [['candle', 'fire', 'flame', 'warm', 'cozy'], [0xff4e1f, 0xff8a1f, 0xffc46b]],
+  [['ocean', 'sea', 'wave', 'water', 'rain', 'lake'], [0x0077ff, 0x00c6d7, 0x6fe3e1]],
+  [['forest', 'jungle', 'leaf', 'spring', 'grass', 'nature'], [0x0b6e4f, 0x1fa34a, 0x9be15d]],
+  [['rainbow', 'party', 'disco', 'colorful', 'carnival', 'pulse'], [0xff3b30, 0xffd60a, 0x34c759, 0x0a84ff, 0xaf52de]],
+  [['star', 'night', 'galaxy', 'space', 'universe', 'moon'], [0x1b2a6b, 0x6a5acd, 0xc6b5ff]],
+  [['romantic', 'love', 'rose', 'valentine', 'sakura', 'cherry'], [0xff2d75, 0xff7eb3, 0xb5179e]],
+  [['movie', 'cinema', 'film', 'fade'], [0x3a1c71, 0xd76d77, 0xffaf7b]],
+  [['snow', 'ice', 'winter', 'frost'], [0x5aa9e6, 0xa8e0ff, 0xeaf6ff]],
+  [['christmas', 'xmas'], [0xd62828, 0xf6f1d1, 0x2a9d3f]],
+  [['halloween', 'pumpkin'], [0xff7a00, 0x6a0dad, 0x2b1055]],
+  [['reading', 'work', 'study', 'focus'], [0xffe9c4, 0xfff6e5]],
+];
+
+/** Best-guess colors for a Govee scene from its name; undefined when the name says nothing. */
+export function scenePalette(name: string): number[] | undefined {
+  const n = name.toLowerCase();
+  return SCENE_PALETTES.find(([words]) => words.some((w) => n.includes(w)))?.[1];
+}
+
+/** Updates `palette` for a command Luma sent to this light. */
+export function noteLook(device: LightDevice, command: CapabilityCommand): void {
+  const v = command.value;
+  switch (command.instance) {
+    case 'colorRgb': case 'colorTemperatureK': delete device.palette; break;
+    case 'segmentedColorRgb': {
+      const schema = segmentSchema(device.capabilities.find((c) => c.instance === command.instance));
+      const color = obj(v) && schema ? v[schema.valueField] : undefined;
+      if (!schema || !obj(v) || typeof color !== 'number' || !Array.isArray(v.segment)) return;
+      const painted = new Set(v.segment);
+      const base = device.palette?.length === schema.indexes.length ? device.palette : schema.indexes.map(() => device.rgb ?? 0xffc98f);
+      device.palette = base.map((old, slot) => (painted.has(schema.indexes[slot]!) ? color : old));
+      break;
+    }
+    case 'lightScene': case 'diyScene': case 'snapshot': {
+      const name = sceneOptions(device).find((o) => o.kind === command.instance && same(o.value, v))?.name;
+      const colors = name ? scenePalette(name) : undefined;
+      if (colors) device.palette = colors; else delete device.palette;
+    }
+  }
+}

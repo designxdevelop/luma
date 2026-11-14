@@ -31,6 +31,28 @@ export function orbColor(d: LightDevice): string | undefined {
   return '#ffd9a0';
 }
 
+/** Gradient stops for a lit light: the palette Luma last sent, else its one color fanned into neighbors. */
+export function lookStops(d: LightDevice): string | undefined {
+  const base = orbColor(d);
+  if (!base) return undefined;
+  if (d.palette && d.palette.length > 1) return d.palette.map(hex).join(', ');
+  return fan(base);
+}
+const fan = (c: string) => `oklch(from ${c} l c calc(h - 22)), ${c}, oklch(from ${c} l c calc(h + 22))`;
+
+/** Gradient stops from the colors and whites a scene sets, in step order. */
+export function sceneStops(steps: Array<{ command: CapabilityCommand }>): string | undefined {
+  const colors: string[] = [];
+  for (const { command: c } of steps) {
+    const v = c.value;
+    const color = c.instance === 'colorRgb' && typeof v === 'number' ? hex(v)
+      : c.instance === 'colorTemperatureK' && typeof v === 'number' ? kelvinToHex(v)
+      : c.instance === 'segmentedColorRgb' && isObj(v) && typeof v.rgb === 'number' ? hex(v.rgb) : undefined;
+    if (color && !colors.includes(color)) colors.push(color);
+  }
+  return colors.length > 1 ? colors.slice(0, 8).join(', ') : colors[0] ? fan(colors[0]) : undefined;
+}
+
 export const BASIC_TYPES: Record<string, string> = {
   powerSwitch: 'devices.capabilities.on_off',
   brightness: 'devices.capabilities.range',
