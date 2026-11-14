@@ -61,6 +61,9 @@ public struct LightDevice: Codable, Sendable, Identifiable, Equatable {
     public var brightness: Int?
     public var rgb: Int?
     public var colorTemperature: Int?
+    /// Colors Luma last sent beyond the single reported one (painted segments, a known
+    /// Govee scene), in strip order. Display only; see `noteLook`.
+    public var palette: [Int]?
     /// Last reported `dreamViewToggle` state; nil when the light never reported it.
     public var dreamView: Bool?
     public var online: Bool?

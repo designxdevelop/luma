@@ -64,6 +64,20 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import com.designxdevelop.luma.core.CapabilityCommand
 import com.designxdevelop.luma.core.DreamView
 import com.designxdevelop.luma.core.LightDevice
@@ -85,6 +99,7 @@ fun lightColor(d: LightDevice): Color = d.colorTemperature?.takeIf { it > 0 }?.l
 
 /** Friendly name for a color: nearest preset ("Amber"-style names come from the preset list). */
 fun colorName(d: LightDevice): String {
+    if (d.hasPalette) return "Gradient"
     d.colorTemperature?.takeIf { it > 0 }?.let { return "%,d K".format(it) }
     val rgb = d.rgb ?: return ""
     fun dist(a: Int, b: Int) = listOf(16, 8, 0).sumOf { s -> val x = (a shr s and 255) - (b shr s and 255); x * x }
@@ -108,11 +123,15 @@ fun HomeScreen(store: HomeStore, modifier: Modifier) {
     var moving by remember { mutableStateOf<LightDevice?>(null) }
     val on = store.devices.count { it.isLight && it.power == true }
     var planMode by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
-    LazyColumn(modifier.fillMaxSize()) {
+    // The lights that are on wash the top of the page in their colors.
+    val glow = store.devices.filter { it.isLight && it.isLit }.flatMap { d -> if (d.hasPalette) lookColors(d).filterIndexed { i, _ -> i % 5 == 0 } else listOf(lightColor(d)) }
+    Box(modifier.fillMaxSize()) {
+    AmbientGlow(glow, Modifier.fillMaxWidth().height(380.dp))
+    LazyColumn(Modifier.fillMaxSize()) {
         item {
             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 20.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Home", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Home", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
                     Text(if (store.devices.isEmpty()) "No lights yet" else "$on of ${store.devices.count { it.isLight }} on", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 TextButton(store::allOff, enabled = on > 0) { Text("All off") }
@@ -138,12 +157,15 @@ fun HomeScreen(store: HomeStore, modifier: Modifier) {
             val roomLights = lights.filter { it.isLight }
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(room, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text(room, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    val lit = roomLights.filter { it.isLit }
+                    if (lit.isNotEmpty()) LookStrip(if (lit.size == 1) lookColors(lit[0]) else lit.map(::lightColor), 1f, Modifier.padding(start = 10.dp).width(44.dp), height = 6.dp)
+                    Spacer(Modifier.weight(1f))
                     TextButton({ adjustRoom = room }) { Text("Adjust") }
                     Switch(roomLights.any { it.power == true }, { v -> store.perform(CapabilityCommand.power(v), roomLights.map { it.id }) },
                         Modifier.semantics { contentDescription = "$room power" })
                 }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp), maxItemsInEachRow = 2) {
+                FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp), maxItemsInEachRow = 2) {
                     lights.forEach { d ->
                         LightTile(d, Modifier.weight(1f), onToggle = { store.togglePower(d) }, onOpen = { sheetFor = d.id },
                             onRename = { renaming = d }, onMove = { moving = d })
@@ -153,6 +175,7 @@ fun HomeScreen(store: HomeStore, modifier: Modifier) {
             }
         }
         item { Spacer(Modifier.height(16.dp)) }
+    }
     }
     sheetFor?.let { id -> store.devices.firstOrNull { it.id == id }?.let { LightSheet(store, it, onRename = { renaming = it }, onDismiss = { sheetFor = null }) } }
     adjustRoom?.let { room -> RoomAdjustSheet(store, room) { adjustRoom = null } }
@@ -167,34 +190,54 @@ fun Banner(text: String) {
             .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.12f), RoundedCornerShape(12.dp)).padding(12.dp))
 }
 
+/** A light tinted with its own colors (LightTile in LightsView.swift). Tap switches it; › opens its controls. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LightTile(d: LightDevice, modifier: Modifier, onToggle: () -> Unit, onOpen: () -> Unit, onRename: () -> Unit, onMove: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
-    val lit = d.power == true && d.online != false
-    val tint = lightColor(d)
-    val bg = if (lit) tint else MaterialTheme.colorScheme.surfaceContainer
-    val fg = if (lit) (if (tint.luminance() > 0.45f) Color(0xFF1C1C1E) else Color.White) else MaterialTheme.colorScheme.onSurface
-    Box(modifier) {
-        Card(
-            Modifier.fillMaxWidth().height(104.dp).combinedClickable(onClick = onToggle, onLongClick = { menu = true }, onClickLabel = "Toggle power")
-                .semantics { contentDescription = "${d.displayName}, ${statusLine(d)}" },
-            colors = CardDefaults.cardColors(bg),
-        ) {
-            Row(Modifier.fillMaxSize().padding(start = 14.dp, top = 12.dp, bottom = 12.dp)) {
-                Column(Modifier.weight(1f).fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
-                    Text(d.displayName, color = fg, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Column {
-                        if (d.customName == null && skuLike.matches(d.name)) Text("Name it", color = fg, style = MaterialTheme.typography.labelMedium,
-                            modifier = Modifier.clickable(onClick = onRename).border(1.dp, fg.copy(alpha = 0.5f), CircleShape).padding(horizontal = 10.dp, vertical = 4.dp))
-                        Text(statusLine(d), color = fg.copy(alpha = 0.8f), style = MaterialTheme.typography.bodySmall,
-                            fontWeight = if (d.online == false) FontWeight.SemiBold else null)
+    val lit = d.isLit
+    val colors = lookColors(d)
+    val shape = RoundedCornerShape(20.dp)
+    val surface = MaterialTheme.colorScheme.surfaceContainer
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.95f else 1f, spring(dampingRatio = 0.45f), label = "press")
+    val glow by animateFloatAsState(if (lit) 1f else 0f, label = "lit")
+    val haptics = LocalHapticFeedback.current
+    Box(modifier.graphicsLayer { scaleX = scale; scaleY = scale }) {
+        Column(
+            Modifier.fillMaxWidth().heightIn(min = 148.dp)
+                .shadow(if (lit) 14.dp else 0.dp, shape, ambientColor = colors[colors.size / 2], spotColor = colors[colors.size / 2])
+                .clip(shape).background(surface)
+                .drawBehind {
+                    if (glow > 0f) {
+                        drawRect(Brush.linearGradient(colors), alpha = 0.5f * glow)
+                        // Fades to the card so the name and state stay readable over any color.
+                        drawRect(Brush.verticalGradient(listOf(Color.Transparent, surface.copy(alpha = 0.78f))), alpha = glow)
                     }
                 }
-                IconButton(onOpen, Modifier.align(Alignment.CenterVertically)) {
-                    Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, "Open ${d.displayName} controls", tint = fg)
+                .border(1.dp, if (lit) Brush.linearGradient(colors.map { it.copy(alpha = 0.6f) }) else SolidColor(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)), shape)
+                .combinedClickable(interaction, LocalIndication.current, onClickLabel = "Toggle power", onLongClick = { menu = true }) {
+                    haptics.performHapticFeedback(if (lit) HapticFeedbackType.ToggleOff else HapticFeedbackType.ToggleOn); onToggle()
                 }
+                .semantics { contentDescription = "${d.displayName}, ${statusLine(d)}" }
+                .padding(start = 14.dp, top = 8.dp, bottom = 14.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                LightOrb(d)
+                Spacer(Modifier.weight(1f))
+                IconButton(onOpen) { Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, "Open ${d.displayName} controls") }
             }
+            Spacer(Modifier.weight(1f).heightIn(min = 10.dp))
+            Text(d.displayName, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(end = 14.dp))
+            Row(Modifier.padding(end = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(statusLine(d), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                    color = if (d.online == false) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                if (d.customName == null && skuLike.matches(d.name)) Text("Name it", color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clip(CircleShape).clickable(onClick = onRename).background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.12f)).padding(horizontal = 10.dp, vertical = 4.dp))
+            }
+            // The light itself in miniature: its colors, as long as it is bright.
+            LookStrip(colors, if (lit) (d.brightness ?: 100) / 100f else 0f, Modifier.fillMaxWidth().padding(top = 10.dp, end = 14.dp))
         }
         DropdownMenu(menu, { menu = false }) {
             DropdownMenuItem({ Text("Controls…") }, { menu = false; onOpen() })
@@ -211,9 +254,13 @@ private fun LightSheet(store: HomeStore, d: LightDevice, onRename: (LightDevice)
     var saveLook by remember { mutableStateOf(false) }
     var mode by remember(d.id) { mutableStateOf(if ((d.colorTemperature ?: 0) > 0) 1 else 0) }
     ModalBottomSheet(onDismiss) {
+        Box {
+        // The sheet is lit by the light it controls.
+        AmbientGlow(if (d.isLit) lookColors(d).let { c -> c.filterIndexed { i, _ -> i % maxOf(1, c.size / 5) == 0 } } else emptyList(), Modifier.fillMaxWidth().height(260.dp))
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Row(Modifier.weight(1f).height(48.dp).clickable { onRename(d) }, verticalAlignment = Alignment.CenterVertically) {
+                LightOrb(d, 56.dp)
+                Row(Modifier.weight(1f).padding(start = 10.dp).height(48.dp).clickable { onRename(d) }, verticalAlignment = Alignment.CenterVertically) {
                     Text(d.displayName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Icon(Icons.Outlined.Edit, "Rename", Modifier.padding(start = 8.dp).size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -222,9 +269,10 @@ private fun LightSheet(store: HomeStore, d: LightDevice, onRename: (LightDevice)
             Text("${d.room} · ${statusLine(d)}", color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (d.supports("brightness")) {
                 var b by remember(d.id, d.brightness) { mutableFloatStateOf((d.brightness ?: 50).toFloat()) }
-                Text("Brightness ${b.toInt()}%", style = MaterialTheme.typography.labelLarge)
-                Slider(b, { b = it }, valueRange = 1f..100f, onValueChangeFinished = { store.perform(CapabilityCommand.brightness(b.toInt()), listOf(d.id)) },
-                    modifier = Modifier.height(64.dp).semantics { contentDescription = "Brightness" })
+                GlowBar(b, 1f..100f, lookColors(d), "Brightness", { b = it }, { store.perform(CapabilityCommand.brightness(b.toInt()), listOf(d.id)) }) {
+                    Text("Brightness", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("${b.toInt()}%", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                }
             }
             val color = d.supports("colorRgb")
             val white = d.supports("colorTemperatureK")
@@ -252,6 +300,7 @@ private fun LightSheet(store: HomeStore, d: LightDevice, onRename: (LightDevice)
             }
             OutlinedButton({ saveLook = true }, Modifier.fillMaxWidth().height(48.dp)) { Text("Save this look as a scene") }
         }
+        }
     }
     if (effects) EffectsDialog(store, d) { effects = false }
     if (saveLook) NameDialog("Save this look", "Scene name", "${d.displayName} look", onSave = { store.saveLook(it, listOf(d.id)) }) { saveLook = false }
@@ -267,17 +316,26 @@ fun SettingRowCompact(title: String, detail: String, trailing: @Composable () ->
 
 @Composable
 private fun ColorPicker(d: LightDevice, onPick: (Int) -> Unit) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    val haptics = LocalHapticFeedback.current
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         ColorPresets.forEach { (name, rgb) ->
-            Box(Modifier.size(48.dp).background(rgbColor(rgb), CircleShape)
-                .border(if (d.rgb == rgb && (d.colorTemperature ?: 0) == 0) 3.dp else 0.dp, MaterialTheme.colorScheme.onSurface, CircleShape)
-                .clickable(onClickLabel = name) { onPick(rgb) }.semantics { contentDescription = name })
+            val selected = d.rgb == rgb && (d.colorTemperature ?: 0) == 0
+            val pop by animateFloatAsState(if (selected) 1f else 0f, spring(dampingRatio = 0.5f), label = "swatch")
+            val c = rgbColor(rgb)
+            Box(Modifier.size(48.dp).clickable(onClickLabel = name, indication = null, interactionSource = null) { haptics.performHapticFeedback(HapticFeedbackType.SegmentTick); onPick(rgb) }
+                .semantics { contentDescription = name }
+                .drawBehind {
+                    val r = size.minDimension * (0.32f + 0.05f * pop)
+                    if (pop > 0f) drawCircle(Brush.radialGradient(listOf(c.copy(alpha = 0.7f * pop), Color.Transparent), radius = size.minDimension * 0.75f), size.minDimension * 0.75f)
+                    drawCircle(Brush.radialGradient(listOf(c.hueShifted(-14f), c), center.copy(x = center.x - r * 0.4f, y = center.y - r * 0.5f), r * 1.6f), r)
+                    if (pop > 0f) drawCircle(Color.White, r * 0.28f, alpha = pop)
+                })
         }
     }
     var hue by remember(d.id) { mutableFloatStateOf(0f) }
     Text("Custom hue", style = MaterialTheme.typography.labelLarge)
-    Slider(hue, { hue = it }, valueRange = 0f..359f, onValueChangeFinished = { onPick(android.graphics.Color.HSVToColor(floatArrayOf(hue, 1f, 1f)) and 0xFFFFFF) },
-        modifier = Modifier.semantics { contentDescription = "Hue" })
+    GlowBar(hue, 0f..359f, List(13) { Color(android.graphics.Color.HSVToColor(floatArrayOf(it * 30f, 1f, 1f))) }, "Hue", { hue = it },
+        { onPick(android.graphics.Color.HSVToColor(floatArrayOf(hue, 1f, 1f)) and 0xFFFFFF) }, fill = false)
 }
 
 @Composable
@@ -289,8 +347,8 @@ fun WhitePicker(current: Int?, range: IntRange, onPick: (Int) -> Unit) {
     }
     var k by remember(current) { mutableFloatStateOf((current?.takeIf { it > 0 } ?: 4000).coerceIn(range).toFloat()) }
     Row { Text("Warm", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium); Text("%,d K".format(k.toInt()), style = MaterialTheme.typography.labelMedium); Text("Cool", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, textAlign = androidx.compose.ui.text.style.TextAlign.End) }
-    Slider(k, { k = it }, valueRange = range.first.toFloat()..range.last.toFloat(), onValueChangeFinished = { onPick((k / 100).toInt() * 100) },
-        modifier = Modifier.semantics { contentDescription = "Color temperature" })
+    GlowBar(k, range.first.toFloat()..range.last.toFloat(), List(5) { kelvinColor(range.first + (range.last - range.first) * it / 4) }, "Color temperature",
+        { k = it }, { onPick((k / 100).toInt() * 100) }, fill = false)
 }
 
 @Composable
@@ -331,9 +389,11 @@ private fun RoomAdjustSheet(store: HomeStore, room: String, onDismiss: () -> Uni
             Text("Adjust $room", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
             Text("${lights.size} lights", color = MaterialTheme.colorScheme.onSurfaceVariant)
             var b by remember { mutableFloatStateOf(lights.mapNotNull { it.brightness }.average().takeIf { !it.isNaN() }?.toFloat() ?: 50f) }
-            Text("Brightness ${b.toInt()}%", style = MaterialTheme.typography.labelLarge)
-            Slider(b, { b = it }, valueRange = 1f..100f, onValueChangeFinished = { store.perform(CapabilityCommand.brightness(b.toInt()), lights.filter { it.supports("brightness") }.map { it.id }) },
-                modifier = Modifier.height(64.dp).semantics { contentDescription = "Room brightness" })
+            GlowBar(b, 1f..100f, lights.filter { it.isLit }.map(::lightColor).ifEmpty { listOf(MaterialTheme.colorScheme.secondary) }, "Room brightness", { b = it },
+                { store.perform(CapabilityCommand.brightness(b.toInt()), lights.filter { it.supports("brightness") }.map { it.id }) }) {
+                Text("Brightness", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text("${b.toInt()}%", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            }
             if (lights.any { it.supports("colorTemperatureK") }) {
                 Text("White", style = MaterialTheme.typography.labelLarge)
                 WhitePicker(lights.mapNotNull { it.colorTemperature }.distinct().singleOrNull(), 2000..9000) { store.setKelvin(it, ids) }
@@ -393,6 +453,8 @@ private fun SegmentPainter(store: HomeStore, d: LightDevice, schemas: List<Segme
     if (schemas.size > 1) SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
         schemas.forEachIndexed { i, sc -> SegmentedButton(which == i, { which = i }, SegmentedButtonDefaults.itemShape(i, schemas.size)) { Text(if (sc.isColor) "Color" else "Brightness") } }
     }
+    // The strip as it will look: painted segments over what it shows now.
+    if (schema.isColor) LookStrip(schema.indexes.mapIndexed { slot, i -> paint[i]?.let(::rgbColor) ?: d.palette?.takeIf { it.size == schema.indexes.size }?.let { rgbColor(it[slot]) } ?: lightColor(d) }, 1f, Modifier.fillMaxWidth().padding(vertical = 6.dp), height = 14.dp)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         schema.indexes.forEach { i ->
             val v = paint[i]

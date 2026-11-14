@@ -22,7 +22,7 @@ import { createApiHandler } from '../core/api';
 import { HomeStorage, dreamViewDrafts, emptyHome, type SecretStore } from './storage';
 import { FloorPlanStore } from './floor-plans';
 import { BluetoothController } from './bluetooth';
-import { dreamViewMemberLimit } from '../shared/library';
+import { dreamViewMemberLimit, noteLook } from '../shared/library';
 import { demoDevices, demoEffects, demoReadings, demoScenes } from './demo';
 import { REGIONS } from '../shared/sync-math';
 import { SyncController } from './sync';
@@ -561,7 +561,7 @@ export class Home {
   private async alertWrite(deviceID: string, command: CapabilityCommand): Promise<void> {
     const device = this.findDevice(deviceID);
     validateCommand(command, device);
-    if (device.isDemo) { applyDemo(device, command); this.emit(); return; }
+    if (device.isDemo) { applyDemo(device, command); noteLook(device, command); this.emit(); return; }
     if (this.demo) throw new LumaError('Demo mode never controls real lights.');
     if (device.ip && this.lan?.running && this.lanSeen.has(device.ip) && lanEligible(command)) { await this.lan.control(device.ip, command); return; }
     if (!this.cloud) throw new LumaError('No LAN or cloud route for this light.');

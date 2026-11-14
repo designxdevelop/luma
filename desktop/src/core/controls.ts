@@ -9,6 +9,7 @@
 import { randomUUID } from 'node:crypto';
 import type { CapabilityCommand, ControlPhase, JSONValue, LightDevice, PendingView } from '../shared/types';
 import { LAN_INSTANCES, LumaError, capability, jsonEqual, message, validateCommand } from './model';
+import { noteLook } from '../shared/library';
 
 type Reported = Pick<LightDevice, 'power' | 'brightness' | 'rgb' | 'colorTemperature' | 'online' | 'lastSeen'>;
 
@@ -71,8 +72,8 @@ export function applyCommand(device: LightDevice, command: CapabilityCommand): v
   switch (command.instance) {
     case 'powerSwitch': device.power = n === 1; break;
     case 'brightness': device.brightness = n; break;
-    case 'colorRgb': device.rgb = n; device.colorTemperature = 0; break;
-    case 'colorTemperatureK': device.colorTemperature = n; break;
+    case 'colorRgb': device.rgb = n; device.colorTemperature = 0; delete device.palette; break;
+    case 'colorTemperatureK': device.colorTemperature = n; delete device.palette; break;
   }
 }
 
@@ -242,6 +243,8 @@ export class ControlEngine {
     }
     op.resolve();
     this.deps.log(`${device.name}: ${op.command.instance} · ${result.route}`);
+    // Segment and scene colors can't be read back, so remember what was just accepted.
+    if (!isBasic(op.command.instance)) this.deps.update(op.deviceID, (d) => noteLook(d, op.command));
     if (result.confirmed) {
       this.deps.update(op.deviceID, (d) => applyCommand(d, op.command));
       if (this.pending.get(k)?.opID === op.id) this.clearPending(k);

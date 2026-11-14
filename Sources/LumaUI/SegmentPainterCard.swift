@@ -28,6 +28,12 @@ struct SegmentPainterCard: View {
                             ForEach(schemas, id: \.instance) { Text($0.isColor ? "Color" : "Brightness").tag($0.instance) }
                         }.pickerStyle(.segmented).labelsHidden().fixedSize()
                     }
+                    if schema.isColor {
+                        // The strip as it will look: painted segments over what it shows now.
+                        LookStrip(colors: schema.indexes.enumerated().map { slot, index in
+                            painted(schema)[index].map { Color(rgb: $0) } ?? (device.palette?.count == schema.indexes.count ? Color(rgb: device.palette![slot]) : device.displayColor)
+                        }, height: 14).padding(.vertical, 4)
+                    }
                     grid(schema)
                     HStack(spacing: 8) {
                         Button("Select All") { selected = Set(schema.indexes) }

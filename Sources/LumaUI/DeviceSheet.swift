@@ -34,6 +34,11 @@ struct DeviceSheet: View {
             Group {
                 if let device {
                     ScrollView { main(device).padding(compactSpacing(24, 16)) }
+                        // The sheet is lit by the light it controls.
+                        .background(alignment: .top) {
+                            AmbientGlow(colors: device.isLit ? device.lookColors.enumerated().filter { $0.offset.isMultiple(of: max(1, device.lookColors.count / 5)) }.map(\.element) : [])
+                                .frame(height: 340).ignoresSafeArea(edges: .top)
+                        }
                         .navigationDestination(for: Route.self) { route in
                             ScrollView {
                                 VStack(alignment: .leading, spacing: 16) {
@@ -119,7 +124,7 @@ struct DeviceSheet: View {
 
     private func header(_ device: LightDevice) -> some View {
         HStack(spacing: 14) {
-            LightOrb(device: device, size: 56)
+            LightOrb(device: device, size: 64)
             VStack(alignment: .leading, spacing: 3) {
                 Button { path.append(.name) } label: {
                     HStack(spacing: 6) {
@@ -522,13 +527,17 @@ private struct ColorCard: View {
                         ForEach(Self.presets, id: \.rgb) { preset in
                             let selected = colorActive && device.rgb == preset.rgb
                             Button { store.perform(.rgb(preset.rgb), ids: [device.id]) } label: {
-                                Circle().fill(Color(rgb: preset.rgb)).frame(width: 32, height: 32)
+                                Circle().fill(RadialGradient(colors: [Color(rgb: preset.rgb).hueShifted(-14), Color(rgb: preset.rgb)], center: UnitPoint(x: 0.3, y: 0.25), startRadius: 0, endRadius: 26))
+                                    .frame(width: 32, height: 32)
                                     .overlay(Circle().strokeBorder(Color.primary.opacity(0.12)))
+                                    .shadow(color: Color(rgb: preset.rgb).opacity(selected ? 0.9 : 0), radius: 9)
+                                    .scaleEffect(selected ? 1.08 : 1)
                                     .padding(3)
                                     .overlay(Circle().strokeBorder(selected ? Color.primary : .clear, lineWidth: 2))
                                     .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+                                    .animation(.spring(duration: 0.35, bounce: 0.4), value: selected)
                             }
-                            .buttonStyle(.plain).help(preset.name)
+                            .buttonStyle(TilePressStyle()).help(preset.name)
                             .accessibilityLabel(preset.name).accessibilityAddTraits(selected ? .isSelected : [])
                         }
                     }
@@ -558,6 +567,7 @@ private struct ColorCard: View {
             }
         }
         .onAppear { custom = Color(rgb: device.rgb ?? 0xFFAA66) }
+        .sensoryFeedback(.selection, trigger: device.rgb)
     }
     /// White mode reports a temperature; a zero or missing one means color mode.
     /// Only the person's picks reach here (not onAppear). Picker drags fire continuously; send the color it settles on.

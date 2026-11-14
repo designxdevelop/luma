@@ -55,3 +55,29 @@ struct ParityModulesTests {
         #expect(DeviceReadings.isLight(type: nil) && DeviceReadings.isLight(type: "devices.types.light") && !DeviceReadings.isLight(type: "devices.types.heater"))
     }
 }
+
+struct LightLookTests {
+    @Test func paletteFollowsWhatLumaSends() throws {
+        let segments = Capability(type: "devices.capabilities.segment_color_setting", instance: "segmentedColorRgb", parameters: .object([
+            "dataType": .string("STRUCT"), "fields": .array([
+                .object(["fieldName": .string("segment"), "dataType": .string("Array"), "elementRange": .object(["min": .number(0), "max": .number(3)])]),
+                .object(["fieldName": .string("rgb"), "dataType": .string("INTEGER")])])]))
+        let scenes = Capability(type: "devices.capabilities.dynamic_scene", instance: "lightScene", parameters: .object(["options": .array([
+            .object(["name": .string("Sunset Glow"), "value": .number(1)]), .object(["name": .string("Mode 7"), "value": .number(2)])])]))
+        var light = LightDevice(id: "a", sku: "H", name: "Strip", capabilities: [segments, scenes], rgb: 0x111111)
+        light.noteLook(.init(type: segments.type, instance: "segmentedColorRgb", value: .object(["segment": .array([.number(1), .number(3)]), "rgb": .number(0xFF0000)])))
+        #expect(light.palette == [0x111111, 0xFF0000, 0x111111, 0xFF0000])
+        light.noteLook(.init(type: segments.type, instance: "segmentedColorRgb", value: .object(["segment": .array([.number(0)]), "rgb": .number(0x00FF00)])))
+        #expect(light.palette == [0x00FF00, 0xFF0000, 0x111111, 0xFF0000])
+        light.noteLook(.brightness(40))
+        #expect(light.palette != nil)
+        light.noteLook(.init(type: scenes.type, instance: "lightScene", value: .number(1)))
+        #expect(light.palette == ScenePalette.colors(named: "sunset"))
+        light.noteLook(.init(type: scenes.type, instance: "lightScene", value: .number(2)))
+        #expect(light.palette == nil)
+        light.palette = [1, 2]
+        light.noteLook(.rgb(0x0000FF))
+        #expect(light.palette == nil)
+        #expect(try JSONDecoder().decode(LightDevice.self, from: Data(#"{"id":"a","sku":"H","name":"n","room":"r","capabilities":[],"isDemo":false}"#.utf8)).palette == nil)
+    }
+}

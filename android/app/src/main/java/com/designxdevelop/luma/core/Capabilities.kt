@@ -246,3 +246,44 @@ data class SegmentPaint(val type: String, val instance: String, val indexes: Lis
         private fun int(v: JsonElement?): Int? = v.num?.takeIf { it.isFinite() && round(it) == it && abs(it) <= Int.MAX_VALUE }?.toInt()
     }
 }
+
+// Port of LightLook.swift. Govee reports one color per light, never segment or scene
+// colors, so Luma remembers what it last sent to draw the gradient the light is showing.
+// ponytail: only Luma's own writes update it; clear on telemetry if stale palettes bite.
+
+/** This light with `palette` updated for a command Luma is sending to it. */
+fun LightDevice.notingLook(c: CapabilityCommand): LightDevice = when (c.instance) {
+    "colorRgb", "colorTemperatureK" -> copy(palette = null)
+    "segmentedColorRgb" -> {
+        val schema = SegmentPaint.all(this).firstOrNull { it.instance == c.instance }
+        val color = schema?.let { c.value[it.valueField].num?.toInt() }
+        val painted = c.value["segment"].arr?.mapNotNull { it.num?.toInt() }?.toSet()
+        if (schema == null || color == null || painted == null) this
+        else copy(palette = (palette?.takeIf { it.size == schema.indexes.size } ?: List(schema.indexes.size) { rgb ?: 0xFFC98F })
+            .mapIndexed { slot, old -> if (schema.indexes[slot] in painted) color else old })
+    }
+    "lightScene", "diyScene", "snapshot" ->
+        copy(palette = SceneLibrary.options(this).firstOrNull { it.kind.instance == c.instance && jsonEquals(it.value, c.value) }?.name?.let(ScenePalette::colors))
+    else -> this
+}
+
+/** Best-guess colors for a Govee scene from its name; null when the name says nothing. */
+object ScenePalette {
+    private val table = listOf(
+        listOf("sunrise", "dawn", "morning") to listOf(0xFF7A3D, 0xFFB36B, 0xFFE2A8),
+        listOf("sunset", "dusk", "twilight") to listOf(0xFF5E62, 0xFF9966, 0xB24592),
+        listOf("aurora", "northern") to listOf(0x00E5A0, 0x3FA9F5, 0x8A5CF6),
+        listOf("candle", "fire", "flame", "warm", "cozy") to listOf(0xFF4E1F, 0xFF8A1F, 0xFFC46B),
+        listOf("ocean", "sea", "wave", "water", "rain", "lake") to listOf(0x0077FF, 0x00C6D7, 0x6FE3E1),
+        listOf("forest", "jungle", "leaf", "spring", "grass", "nature") to listOf(0x0B6E4F, 0x1FA34A, 0x9BE15D),
+        listOf("rainbow", "party", "disco", "colorful", "carnival", "pulse") to listOf(0xFF3B30, 0xFFD60A, 0x34C759, 0x0A84FF, 0xAF52DE),
+        listOf("star", "night", "galaxy", "space", "universe", "moon") to listOf(0x1B2A6B, 0x6A5ACD, 0xC6B5FF),
+        listOf("romantic", "love", "rose", "valentine", "sakura", "cherry") to listOf(0xFF2D75, 0xFF7EB3, 0xB5179E),
+        listOf("movie", "cinema", "film", "fade") to listOf(0x3A1C71, 0xD76D77, 0xFFAF7B),
+        listOf("snow", "ice", "winter", "frost") to listOf(0x5AA9E6, 0xA8E0FF, 0xEAF6FF),
+        listOf("christmas", "xmas") to listOf(0xD62828, 0xF6F1D1, 0x2A9D3F),
+        listOf("halloween", "pumpkin") to listOf(0xFF7A00, 0x6A0DAD, 0x2B1055),
+        listOf("reading", "work", "study", "focus") to listOf(0xFFE9C4, 0xFFF6E5),
+    )
+    fun colors(name: String): List<Int>? = name.lowercase().let { n -> table.firstOrNull { (words, _) -> words.any { it in n } }?.second }
+}

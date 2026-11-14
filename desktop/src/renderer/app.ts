@@ -18,7 +18,7 @@ import { bluetoothView, initBluetooth, leaveBluetooth } from './bluetooth-view.j
 import { isLight, paintCommands, segmentSchema, SEGMENT_INSTANCES, type SegmentSchema } from '../shared/devices.js';
 import {
   BASIC, SCENE_ICONS, WEEKDAYS, basicCommand, brightnessRange, capOf, describeCommand, effectCapabilities, esc, friendly, fromHex, hex, icon,
-  isObj, kelvinToHex, nextOccurrence, orbColor, rangeOf, relativeTime, supports, uuid, whiteRange,
+  isObj, kelvinToHex, lookStops, nextOccurrence, orbColor, sceneStops, rangeOf, relativeTime, supports, uuid, whiteRange,
 } from './ui.js';
 
 const luma = (window as unknown as { luma: LumaBridge }).luma;
@@ -90,6 +90,7 @@ function render(): void {
 /** CSP forbids inline style attributes, so colors/fills are applied through CSSOM. */
 function paintVars(root: ParentNode): void {
   root.querySelectorAll<HTMLElement>('[data-color]').forEach((el) => el.style.setProperty('--orb', el.dataset.color || 'transparent'));
+  root.querySelectorAll<HTMLElement>('[data-look]').forEach((el) => { el.style.setProperty('--look', el.dataset.look!); if (el.dataset.level) el.style.setProperty('--level', el.dataset.level); });
   root.querySelectorAll<HTMLInputElement>('input[type=range]').forEach(fill);
 }
 
@@ -126,7 +127,10 @@ function lightsView(s: AppSnapshot): string {
   const lights = s.devices.filter(isLight);
   const on = lights.filter((d) => d.power === true).length;
   const selected = s.devices.find((d) => d.id === state.selected);
+  // The lights that are on wash the top of the page in their colors.
+  const glow = lights.map(orbColor).filter((c): c is string => !!c).slice(0, 8);
   return `
+  ${glow.length ? `<div class="ambient" data-look="${esc(glow.length > 1 ? glow.join(', ') : `${glow[0]}, ${glow[0]}`)}" aria-hidden="true"></div>` : ''}
   <div class="lights-layout ${selected ? 'has-inspector' : ''}">
     <section class="pane" aria-labelledby="lights-title">
       <header class="toolbar">
@@ -276,13 +280,20 @@ function card(s: AppSnapshot, d: LightDevice): string {
   const readings = s.readings[d.id] ?? [];
   const meta = d.online === false ? 'Offline' : !isLight(d) && readings.length ? readings.slice(0, 2).map((r) => r.text).join(' · ') : d.power === undefined ? (isLight(d) ? 'State unknown' : 'No readings yet') : d.power ? (supports(d, 'brightness') ? `${d.brightness ?? '–'}%` : 'On') : 'Off';
   const route = d.isDemo ? 'Demo' : d.ip ? 'LAN' : 'Cloud';
-  return `<article class="card ${state.selected === d.id ? 'selected' : ''} ${d.online === false ? 'offline' : ''}" data-key="${esc(d.id)}">
+  const look = lookStops(d);
+  return `<article class="card ${look ? 'lit' : ''} ${state.selected === d.id ? 'selected' : ''} ${d.online === false ? 'offline' : ''}" data-key="${esc(d.id)}" ${look ? `data-color="${orbColor(d)}" data-look="${esc(look)}" data-level="${d.brightness ?? 100}"` : ''}>
     <button class="card-main" data-action="select" data-id="${esc(d.id)}" aria-pressed="${state.selected === d.id}" aria-label="${esc(d.name)}, ${esc(meta)}${pending ? `, ${pending}` : ''}">
-      <span class="orb" data-color="${orbColor(d) ?? ''}"></span>
+      ${orb(d)}
       <span class="card-text"><span class="name">${esc(d.name)}</span><span class="meta">${esc(meta)} · ${route}${pending ? ` · <em>${pending}</em>` : ''}</span></span>
     </button>
     ${supports(d, 'powerSwitch') ? `<input type="checkbox" role="switch" class="switch" data-action="power" data-id="${esc(d.id)}" aria-label="${esc(d.name)} power" ${d.power ? 'checked' : ''}>` : ''}
   </article>`;
+}
+
+/** A light's orb; one with a palette shows all its colors and turns slowly. */
+function orb(d: LightDevice, size = ''): string {
+  const multi = orbColor(d) && d.palette && d.palette.length > 1;
+  return `<span class="orb ${size} ${multi ? 'multi' : ''}" data-color="${orbColor(d) ?? ''}" ${multi ? `data-look="${esc(lookStops(d)!)}"` : ''}></span>`;
 }
 
 function slider(key: string, label: string, value: number, [min, max]: [number, number], unit: string, extra = ''): string {
@@ -295,9 +306,10 @@ function slider(key: string, label: string, value: number, [min, max]: [number, 
 
 function inspector(s: AppSnapshot, d: LightDevice): string {
   const tabs: Array<[Tab, string]> = [['light', 'Light'], ['effects', 'Effects'], ['details', 'Details']];
-  return `<aside class="inspector" aria-label="${esc(d.name)} inspector">
+  const look = lookStops(d);
+  return `<aside class="inspector ${look ? 'lit' : ''}" aria-label="${esc(d.name)} inspector" ${look ? `data-color="${orbColor(d)}" data-look="${esc(look)}"` : ''}>
     <header class="inspector-head">
-      <span class="orb large" data-color="${orbColor(d) ?? ''}"></span>
+      ${orb(d, 'large')}
       <div><h2>${esc(d.name)}</h2><p class="sub">${esc(d.room)} · ${esc(d.sku)}${pendingLabel(s, d.id) ? ` · <em>${pendingLabel(s, d.id)}</em>` : ''}</p></div>
       <button class="ghost close" data-action="deselect" aria-label="Close inspector">${icon('close')}</button>
     </header>
@@ -317,7 +329,7 @@ function lightTab(d: LightDevice): string {
     ${readingsList(state.snap!, d)}
     ${dreamViewBlock(state.snap!, d)}
     ${supports(d, 'powerSwitch') ? `<div class="row"><label for="pw-${esc(d.id)}">Power</label><input id="pw-${esc(d.id)}" type="checkbox" role="switch" class="switch" data-action="power" data-id="${esc(d.id)}" ${d.power ? 'checked' : ''}></div>` : ''}
-    ${supports(d, 'brightness') ? slider(`${d.id}|brightness`, 'Brightness', d.brightness ?? 50, brightnessRange(d), '%') : ''}
+    ${supports(d, 'brightness') ? slider(`${d.id}|brightness`, 'Brightness', d.brightness ?? 50, brightnessRange(d), '%', 'look') : ''}
     ${hasColor || hasWhite ? `<div class="segmented" role="radiogroup" aria-label="Color mode">
         ${hasColor ? `<button role="radio" aria-checked="${mode === 'color'}" data-action="mode" data-id="${esc(d.id)}" data-mode="color">Color</button>` : ''}
         ${hasWhite ? `<button role="radio" aria-checked="${mode === 'white'}" data-action="mode" data-id="${esc(d.id)}" data-mode="white">White</button>` : ''}
@@ -471,7 +483,7 @@ function scenesView(s: AppSnapshot): string {
     </header>
     ${s.scenes.length === 0 ? '<div class="empty"><h2>No scenes yet</h2><p>Set your lights the way you like, then choose Capture current lights.</p></div>' : ''}
     <div class="scene-grid">${s.scenes.map((scene) => `<article class="scene-card ${s.runningSceneID === scene.id ? 'running' : ''}" data-key="${esc(scene.id)}">
-      <span class="scene-icon">${icon(scene.icon)}</span>
+      <span class="scene-icon ${sceneStops(scene.steps) ? 'lit' : ''}" ${sceneStops(scene.steps) ? `data-look="${esc(sceneStops(scene.steps)!)}"` : ''}>${icon(scene.icon)}</span>
       <div class="scene-text"><h2>${esc(scene.name)}</h2><p class="sub">${scene.steps.length} step${scene.steps.length === 1 ? '' : 's'}${s.runningSceneID === scene.id ? ' · Running…' : ''}</p></div>
       <div class="actions">
         <button class="primary" data-action="run-scene" data-id="${esc(scene.id)}" ${s.runningSceneID ? 'disabled' : ''} aria-label="Run ${esc(scene.name)}">${icon('play')}Run</button>

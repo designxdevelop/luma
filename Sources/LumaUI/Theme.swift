@@ -137,6 +137,92 @@ func rgbValue(of color: Color) -> Int? {
     return (Int((r * 255).rounded()) << 16) | (Int((g * 255).rounded()) << 8) | Int((b * 255).rounded())
 }
 
+// MARK: - Glow
+
+extension Color {
+    /// The same color with its hue turned, so one light color can still form a gradient.
+    func hueShifted(_ degrees: Double) -> Color {
+        guard let rgb = rgbValue(of: self) else { return self }
+        let r = Double((rgb >> 16) & 255) / 255, g = Double((rgb >> 8) & 255) / 255, b = Double(rgb & 255) / 255
+        let hi = max(r, g, b), delta = hi - min(r, g, b)
+        guard delta > 0 else { return self }
+        let hue = (hi == r ? (g - b) / delta : hi == g ? 2 + (b - r) / delta : 4 + (r - g) / delta) * 60 + degrees
+        return Color(hue: (hue.truncatingRemainder(dividingBy: 360) + 360).truncatingRemainder(dividingBy: 360) / 360, saturation: delta / hi, brightness: hi)
+    }
+}
+
+extension LightDevice {
+    var isLit: Bool { power == true && online != false }
+    var hasPalette: Bool { (palette?.count ?? 0) > 1 }
+    /// What to draw the light with: the palette Luma last sent (segments, a known scene),
+    /// else its one color fanned into neighbors so it reads as light, not a flat fill.
+    var lookColors: [Color] {
+        if let palette, hasPalette { return palette.map { Color(rgb: $0) } }
+        let color = displayColor
+        return [color.hueShifted(-22), color, color.hueShifted(22)]
+    }
+}
+
+/// Distinct colors and whites a scene sets, in step order, for its swatch.
+func sceneColors(_ scene: LightScene) -> [Color] {
+    var seen = Set<Int>(), colors: [Color] = []
+    for step in scene.steps {
+        let value = step.command.value
+        let key: Int? = switch step.command.instance {
+        case "colorRgb": value.number.map { Int($0) }
+        case "colorTemperatureK": value.number.map { -Int($0) }
+        case "segmentedColorRgb": value["rgb"]?.number.map { Int($0) }
+        default: nil
+        }
+        if let key, seen.insert(key).inserted { colors.append(key >= 0 ? Color(rgb: key) : kelvinColor(-key)) }
+    }
+    return Array(colors.prefix(8))
+}
+
+/// A glowing bar of a light's colors; `fraction` is how much of it is lit (brightness).
+struct LookStrip: View {
+    let colors: [Color]
+    var fraction: Double = 1
+    var height: CGFloat = 5
+    var body: some View {
+        let gradient = LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing)
+        Capsule().fill(Color.primary.opacity(0.08)).frame(height: height)
+            .overlay {
+                GeometryReader { proxy in
+                    Capsule().fill(gradient)
+                        .background(Capsule().fill(gradient).blur(radius: height * 1.6).opacity(0.85))
+                        .frame(width: max(height, proxy.size.width * min(max(fraction, 0), 1)))
+                        .opacity(fraction > 0 ? 1 : 0)
+                }
+            }
+            .animation(.spring(duration: 0.45), value: fraction)
+            .accessibilityHidden(true)
+    }
+}
+
+/// Soft light from the given colors, fading downward: the room's glow behind a page.
+struct AmbientGlow: View {
+    let colors: [Color]
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        let colors = Array(colors.prefix(6))
+        GeometryReader { proxy in
+            let w = proxy.size.width, h = proxy.size.height
+            ZStack {
+                ForEach(Array(colors.enumerated()), id: \.offset) { i, color in
+                    Ellipse().fill(color).frame(width: max(w / Double(colors.count), w * 0.45), height: h * 0.7)
+                        .position(x: w * (Double(i) + 0.5) / Double(colors.count), y: i.isMultiple(of: 2) ? h * 0.05 : h * 0.3)
+                }
+            }
+            .blur(radius: 70)
+        }
+        .opacity(scheme == .dark ? 0.42 : 0.3)
+        .mask(LinearGradient(colors: [.black, .black.opacity(0)], startPoint: .top, endPoint: .bottom))
+        .animation(.easeInOut(duration: 0.8), value: colors)
+        .allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+
 // MARK: - Shared views
 
 /// Standard grouped surface. Use for every top-level block on a page.
@@ -229,25 +315,41 @@ struct StatusPill: View {
     }
 }
 
-/// A glowing disc showing a light's current color, dimmed when it is off.
+/// A glowing disc of a light's colors, dimmed when it is off. A light with a
+/// palette (painted segments, a scene) turns slowly, the way those effects move.
 struct LightOrb: View {
     let device: LightDevice
     var size: CGFloat = 44
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var spin = false
     var body: some View {
-        let on = device.power == true && device.online != false
-        let color = device.displayColor
+        let on = device.isLit
+        let colors = device.lookColors
+        let ring = AngularGradient(colors: colors + [colors[0]], center: .center)
+        let turns = on && device.hasPalette && !reduceMotion
         ZStack {
-            Circle().fill(on ? color.opacity(0.22) : Color.primary.opacity(0.06))
-            Circle().fill(on ? AnyShapeStyle(RadialGradient(colors: [color, color.opacity(0.75)], center: .center, startRadius: 0, endRadius: size * 0.36)) : AnyShapeStyle(Color.primary.opacity(0.08)))
-                .padding(size * 0.2)
-                .shadow(color: on ? color.opacity(0.6) : .clear, radius: size * 0.18)
+            if on {
+                Group {
+                    Circle().fill(ring).blur(radius: size * 0.2).opacity(0.8)
+                    Circle().fill(ring).padding(size * 0.14)
+                }
+                .rotationEffect(.degrees(spin ? 360 : 0))
+                .animation(spin ? .linear(duration: 18).repeatForever(autoreverses: false) : nil, value: spin)
+                Circle().fill(RadialGradient(colors: [.white.opacity(0.6), .white.opacity(0)], center: UnitPoint(x: 0.34, y: 0.28), startRadius: 0, endRadius: size * 0.36))
+                    .padding(size * 0.14)
+            } else {
+                Circle().fill(Color.primary.opacity(0.08)).padding(size * 0.14)
+            }
             Image(systemName: device.symbol).font(.system(size: size * 0.3, weight: .semibold))
-                .foregroundStyle(on ? Color.black.opacity(0.55) : Color.secondary)
+                .foregroundStyle(on ? Color.white : Color.secondary)
+                .shadow(color: .black.opacity(on ? 0.35 : 0), radius: 1.5, y: 0.5)
         }
         .frame(width: size, height: size)
         .opacity(device.online == false ? 0.5 : 1)
-        .animation(.easeOut(duration: 0.25), value: on)
-        .animation(.easeOut(duration: 0.25), value: device.rgb)
+        .animation(.easeOut(duration: 0.3), value: on)
+        .animation(.easeOut(duration: 0.3), value: device.rgb)
+        .animation(.easeOut(duration: 0.3), value: device.palette)
+        .task(id: turns) { spin = turns }
         .accessibilityHidden(true)
     }
 }
@@ -325,18 +427,25 @@ struct BrightnessBar: View {
             let fill = proxy.size.width * CGFloat(value) / 100
             ZStack(alignment: .leading) {
                 Color.well
-                LinearGradient(colors: [device.displayColor.opacity(0.35), device.displayColor.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                LinearGradient(colors: device.lookColors, startPoint: .leading, endPoint: .trailing)
+                    .opacity(device.isLit ? 0.8 : 0.3)
                     .frame(width: fill)
+                    .overlay(alignment: .trailing) {
+                        // The lit edge: where a finger would grab.
+                        Capsule().fill(.white.opacity(0.9)).frame(width: 3).padding(.vertical, height * 0.24).padding(.trailing, 6)
+                            .shadow(color: .white.opacity(0.8), radius: 4).opacity(fill > 20 ? 1 : 0)
+                    }
                 HStack(spacing: 10) {
                     Image(systemName: "sun.max").font(.system(size: 16, weight: .medium))
                     Text("Brightness").font(.system(size: 16, weight: .semibold))
                     Spacer()
                     Text(device.brightness == nil && draft == nil ? "—" : "\(value)%").font(.system(size: 22, weight: .bold)).monospacedDigit()
                 }
-                .foregroundStyle(.primary).padding(.horizontal, 18)
+                .foregroundStyle(.primary).shadow(color: Color.canvas.opacity(0.55), radius: 2).padding(.horizontal, 18)
             }
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.hairline))
+            .shadow(color: device.isLit ? device.displayColor.opacity(0.3 * Double(value) / 100) : .clear, radius: 16, y: 5)
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { draft = brightnessPercent(atX: $0.location.x, width: proxy.size.width) }
@@ -452,7 +561,7 @@ extension LightDevice {
     var lookDescription: String {
         if online == false { return "Offline" }
         guard power != false else { return "Off" }
-        let look: String? = if let k = colorTemperature, k > 0 { whiteName(k) } else { rgb.map(colorName) }
+        let look: String? = if hasPalette { "Gradient" } else if let k = colorTemperature, k > 0 { whiteName(k) } else { rgb.map(colorName) }
         return [look, brightness.map { "\($0)%" }].compactMap { $0 }.joined(separator: " · ")
     }
 }

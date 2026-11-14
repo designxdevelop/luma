@@ -90,9 +90,10 @@ fun ScenesScreen(store: HomeStore, modifier: Modifier) {
             items(store.home.scenes, key = { it.id }) { scene ->
                 val running = store.runningSceneID == scene.id
                 Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainer)) {
-                    Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(scene.name, style = MaterialTheme.typography.titleMedium)
+                    Row(Modifier.padding(start = 14.dp, end = 8.dp, top = 14.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        SceneSwatch(scene, glowing = running)
+                        Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                            Text(scene.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                             val lights = scene.steps.map { it.deviceID }.distinct().mapNotNull { id -> store.devices.firstOrNull { it.id == id }?.displayName }
                             Text(if (running) "Running…" else lights.joinToString(", ").ifEmpty { "${scene.steps.size} steps" },
                                 style = MaterialTheme.typography.bodySmall, color = if (running) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
@@ -117,7 +118,7 @@ fun ScenesScreen(store: HomeStore, modifier: Modifier) {
 @Composable
 fun Header(title: String, subtitle: String) {
     Column(Modifier.padding(start = 20.dp, top = 20.dp, bottom = 8.dp)) {
-        Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+        Text(title, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
         Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

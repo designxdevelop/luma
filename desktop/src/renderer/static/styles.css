@@ -325,3 +325,34 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .dv-areas .chip { padding: 1px 7px; min-height: 22px; }
 .dv-partners summary { cursor: pointer; font-weight: 600; }
 .brand-icon { width: 28px; height: 28px; border-radius: 7px; }
+
+/* ---------- glow: lights drawn in their own colors (Theme.swift) ---------- */
+.content { position: relative; }
+.ambient { position: absolute; inset: 0 0 auto 0; height: 320px; pointer-events: none; background: linear-gradient(to right, var(--look)); filter: blur(70px); opacity: 0.28; mask-image: linear-gradient(to bottom, #000, transparent); transition: opacity 600ms ease; }
+.lights-layout { position: relative; }
+.card { position: relative; padding-bottom: 14px; transition: border-color 120ms ease, box-shadow 300ms ease, transform 160ms cubic-bezier(.3, 1.6, .5, 1); }
+.card:active { transform: scale(0.97); }
+.card.lit {
+  border-color: color-mix(in srgb, var(--orb) 55%, var(--line));
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--surface) 45%, transparent), color-mix(in srgb, var(--surface) 82%, transparent)), linear-gradient(135deg, var(--look));
+  box-shadow: 0 8px 24px -8px color-mix(in srgb, var(--orb) 65%, transparent);
+}
+.card.lit.selected { box-shadow: 0 0 0 1px var(--accent), 0 8px 24px -8px color-mix(in srgb, var(--orb) 65%, transparent); }
+/* The light in miniature: its colors, as long as it is bright. */
+.card::after { content: ""; position: absolute; left: 12px; bottom: 6px; height: 4px; border-radius: 2px; width: calc(100% - 24px); background: color-mix(in srgb, var(--text) 8%, transparent); }
+.card.lit::after { width: calc((100% - 24px) * var(--level, 100) / 100); min-width: 4px; background: linear-gradient(to right, var(--look)); box-shadow: 0 0 10px color-mix(in srgb, var(--orb) 80%, transparent); transition: width 400ms cubic-bezier(.3, 1.3, .5, 1); }
+.orb.multi { position: relative; overflow: hidden; background: none; box-shadow: 0 0 20px -2px color-mix(in srgb, var(--orb, transparent) 80%, transparent); }
+.orb.multi::before { content: ""; position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(var(--look)); animation: orb-turn 18s linear infinite; }
+.orb.multi::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: radial-gradient(circle at 34% 28%, rgb(255 255 255 / 60%), transparent 55%); }
+@keyframes orb-turn { to { transform: rotate(360deg); } }
+.inspector.lit { background: radial-gradient(140% 180px at 20% 0, color-mix(in srgb, var(--orb) 26%, transparent), transparent), var(--surface); }
+.inspector.lit input.slider.look::-webkit-slider-runnable-track {
+  height: 12px; border-radius: 6px; border-color: transparent;
+  background: linear-gradient(to right, transparent 0 var(--fill, 50%), var(--surface-2) var(--fill, 50%) 100%), linear-gradient(to right, var(--look));
+  box-shadow: 0 2px 12px -2px color-mix(in srgb, var(--orb) 60%, transparent);
+}
+.inspector.lit input.slider.look::-webkit-slider-thumb { margin-top: -4px; }
+.swatch.on .orb { box-shadow: 0 0 12px var(--orb); }
+.scene-icon.lit { background: linear-gradient(135deg, var(--look)); color: #fff; box-shadow: 0 6px 16px -6px rgb(0 0 0 / 35%); }
+.scene-icon.lit .icon { filter: drop-shadow(0 1px 1px rgb(0 0 0 / 35%)); }
+.scene-card.running .scene-icon.lit { box-shadow: 0 0 18px 2px color-mix(in srgb, var(--accent-strong) 60%, transparent); }

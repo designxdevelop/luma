@@ -37,6 +37,8 @@ export interface LightDevice {
   rgb?: number;
   /** 0 means the light is in RGB mode. */
   colorTemperature?: number;
+  /** Colors Luma last sent beyond the single reported one (painted segments, a known scene), in strip order. Display only. */
+  palette?: number[];
   online?: boolean;
   /** Last reported cloud `dreamViewToggle` (1 = DreamView sync running). Never persisted. */
   dreamView?: boolean;
